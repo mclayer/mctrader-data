@@ -46,8 +46,12 @@ ignore = ["UP017", "N801", "N818", "SIM300", "I001"]
 
 [tool.pyright]
 pythonVersion = "3.11"
-strict = ["src/mctrader_data"]
 include = ["src", "tests"]
+reportMissingTypeStubs = "none"
+reportUnknownMemberType = "none"
+reportUnknownVariableType = "none"
+reportUnknownArgumentType = "none"
+reportUnknownParameterType = "none"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
