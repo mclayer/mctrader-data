@@ -110,7 +110,7 @@ def scan_candles(
     Returns an iterable of ``CandleModel`` (Pydantic v2 boundary).
     Sorted ASC by ``ts_utc``.
     """
-    base_glob = to_duckdb_glob(
+    base_dir = (
         root
         / "market"
         / "ohlcv"
@@ -118,6 +118,11 @@ def scan_candles(
         / f"exchange={exchange}"
         / f"symbol={symbol}"
         / f"timeframe={timeframe.value}"
+    )
+    if not base_dir.exists():
+        return
+    base_glob = to_duckdb_glob(
+        base_dir
         / "**"
         / "*.parquet"
     )
