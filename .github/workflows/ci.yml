@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  ci:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Lint (ruff)
+        if: matrix.os == 'ubuntu-latest'
+        run: uv run ruff check src tests
+
+      - name: Type check (pyright)
+        if: matrix.os == 'ubuntu-latest'
+        run: uv run pyright
+
+      - name: Test
+        run: uv run pytest --cov=mctrader_data --cov-report=xml --cov-report=term
+
+      - name: Coverage gate (60%)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          uv run python -c "
+          import xml.etree.ElementTree as ET
+          tree = ET.parse('coverage.xml')
+          rate = float(tree.getroot().attrib['line-rate'])
+          pct = rate * 100
+          print(f'Coverage: {pct:.1f}%')
+          assert pct >= 60.0, f'Coverage {pct:.1f}% < 60% baseline (ADR-011)'
+          "

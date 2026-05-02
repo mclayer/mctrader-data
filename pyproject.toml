@@ -1,0 +1,50 @@
+[project]
+name = "mctrader-data"
+version = "0.1.0"
+description = "OHLCV collector + Parquet/DuckDB (ADR-009 v1 schema) - mctrader platform"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+license = { text = "MIT" }
+authors = [{ name = "mccho8865", email = "mccho8865@gmail.com" }]
+dependencies = [
+    "mctrader-market @ git+https://github.com/mclayer/mctrader-market.git@main",
+    "pydantic>=2,<3",
+    "duckdb>=1,<2",
+    "pyarrow>=17",
+    "click>=8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+    "pyright>=1.1",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+mctrader-data = "mctrader_data.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mctrader_data"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM"]
+ignore = ["UP017", "N801", "SIM300"]
+
+[tool.pyright]
+pythonVersion = "3.11"
+strict = ["src/mctrader_data"]
+include = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --strict-markers"
