@@ -5,10 +5,13 @@ from __future__ import annotations
 import os
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from mctrader_market.types import Symbol, Timeframe
 
 from mctrader_data.schema import SCHEMA_VERSION
+
+Mode = Literal["historical", "paper"]
 
 
 def resolve_data_root(*, root_override: Path | None = None) -> Path:
@@ -32,20 +35,22 @@ def derive_partition_path(
     symbol: Symbol,
     timeframe: Timeframe,
     ts_utc: datetime,
+    mode: Mode | None = None,
 ) -> Path:
     """Build the ADR-009 D2 Hive partition directory.
 
-    Layout:
-        ``{root}/market/ohlcv/schema_version=ohlcv.v1/exchange={ex}/symbol={sym}/
-        timeframe={tf}/year={Y}/month={M}/date={D}/``
+    Default (``mode=None``) keeps the 0.1.0 layout for backward compatibility:
+    ``{root}/market/ohlcv/schema_version=ohlcv.v1/exchange/symbol/timeframe/year/month/date``
 
-    The ``date`` segment uses the UTC date (KST 1d boundary handled at aggregation).
+    With ``mode`` set (``"historical"`` or ``"paper"``), inserts ``mode={mode}`` between
+    ``schema_version`` and ``exchange`` per MCT-20 design (no-mode partitions remain
+    historical legacy on read).
     """
+    base = root / "market" / "ohlcv" / f"schema_version={SCHEMA_VERSION}"
+    if mode is not None:
+        base = base / f"mode={mode}"
     return (
-        root
-        / "market"
-        / "ohlcv"
-        / f"schema_version={SCHEMA_VERSION}"
+        base
         / f"exchange={exchange}"
         / f"symbol={symbol}"
         / f"timeframe={timeframe.value}"

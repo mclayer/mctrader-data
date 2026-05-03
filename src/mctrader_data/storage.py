@@ -1,4 +1,10 @@
-"""Parquet/DuckDB write + read for ADR-009 v1 OHLCV schema."""
+"""Parquet/DuckDB write + read for ADR-009 v1 OHLCV schema.
+
+MCT-20 extension:
+- ``scan_candles(..., mode=...)`` filter (``"historical"`` default = legacy no-mode +
+  ``mode=historical/`` partitions, ``"paper"`` = ``mode=paper/`` only).
+- See :mod:`mctrader_data.paper_storage` for paper-mode writes.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +12,7 @@ from collections.abc import Iterable, Sequence
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import duckdb
 import pyarrow as pa
@@ -15,8 +21,10 @@ import pyarrow.parquet as pq
 from mctrader_market.candle import CandleLike, CandleModel
 from mctrader_market.types import Symbol, Timeframe
 
-from mctrader_data.path import derive_partition_path, to_duckdb_glob
+from mctrader_data.path import Mode, derive_partition_path, to_duckdb_glob
 from mctrader_data.schema import SCHEMA_VERSION
+
+ScanMode = Literal["historical", "paper"]
 
 
 def _candles_to_arrow(candles: Sequence[CandleLike]) -> pa.Table:
@@ -72,12 +80,17 @@ def write_candles(
     *,
     root: Path,
     snapshot_id: str,
+    mode: Mode | None = None,
 ) -> Path:
     """Write a batch of candles as a single Parquet file under the canonical Hive partition.
 
     All candles MUST share ``(exchange, symbol, timeframe)``.
     The partition date is derived from the first candle's ``ts_utc.day``.
     Returns the partition directory path.
+
+    ``mode`` is forwarded to :func:`derive_partition_path`. The default keeps the legacy
+    no-mode layout for backward compatibility; paper writers should call
+    :func:`mctrader_data.paper_storage.write_paper_candles`.
     """
     if not candles:
         raise ValueError("write_candles: empty candles batch")
@@ -88,12 +101,46 @@ def write_candles(
         symbol=head.symbol,
         timeframe=head.timeframe,
         ts_utc=head.ts_utc,
+        mode=mode,
     )
     partition.mkdir(parents=True, exist_ok=True)
     table = _candles_to_arrow(candles)
     target = partition / f"part-{snapshot_id}.parquet"
     pq.write_table(table, target, compression="snappy")
     return partition
+
+
+def _resolve_scan_paths(
+    *,
+    root: Path,
+    exchange: str,
+    symbol: Symbol,
+    timeframe: Timeframe,
+    modes: Sequence[ScanMode],
+) -> list[str]:
+    """Return DuckDB-friendly glob strings for the requested ``modes``.
+
+    For ``historical``, both legacy no-mode and ``mode=historical/`` partitions are
+    returned so existing 0.1.0 datasets remain readable.
+    """
+    schema_root = root / "market" / "ohlcv" / f"schema_version={SCHEMA_VERSION}"
+    relative_tail = (
+        f"exchange={exchange}/symbol={symbol}/timeframe={timeframe.value}/**/*.parquet"
+    )
+    candidates: list[Path] = []
+    for mode in modes:
+        if mode == "historical":
+            candidates.append(schema_root)  # legacy no-mode
+            candidates.append(schema_root / "mode=historical")
+        elif mode == "paper":
+            candidates.append(schema_root / "mode=paper")
+    globs: list[str] = []
+    for base in candidates:
+        if not base.exists():
+            continue
+        full = base / relative_tail
+        globs.append(to_duckdb_glob(full))
+    return globs
 
 
 def scan_candles(
@@ -104,28 +151,37 @@ def scan_candles(
     start: datetime,
     end: datetime,
     root: Path,
+    mode: ScanMode | Sequence[ScanMode] = "historical",
 ) -> Iterable[CandleModel]:
     """Read candles for ``[start, end)`` half-open interval.
 
-    Returns an iterable of ``CandleModel`` (Pydantic v2 boundary).
-    Sorted ASC by ``ts_utc``.
+    ``mode`` semantics:
+
+    - ``"historical"`` (default) — read legacy no-mode partitions and ``mode=historical/``.
+    - ``"paper"`` — read only ``mode=paper/`` partitions.
+    - ``["historical", "paper"]`` — read both explicitly.
+
+    Returns an iterable of :class:`CandleModel` sorted ASC by ``ts_utc``.
     """
-    base_dir = (
-        root
-        / "market"
-        / "ohlcv"
-        / f"schema_version={SCHEMA_VERSION}"
-        / f"exchange={exchange}"
-        / f"symbol={symbol}"
-        / f"timeframe={timeframe.value}"
+    if isinstance(mode, str):
+        modes: tuple[ScanMode, ...] = (mode,)
+    else:
+        modes = tuple(mode)
+
+    globs = _resolve_scan_paths(
+        root=root,
+        exchange=exchange,
+        symbol=symbol,
+        timeframe=timeframe,
+        modes=modes,
     )
-    if not base_dir.exists():
+    if not globs:
         return
-    base_glob = to_duckdb_glob(
-        base_dir
-        / "**"
-        / "*.parquet"
+
+    union_select = " UNION ALL BY NAME ".join(
+        f"SELECT * FROM read_parquet('{g}', hive_partitioning=true)" for g in globs
     )
+
     con = duckdb.connect(":memory:", read_only=False)
     try:
         rel = con.sql(
@@ -135,7 +191,7 @@ def scan_candles(
                    low::VARCHAR AS low, close::VARCHAR AS close,
                    volume::VARCHAR AS volume,
                    value::VARCHAR AS value
-            FROM read_parquet('{base_glob}', hive_partitioning=true)
+            FROM ({union_select}) AS combined
             WHERE ts_utc >= ? AND ts_utc < ?
             ORDER BY ts_utc ASC
             """,
