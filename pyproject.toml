@@ -1,7 +1,7 @@
 [project]
 name = "mctrader-data"
-version = "0.4.1"
-description = "OHLCV + Tick + Orderbook collector + Parquet/DuckDB (ADR-009 v1 + v1 amendments) - mctrader platform"
+version = "0.5.0"
+description = "OHLCV + Tick + Orderbook collector + reconstruction + Parquet/DuckDB - mctrader platform"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 license = { text = "MIT" }

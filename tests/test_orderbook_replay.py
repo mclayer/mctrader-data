@@ -1,0 +1,229 @@
+"""Tests for orderbook_replay (MCT-66) — scan + reconstruction + coverage."""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+
+from mctrader_data.orderbook_replay import (
+    CoverageReport,
+    GapDetectedError,
+    OrderbookSnapshot,
+    ReconstructionError,
+    get_orderbook_at,
+    scan_orderbook_events,
+    scan_ticks,
+    tier_coverage,
+)
+from mctrader_data.orderbook_storage import OrderbookEventRecord, OrderbookWriter
+from mctrader_data.tick_storage import TickRecord, TickWriter
+
+
+def _ts(seconds: int = 0) -> datetime:
+    return datetime(2026, 5, 4, 0, 0, 0, tzinfo=timezone.utc) + timedelta(seconds=seconds)
+
+
+def _tick(seconds: int, side: str = "buy", price: str = "100000000") -> TickRecord:
+    return TickRecord(
+        ts_utc=_ts(seconds), received_at=_ts(seconds),
+        exchange="bithumb", symbol="KRW-BTC",
+        price=Decimal(price), quantity=Decimal("0.01"),
+        side=side, raw_json=None,
+    )
+
+
+def _ob_snapshot_event(level: int, side: str, price: str, qty: str = "0.05", *, sec: int = 0) -> OrderbookEventRecord:
+    return OrderbookEventRecord(
+        ts_utc=_ts(sec), received_at=_ts(sec),
+        exchange="bithumb", symbol="KRW-BTC",
+        event_type="snapshot", side=side, level=level,
+        price=Decimal(price), quantity=Decimal(qty),
+    )
+
+
+def _ob_delta_event(side: str, price: str, qty: str, *, sec: int = 1) -> OrderbookEventRecord:
+    return OrderbookEventRecord(
+        ts_utc=_ts(sec), received_at=_ts(sec),
+        exchange="bithumb", symbol="KRW-BTC",
+        event_type="delta", side=side, level=-1,
+        price=Decimal(price), quantity=Decimal(qty),
+    )
+
+
+def _seed_ticks(tmp_path: Path, records: list[TickRecord]) -> None:
+    w = TickWriter(root=tmp_path, exchange="bithumb", symbol="KRW-BTC", snapshot_id="test_run")
+    for r in records:
+        w.append(r)
+    w.close()
+
+
+def _seed_orderbook(tmp_path: Path, records: list[OrderbookEventRecord]) -> None:
+    w = OrderbookWriter(root=tmp_path, exchange="bithumb", symbol="KRW-BTC", snapshot_id="test_run")
+    w.append_many(records)
+    w.close()
+
+
+def test_scan_ticks_returns_records_in_window(tmp_path: Path) -> None:
+    _seed_ticks(tmp_path, [_tick(0), _tick(10), _tick(20)])
+    records = list(
+        scan_ticks(
+            root=tmp_path, exchange="bithumb", symbol="KRW-BTC",
+            start=_ts(0), end=_ts(15),
+        )
+    )
+    assert len(records) == 2
+    assert records[0].ts_utc == _ts(0)
+    assert records[1].ts_utc == _ts(10)
+
+
+def test_scan_ticks_simulated_clock_filters_future(tmp_path: Path) -> None:
+    _seed_ticks(tmp_path, [_tick(0), _tick(10), _tick(20)])
+    records = list(
+        scan_ticks(
+            root=tmp_path, exchange="bithumb", symbol="KRW-BTC",
+            start=_ts(0), end=_ts(60),
+            simulated_clock=_ts(11),
+        )
+    )
+    assert [r.ts_utc for r in records] == [_ts(0), _ts(10)]
+
+
+def test_scan_ticks_deterministic_order(tmp_path: Path) -> None:
+    _seed_ticks(tmp_path, [_tick(0), _tick(0, "sell"), _tick(0, "buy", "200000000")])
+    records1 = [r.ts_utc for r in scan_ticks(
+        root=tmp_path, exchange="bithumb", symbol="KRW-BTC",
+        start=_ts(0), end=_ts(60),
+    )]
+    records2 = [r.ts_utc for r in scan_ticks(
+        root=tmp_path, exchange="bithumb", symbol="KRW-BTC",
+        start=_ts(0), end=_ts(60),
+    )]
+    assert records1 == records2
+
+
+def test_scan_orderbook_events_returns_window(tmp_path: Path) -> None:
+    events = [
+        _ob_snapshot_event(0, "bid", "100000000", sec=0),
+        _ob_snapshot_event(0, "ask", "100000010", sec=0),
+        _ob_delta_event("bid", "100000005", "0.10", sec=5),
+    ]
+    _seed_orderbook(tmp_path, events)
+    records = list(
+        scan_orderbook_events(
+            root=tmp_path, exchange="bithumb", symbol="KRW-BTC",
+            start=_ts(0), end=_ts(10),
+        )
+    )
+    assert len(records) == 3
+
+
+def test_get_orderbook_at_baseline_only(tmp_path: Path) -> None:
+    events = [
+        _ob_snapshot_event(0, "bid", "100000000", sec=0),
+        _ob_snapshot_event(1, "bid", "99999990", sec=0),
+        _ob_snapshot_event(0, "ask", "100000010", sec=0),
+        _ob_snapshot_event(1, "ask", "100000020", sec=0),
+    ]
+    _seed_orderbook(tmp_path, events)
+    snap = get_orderbook_at(
+        root=tmp_path, exchange="bithumb", symbol="KRW-BTC",
+        ts_utc=_ts(0),
+    )
+    assert isinstance(snap, OrderbookSnapshot)
+    assert snap.top_bid is not None
+    assert snap.top_bid.price == Decimal("100000000")
+    assert snap.top_ask is not None
+    assert snap.top_ask.price == Decimal("100000010")
+    assert len(snap.bids) == 2
+    assert len(snap.asks) == 2
+
+
+def test_get_orderbook_at_applies_delta_remove(tmp_path: Path) -> None:
+    events = [
+        _ob_snapshot_event(0, "bid", "100000000", sec=0),
+        _ob_snapshot_event(0, "ask", "100000010", sec=0),
+        _ob_delta_event("bid", "100000000", "0", sec=5),  # remove the bid level
+    ]
+    _seed_orderbook(tmp_path, events)
+    snap = get_orderbook_at(
+        root=tmp_path, exchange="bithumb", symbol="KRW-BTC",
+        ts_utc=_ts(10),
+    )
+    assert snap.top_bid is None  # bid removed by delta
+    assert snap.top_ask is not None
+    assert snap.top_ask.price == Decimal("100000010")
+
+
+def test_get_orderbook_at_missing_baseline_raises(tmp_path: Path) -> None:
+    # Orderbook events with only deltas — no snapshot baseline
+    events = [
+        _ob_delta_event("bid", "100000000", "0.01", sec=0),
+    ]
+    _seed_orderbook(tmp_path, events)
+    with pytest.raises(ReconstructionError, match="missing baseline"):
+        get_orderbook_at(
+            root=tmp_path, exchange="bithumb", symbol="KRW-BTC",
+            ts_utc=_ts(10),
+        )
+
+
+def test_get_orderbook_at_no_events_raises(tmp_path: Path) -> None:
+    with pytest.raises(ReconstructionError, match="no orderbook events"):
+        get_orderbook_at(
+            root=tmp_path, exchange="bithumb", symbol="KRW-BTC",
+            ts_utc=_ts(10),
+        )
+
+
+def test_get_orderbook_at_gap_detected_raises(tmp_path: Path) -> None:
+    events = [
+        _ob_snapshot_event(0, "bid", "100000000", sec=0),
+        _ob_snapshot_event(0, "ask", "100000010", sec=0),
+        _ob_delta_event("bid", "100000005", "0.05", sec=600),  # 10min gap
+    ]
+    _seed_orderbook(tmp_path, events)
+    with pytest.raises(GapDetectedError, match="gap detected"):
+        get_orderbook_at(
+            root=tmp_path, exchange="bithumb", symbol="KRW-BTC",
+            ts_utc=_ts(700),
+            gap_threshold_seconds=300.0,
+        )
+
+
+def test_tier_coverage_tick_basic(tmp_path: Path) -> None:
+    _seed_ticks(tmp_path, [_tick(0), _tick(10), _tick(20)])
+    report = tier_coverage(
+        root=tmp_path, exchange="bithumb", symbol="KRW-BTC", tier="tick",
+        start=_ts(0), end=_ts(60),
+    )
+    assert isinstance(report, CoverageReport)
+    assert report.symbol == "KRW-BTC"
+    assert report.tier == "tick"
+    assert report.min_ts_utc == _ts(0)
+    assert report.max_ts_utc == _ts(20)
+    assert report.gaps == []
+    assert report.collector_run_ids == ["test_run"]
+
+
+def test_tier_coverage_detects_gap(tmp_path: Path) -> None:
+    _seed_ticks(tmp_path, [_tick(0), _tick(700)])  # 700s gap > 300s default
+    report = tier_coverage(
+        root=tmp_path, exchange="bithumb", symbol="KRW-BTC", tier="tick",
+        start=_ts(0), end=_ts(1000),
+    )
+    assert len(report.gaps) == 1
+    assert report.gaps[0].gap_seconds == pytest.approx(700.0)
+
+
+def test_tier_coverage_empty_partition(tmp_path: Path) -> None:
+    report = tier_coverage(
+        root=tmp_path, exchange="bithumb", symbol="KRW-BTC", tier="tick",
+        start=_ts(0), end=_ts(60),
+    )
+    assert report.min_ts_utc is None
+    assert report.max_ts_utc is None
+    assert report.gaps == []
+    assert report.collector_run_ids == []
