@@ -34,6 +34,7 @@ from mctrader_market_bithumb.ws_events import (
 )
 
 from mctrader_data.lineage import write_lineage
+from mctrader_data.manifest import CollectorManifest
 from mctrader_data.orderbook_storage import (
     OrderbookWriter,
     delta_event_to_records,
@@ -154,12 +155,34 @@ class CollectorDaemon:
 
 
 class MultiSymbolCollector:
-    """Run N :class:`CollectorDaemon` concurrently (one per symbol)."""
+    """Run N :class:`CollectorDaemon` concurrently (one per symbol).
 
-    def __init__(self, daemons: list[CollectorDaemon]) -> None:
+    On startup, persists a :class:`CollectorManifest` under
+    ``<root>/market/manifest/run-{collector_run_id}.json`` (MCT-65, F-21).
+    """
+
+    def __init__(
+        self,
+        daemons: list[CollectorDaemon],
+        *,
+        manifest: CollectorManifest | None = None,
+        manifest_root: Path | None = None,
+    ) -> None:
         self._daemons = daemons
+        self._manifest = manifest
+        self._manifest_root = manifest_root
 
     async def run(self) -> None:
+        if self._manifest is not None and self._manifest_root is not None:
+            from mctrader_data.manifest import write_manifest
+
+            write_manifest(self._manifest_root, self._manifest)
+            log.info(
+                "[collector] manifest persisted: run_id=%s symbols=%d",
+                self._manifest.collector_run_id,
+                len(self._manifest.selected_symbols),
+            )
+
         tasks = [asyncio.create_task(d.run()) for d in self._daemons]
         try:
             await asyncio.gather(*tasks, return_exceptions=False)

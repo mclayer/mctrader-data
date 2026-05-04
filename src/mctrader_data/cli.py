@@ -246,22 +246,50 @@ def collect(
     log.info("storage root: %s", root_resolved)
 
     async def _amain() -> None:
+        from datetime import datetime, timezone
+
+        from mctrader_data.manifest import CollectorManifest, derive_collector_run_id
+
         if symbols:
             sym_list = [Symbol.from_string(s.strip()) for s in symbols.split(",") if s.strip()]
+            selection_method = "explicit"
         else:
             assert top_n is not None  # guarded above by mutex check
             log.info("querying Bithumb ticker for top %d KRW pairs by 24h volume...", top_n)
             sym_list = await fetch_top_n_krw_symbols(n=top_n)
             log.info("selected: %s", [str(s) for s in sym_list])
+            selection_method = "top_n_volume"
+
+        started_at = datetime.now(timezone.utc)
+        run_id = derive_collector_run_id(
+            started_at_utc=started_at,
+            exchange=exchange,
+            selected_symbols=[str(s) for s in sym_list],
+        )
+        channels: list[str] = []
+        if include_tx:
+            channels.append("transaction")
+        if include_ob:
+            channels.append("orderbookdepth")
+        manifest = CollectorManifest(
+            collector_run_id=run_id,
+            started_at_utc=started_at,
+            exchange=exchange,
+            selected_symbols=[str(s) for s in sym_list],
+            channels=channels,
+            selection_method=selection_method,  # type: ignore[arg-type]
+            top_n=top_n,
+        )
 
         daemons = [
             CollectorDaemon(
                 root=root_resolved, exchange=exchange, symbol=sym,
                 include_transactions=include_tx, include_orderbook=include_ob,
+                snapshot_id=run_id,
             )
             for sym in sym_list
         ]
-        collector = MultiSymbolCollector(daemons)
+        collector = MultiSymbolCollector(daemons, manifest=manifest, manifest_root=root_resolved)
         await collector.run()
 
     try:
