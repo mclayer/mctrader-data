@@ -177,11 +177,12 @@ wheels = [
 
 [[package]]
 name = "mctrader-data"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
     { name = "duckdb" },
+    { name = "httpx" },
     { name = "mctrader-market" },
     { name = "mctrader-market-bithumb" },
     { name = "pyarrow" },
@@ -201,6 +202,7 @@ dev = [
 requires-dist = [
     { name = "click", specifier = ">=8" },
     { name = "duckdb", specifier = ">=1,<2" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "mctrader-market", git = "https://github.com/mclayer/mctrader-market.git?rev=main" },
     { name = "mctrader-market-bithumb", git = "https://github.com/mclayer/mctrader-market-bithumb.git?rev=main" },
     { name = "pyarrow", specifier = ">=17" },
