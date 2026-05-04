@@ -70,11 +70,13 @@ class CollectorDaemon:
         self._cancel_event = asyncio.Event()
 
     async def run(self) -> None:
-        channels: list[str] = []
+        from mctrader_market_bithumb.ws_subscribe import Channel
+
+        channels: list[Channel] = []
         if self._include_transactions:
             channels.append("transaction")
         if self._include_orderbook:
-            channels.append("orderbook")
+            channels.append("orderbookdepth")
         if not channels:
             raise ValueError("at least one of transactions/orderbook must be included")
 
@@ -90,7 +92,7 @@ class CollectorDaemon:
 
         log.info("[collector] symbol=%s channels=%s root=%s", self._symbol, channels, self._root)
 
-        stream = BithumbWebSocketStream(symbol=self._symbol, channels=tuple(channels))
+        stream = BithumbWebSocketStream(symbol=self._symbol, channels=channels)
         try:
             async with stream:
                 async for event in stream.messages():

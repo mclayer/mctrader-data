@@ -249,6 +249,7 @@ def collect(
         if symbols:
             sym_list = [Symbol.from_string(s.strip()) for s in symbols.split(",") if s.strip()]
         else:
+            assert top_n is not None  # guarded above by mutex check
             log.info("querying Bithumb ticker for top %d KRW pairs by 24h volume...", top_n)
             sym_list = await fetch_top_n_krw_symbols(n=top_n)
             log.info("selected: %s", [str(s) for s in sym_list])
