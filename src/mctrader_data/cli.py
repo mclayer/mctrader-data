@@ -122,10 +122,62 @@ def backfill(
         click.echo("[dry-run] No fetch performed.")
         return
 
-    click.echo("[backfill] adapter implementation arrives via mctrader-market-bithumb (MCT-14).")
-    click.echo("[backfill] First-commit storage scaffold only.")
-    for key, value in plan.items():
-        click.echo(f"  {key}: {value}")
+    # MCT-12 retroactive sealing — wire BithumbCandleProvider → write_candles + lineage
+    # (was previously stub printing "First-commit storage scaffold only").
+    if exchange != "bithumb":
+        raise click.UsageError(f"only 'bithumb' exchange is supported in v1, got {exchange!r}")
+
+    import hashlib
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
+
+    from mctrader_market_bithumb.adapter import BithumbCandleProvider
+
+    from mctrader_data.lineage import write_lineage
+    from mctrader_data.storage import write_candles
+
+    click.echo("[backfill] fetching from Bithumb public REST...")
+    provider = BithumbCandleProvider()
+    candles = provider.get_candles(symbol=sym, timeframe=tf, start=start_utc, end=end_utc)
+    if not candles:
+        raise click.ClickException(
+            f"no candles fetched for [{start_utc.isoformat()}, {end_utc.isoformat()})"
+        )
+
+    resolved_snapshot = snapshot_id or hashlib.sha256(
+        f"{exchange}|{sym}|{tf.value}|{start_utc.isoformat()}|{end_utc.isoformat()}".encode()
+    ).hexdigest()[:16]
+
+    partition = write_candles(candles=candles, root=root_resolved, snapshot_id=resolved_snapshot)
+    parquet_path = partition / f"part-{resolved_snapshot}.parquet"
+
+    request_hash = hashlib.sha256(
+        f"{sym}|{tf.value}|{start_utc.isoformat()}|{end_utc.isoformat()}".encode()
+    ).hexdigest()
+    response_hash = hashlib.sha256(
+        "|".join(
+            f"{c.ts_utc.isoformat()},{c.open},{c.high},{c.low},{c.close},{c.volume}"
+            for c in candles
+        ).encode()
+    ).hexdigest()
+
+    write_lineage(
+        partition_dir=partition,
+        snapshot_id=resolved_snapshot,
+        exchange=exchange,
+        endpoint="https://api.bithumb.com",
+        request_params_hash=request_hash,
+        fetched_at_utc=_dt.now(_tz.utc),
+        response_hash=response_hash,
+        adapter_name="mctrader-market-bithumb",
+        adapter_version="0.3.0",
+    )
+
+    click.echo(f"[backfill] fetched {len(candles)} candles")
+    click.echo(f"[backfill] window: {start_utc.isoformat()} → {end_utc.isoformat()}")
+    click.echo(f"[backfill] partition: {partition}")
+    click.echo(f"[backfill] parquet: {parquet_path}")
+    click.echo(f"[backfill] snapshot_id: {resolved_snapshot}")
     sys.exit(0)
 
 
