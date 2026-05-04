@@ -181,5 +181,95 @@ def backfill(
     sys.exit(0)
 
 
+@main.command()
+@click.option(
+    "--symbols", default=None,
+    help='Explicit symbols comma-separated, e.g. "KRW-BTC,KRW-ETH". Mutex with --top-n.',
+)
+@click.option(
+    "--top-n", type=int, default=None,
+    help="Query Bithumb ticker at startup, pick top N by 24h volume. Mutex with --symbols.",
+)
+@click.option(
+    "--include", default="transactions,orderbook",
+    help='Channels comma-separated: "transactions" + "orderbook" (default both).',
+)
+@click.option("--exchange", default="bithumb", help='Only "bithumb" supported in v1.')
+@click.option(
+    "--root", type=click.Path(path_type=Path), default=None,
+    help="Storage root. Default: $MCTRADER_DATA_ROOT or ~/.local/share/mctrader/data.",
+)
+@click.option("--log-level", default="INFO", type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"]))
+def collect(
+    symbols: str | None,
+    top_n: int | None,
+    include: str,
+    exchange: str,
+    root: Path | None,
+    log_level: str,
+) -> None:
+    """Forward-only WebSocket collector daemon (MCT-58).
+
+    Subscribes to Bithumb public WebSocket for N symbols and writes Parquet
+    append-only partitions under ``<root>/market/{ticks,orderbook}/...``.
+
+    Designed for 24/7 systemd operation. SIGTERM = graceful drain + close.
+    """
+    import asyncio
+    import logging
+
+    from mctrader_data.collector import (
+        CollectorDaemon,
+        MultiSymbolCollector,
+        fetch_top_n_krw_symbols,
+    )
+
+    logging.basicConfig(
+        level=getattr(logging, log_level),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    log = logging.getLogger("mctrader-data.collect")
+
+    if symbols and top_n:
+        raise click.UsageError("--symbols and --top-n are mutually exclusive")
+    if not symbols and not top_n:
+        raise click.UsageError("either --symbols or --top-n must be provided")
+
+    chans = {c.strip() for c in include.split(",") if c.strip()}
+    invalid = chans - {"transactions", "orderbook"}
+    if invalid:
+        raise click.BadParameter(f"unknown channel(s): {invalid}")
+    include_tx = "transactions" in chans
+    include_ob = "orderbook" in chans
+
+    root_resolved = resolve_data_root(root_override=root)
+    log.info("storage root: %s", root_resolved)
+
+    async def _amain() -> None:
+        if symbols:
+            sym_list = [Symbol.from_string(s.strip()) for s in symbols.split(",") if s.strip()]
+        else:
+            assert top_n is not None  # guarded above by mutex check
+            log.info("querying Bithumb ticker for top %d KRW pairs by 24h volume...", top_n)
+            sym_list = await fetch_top_n_krw_symbols(n=top_n)
+            log.info("selected: %s", [str(s) for s in sym_list])
+
+        daemons = [
+            CollectorDaemon(
+                root=root_resolved, exchange=exchange, symbol=sym,
+                include_transactions=include_tx, include_orderbook=include_ob,
+            )
+            for sym in sym_list
+        ]
+        collector = MultiSymbolCollector(daemons)
+        await collector.run()
+
+    try:
+        asyncio.run(_amain())
+    except KeyboardInterrupt:
+        log.info("KeyboardInterrupt — shutting down")
+        sys.exit(0)
+
+
 if __name__ == "__main__":  # pragma: no cover
     main()
