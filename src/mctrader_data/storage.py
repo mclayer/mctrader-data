@@ -9,7 +9,7 @@ MCT-20 extension:
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal, cast
@@ -203,8 +203,14 @@ def scan_candles(
 
     for row in rows:
         ts_utc, ex, sym_str, tf_str, o, h, lo, cl, vol, val = row
+        # DuckDB on Windows may attach system tz (e.g. Asia/Seoul) — normalize to UTC.
+        ts_normalized = cast(datetime, ts_utc)
+        if ts_normalized.tzinfo is None:
+            ts_normalized = ts_normalized.replace(tzinfo=timezone.utc)
+        else:
+            ts_normalized = ts_normalized.astimezone(timezone.utc)
         yield CandleModel(
-            ts_utc=cast(datetime, ts_utc),
+            ts_utc=ts_normalized,
             exchange=ex,
             symbol=Symbol.from_string(sym_str),
             timeframe=Timeframe(tf_str),
