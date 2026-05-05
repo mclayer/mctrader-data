@@ -1,0 +1,43 @@
+name: Bug
+description: 버그 리포트
+title: "[BUG] "
+labels: ["type:bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: 증상
+      description: 어떤 기대 동작 vs 실제 동작
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 재현 절차
+      placeholder: |
+        1. ...
+        2. ...
+        3. 발생: ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 기대 동작
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: 환경
+      placeholder: OS / 버전 / 설정 / 재현 빈도
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - P0 - 차단 또는 데이터 손실
+        - P1 - 주요 기능 장애
+        - P2 - 경미 또는 우회 가능
+    validations:
+      required: true

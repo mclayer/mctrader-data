@@ -1,0 +1,45 @@
+name: Audit (post-hotfix)
+description: Hotfix 사후 감사 Story
+title: "[AUDIT] "
+labels: ["type:story", "audit:post-hotfix", "phase:요구사항"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Hotfix 사후 감사
+        이 form은 hotfix 머지 후 다음 세션에서 자동 생성되는 Audit Story 형식입니다.
+        Hotfix가 우회한 정상 7-lane 통과를 사후 보강하기 위한 것입니다.
+  - type: input
+    id: hotfix-pr
+    attributes:
+      label: Hotfix PR 번호
+      placeholder: 예) #142
+    validations:
+      required: true
+  - type: textarea
+    id: hotfix-summary
+    attributes:
+      label: Hotfix 변경 요약
+      description: 어떤 변경이 어떻게 우회 적용되었는가
+    validations:
+      required: true
+  - type: textarea
+    id: skipped-lanes
+    attributes:
+      label: 우회된 lane 목록
+      placeholder: |
+        - 설계 리뷰: 생략 (긴급 운영 장애)
+        - 보안 테스트: 생략
+    validations:
+      required: true
+  - type: textarea
+    id: audit-scope
+    attributes:
+      label: 사후 감사 범위
+      description: Audit Story가 대상으로 할 게이트
+      placeholder: |
+        - 설계 리뷰 retroactive 수행
+        - 보안 테스트 retroactive 수행
+        - Change Plan §3 보강
+    validations:
+      required: true

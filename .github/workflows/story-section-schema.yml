@@ -1,0 +1,33 @@
+name: Story Section Schema (CFP-91 / CFP-94)
+
+# Validates docs/stories/*.md against templates/story-page-structure.md schema:
+# - Implementation Story (type: story OR no type field) = strict mode (§1-§13 모두 의무)
+# - Epic Story (type: epic) = condensed mode allowed
+#
+# Source: scripts/check-story-section-schema.sh (CFP-91)
+# Workflow: CFP-94 (Phase 3 follow-up of audit batch 1 P1-4)
+#
+# Consumer distribution: 본 workflow + scripts/check-story-section-schema.sh 둘 다 copy 의무.
+# 후자는 CFP-97 templates/consumer-scripts.manifest 의 entry — consumer-guide §2c 의 manifest-driven loop 가 처리.
+
+on:
+  pull_request:
+    paths:
+      - 'docs/stories/**'
+
+permissions:
+  contents: read
+
+jobs:
+  story-section-schema:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run story section schema lint
+        run: |
+          if [ ! -f scripts/check-story-section-schema.sh ]; then
+            echo "::warning::scripts/check-story-section-schema.sh 부재 — consumer-scripts manifest copy 누락 (CFP-97). consumer-guide §2c 참조."
+            exit 0
+          fi
+          bash scripts/check-story-section-schema.sh

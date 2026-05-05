@@ -1,0 +1,177 @@
+name: Phase Gate Mergeable (cross-repo)
+
+on:
+  pull_request:
+    types: [opened, synchronize, labeled, unlabeled, edited]
+
+permissions:
+  pull-requests: write
+  issues: read
+  checks: write
+
+jobs:
+  check-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate phase gate (cross-repo Story fetch)
+        uses: actions/github-script@v7
+        env:
+          # Cross-repo PAT for fetching Story file from any external repo via story_uri PR-body marker.
+          # Falls back to GITHUB_TOKEN if PAT not configured (degraded: PR-label-only mode).
+          # Story repo coordinate is parsed from story_uri URL itself (no hardcode — F3 fix CFP-63).
+          CROSS_REPO_TOKEN: ${{ secrets.CODEFORGE_CROSS_REPO_PAT }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pr = context.payload.pull_request;
+            const body = pr.body || '';
+
+            // 1. Parse linked Story Issue refs from PR body (Related/Closes/Fixes/Resolves: #N)
+            //    OR cross-repo URI: story_uri: https://github.com/mclayer/codeforge-internal-docs/blob/main/test/stories/<KEY>.md
+            const localRefs = [...body.matchAll(/(?:Related|Closes|Fixes|Resolves):?\s+#(\d+)/gi)]
+              .map(m => parseInt(m[1], 10));
+            const storyUriMatch = body.match(/story_uri:\s*(\S+)/);
+
+            let phaseLabel = null;
+            let gateLabel = null;
+            let sourceNote = '';
+
+            // 2. Cross-repo Story fetch path (preferred — CFP-45 binding)
+            if (storyUriMatch) {
+              const uri = storyUriMatch[1];
+              // Expected form: https://github.com/<owner>/<repo>/blob/<ref>/<path>
+              const m = uri.match(/github\.com\/([^\/]+)\/([^\/]+)\/blob\/([^\/]+)\/(.+)/);
+              if (!m) {
+                sourceNote = `story_uri parse failed (${uri})`;
+              } else {
+                const [, sOwner, sRepo, sRef, sPath] = m;
+                const token = process.env.CROSS_REPO_TOKEN;
+                if (!token) {
+                  sourceNote = `story_uri found but CODEFORGE_CROSS_REPO_PAT secret missing (degraded)`;
+                } else {
+                  try {
+                    const { Octokit } = require('@octokit/rest');
+                    const crossOcto = new Octokit({ auth: token });
+                    const { data: file } = await crossOcto.repos.getContent({
+                      owner: sOwner, repo: sRepo, path: sPath, ref: sRef
+                    });
+                    const content = Buffer.from(file.content, 'base64').toString('utf-8');
+                    // Parse YAML frontmatter (simple regex — phase + gate fields)
+                    const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+                    if (fmMatch) {
+                      const fm = fmMatch[1];
+                      const phaseM = fm.match(/^phase:\s*(\S+)/m);
+                      const gateM = fm.match(/^gate:\s*(\S+)/m);
+                      if (phaseM) phaseLabel = phaseM[1].replace(/["']/g, '');
+                      if (gateM) gateLabel = gateM[1].replace(/["']/g, '');
+                      sourceNote = `Story ${sOwner}/${sRepo}#${sPath} frontmatter`;
+                    } else {
+                      sourceNote = `Story file fetched but no frontmatter found`;
+                    }
+                  } catch (e) {
+                    sourceNote = `Cross-repo Story fetch failed: ${e.message}`;
+                  }
+                }
+              }
+            }
+
+            // 3. Local fallback: linked Issue (legacy path) — same-repo type:story Issue
+            if (!phaseLabel && localRefs.length > 0) {
+              for (const n of localRefs) {
+                try {
+                  const { data: issue } = await github.rest.issues.get({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: n
+                  });
+                  const labels = issue.labels.map(l => l.name || l);
+                  if (labels.includes('type:story')) {
+                    phaseLabel = labels.find(l => l.startsWith('phase:'));
+                    gateLabel = labels.find(l => l.startsWith('gate:'));
+                    sourceNote = `Issue #${n} labels (local fallback)`;
+                    break;
+                  }
+                } catch (e) { /* skip */ }
+              }
+            }
+
+            // 4. Last resort: PR labels
+            if (!phaseLabel) {
+              const { data: prFull } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.number
+              });
+              const prLabels = prFull.labels.map(l => l.name);
+              phaseLabel = prLabels.find(l => l.startsWith('phase:'));
+              gateLabel = prLabels.find(l => l.startsWith('gate:'));
+              sourceNote = sourceNote ? `${sourceNote}; PR labels last-resort` : 'PR labels (no Story binding)';
+            }
+
+            // 5. Determine required gate by file change scope
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number
+            });
+            const hasCode = files.some(f =>
+              f.filename.startsWith('src/') ||
+              f.filename.startsWith('agents/') ||
+              f.filename.startsWith('tests/') ||
+              f.filename.startsWith('overlay/')
+            );
+
+            // 5a. Doc-only / type:epic fast-pass (CFP-106 fix #143).
+            //     mctrader debut F6: Epic close + doc-only PR 가 phase-gate-mergeable 의
+            //     phase:보안-테스트/gate 라벨 부재 → 항상 ACTION_REQUIRED → admin merge 의존.
+            //     Resolution: type:epic 라벨 OR all-doc files (`docs/`, `wrapper/`, `*.md`) → fast-pass success.
+            const prFullForEpic = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number
+            });
+            const allLabels = prFullForEpic.data.labels.map(l => l.name);
+            const isEpicLabel = allLabels.includes('type:epic');
+            const isDocOnly = !hasCode && files.every(f =>
+              f.filename.endsWith('.md') ||
+              f.filename.startsWith('docs/') ||
+              f.filename.startsWith('wrapper/') ||
+              f.filename.startsWith('.github/') ||
+              f.filename === 'CHANGELOG.md' ||
+              f.filename === 'README.md'
+            );
+            if (isEpicLabel || isDocOnly) {
+              const reason = isEpicLabel
+                ? `type:epic label fast-pass (CFP-106 #143 fix)`
+                : `doc-only PR fast-pass — files: ${files.map(f=>f.filename).slice(0,3).join(', ')}${files.length>3?'...':''} (CFP-106 #143 fix)`;
+              await github.rest.checks.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'phase-gate-mergeable',
+                head_sha: pr.head.sha,
+                status: 'completed',
+                conclusion: 'success',
+                output: { title: 'Phase Gate (fast-pass)', summary: reason }
+              });
+              return;
+            }
+
+            const required = hasCode
+              ? { phase: 'phase:보안-테스트', gate: 'gate:security-test-pass' }
+              : { phase: 'phase:설계-리뷰', gate: 'gate:design-review-pass' };
+
+            const phaseOk = phaseLabel === required.phase;
+            const gateOk = gateLabel === required.gate;
+            const summary = (phaseOk && gateOk)
+              ? `phase + gate satisfied: ${required.phase} + ${required.gate} (source: ${sourceNote})`
+              : `Awaiting: phase=${required.phase} (current=${phaseLabel || 'none'}), gate=${required.gate} (current=${gateLabel || 'none'}) (source: ${sourceNote})`;
+
+            await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'phase-gate-mergeable',
+              head_sha: pr.head.sha,
+              status: 'completed',
+              conclusion: (phaseOk && gateOk) ? 'success' : 'action_required',
+              output: { title: 'Phase Gate', summary: summary }
+            });

@@ -1,0 +1,39 @@
+# .claude/_overlay/project.yaml — mctrader-data SSOT (CFP-111 Phase 6b)
+# Schema: https://github.com/mclayer/plugin-codeforge/blob/main/docs/project-config-schema.md
+
+project:
+  name: mctrader
+
+github:
+  org: mclayer
+  repo: mctrader-data
+  default_branch: main
+
+  pr_title_prefix_template: "[{key}] {title}"
+
+  # 단일 KEY prefix. mctrader 6 repo 전체가 hub 의 MCT-N 으로 cross-repo Story 추적.
+  story_key_prefix: MCT
+
+  codeowners:
+    architect_team: "@mccho8865"
+    domain_expert_team: "@mccho8865"
+
+  discussions:
+    domain_kb_category: "Domain Q&A"
+
+  milestone:
+    epic_naming_pattern: "Epic-{key}-{slug}"
+
+labels:
+  components:
+    - hub
+    - market
+    - market-bithumb
+    - data
+    - engine
+    - web
+    - contracts
+    - risk
+    - backtest
+    - paper
+    - live

@@ -1,0 +1,48 @@
+name: Story
+description: 신규 사용자 요구사항 (Story 1건 = PR 1쌍 = Phase 1 + Phase 2)
+title: "[STORY] "
+labels: ["type:story", "phase:요구사항"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Story 요청
+
+        제출 후 `story-init.yml` Action 이 자동으로 다음을 수행합니다:
+        1. `<KEY>` 다음 번호 계산 (project.yaml `github.story_key_prefix` 기반)
+        2. `docs/stories/<KEY>.md` 생성 (§1=아래 입력, §2-11=placeholder)
+        3. Phase 1 PR 자동 생성 (architect team CODEOWNERS auto-review)
+        4. Issue body 를 docs file 링크로 갱신
+
+        > **§1 invariant**: 입력한 사용자 요구사항은 §1 에 그대로 복사되어 변경 차단 대상이 됩니다 (Phase 2 후속 CFP 까지 CODEOWNERS manual review 로 커버).
+
+  - type: textarea
+    id: user-requirement-verbatim
+    attributes:
+      label: 사용자 요구사항 (변조 금지 verbatim)
+      description: |
+        이 텍스트는 `docs/stories/<KEY>.md` §1 에 그대로 복사됩니다.
+        가능한 한 정확하고 완결된 형태로 입력하세요 — 후속 lane (요구사항 / 설계 / 구현) 의 SSOT 가 됩니다.
+      placeholder: 예) 결제 시스템에 idempotency key 도입 — 같은 결제 요청이 네트워크 재시도로 중복 처리되지 않도록 한다.
+    validations:
+      required: true
+
+  - type: input
+    id: epic-milestone
+    attributes:
+      label: Epic Milestone (선택)
+      description: 이 Story 가 속한 Epic Milestone 번호. 없으면 비워두세요.
+      placeholder: 예) 3
+    validations:
+      required: false
+
+  - type: input
+    id: component
+    attributes:
+      label: Component (선택)
+      description: |
+        주 영향 component 1개. `.claude/_overlay/project.yaml` 의 `labels.components` 에 정의된 값과 정확히 일치해야 함.
+        목록에 없는 값은 무시되며, 비워두면 component 라벨 미부착.
+      placeholder: 예) backend
+    validations:
+      required: false
