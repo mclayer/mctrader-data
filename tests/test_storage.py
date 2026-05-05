@@ -123,7 +123,6 @@ def test_empty_scan_returns_empty(tmp_path: Path) -> None:
 # MCT-91 — HA writer (node= partition + new file naming + parquet metadata)
 def test_write_candles_node_id_partition_and_filename(tmp_path: Path) -> None:
     """node_id + collector_run_id + batch_seq 명시 시 ADR-009 §D2.1 layout."""
-    import pyarrow.parquet as pq
     base_ts = datetime(2026, 5, 1, 0, 0, tzinfo=timezone.utc)
     candles = [_make_candle(base_ts, Decimal("100000000"))]
     partition = write_candles(

@@ -11,6 +11,7 @@ schema_version best-effort parse + warning on mismatch.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -117,10 +118,8 @@ class HeartbeatWriter:
                 self.node_id, self._write_failure_count, exc,
             )
             if temp.exists():
-                try:
+                with contextlib.suppress(OSError):
                     temp.unlink()
-                except OSError:
-                    pass
 
     async def run(self) -> None:
         """5s loop until cancelled. Final atomic write on cancel."""
