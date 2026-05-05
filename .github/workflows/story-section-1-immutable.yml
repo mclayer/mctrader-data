@@ -1,0 +1,145 @@
+name: Story Section 1 Immutable
+
+# Consumer-distributable single-repo flavor (CFP-67 / F2 Phase 2 split 1/2).
+# §1 (사용자 요구사항 verbatim) 변경 자동 감지 + bypass marker [bypass-section-1] +
+# CODEOWNERS architect team approval 검증.
+# Path = docs/stories/*.md (single-repo 가정).
+
+on:
+  pull_request:
+    types: [opened, synchronize, edited, reopened]
+    paths:
+      - 'docs/stories/*.md'
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  check-section1:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect §1 modifications + bypass status
+        id: detect
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { execSync } = require('child_process');
+            const prNumber = context.payload.pull_request.number;
+            const baseSha = context.payload.pull_request.base.sha;
+            const headSha = context.payload.pull_request.head.sha;
+            const prTitle = context.payload.pull_request.title || '';
+
+            // §1 변경 감지 (docs/stories/*.md 단일 폴더)
+            const changed = execSync(`git diff --name-only ${baseSha} ${headSha} -- 'docs/stories/*.md'`)
+                            .toString().trim().split('\n').filter(Boolean);
+            const violations = [];
+            for (const f of changed) {
+              let baseHas = false;
+              try {
+                const baseContent = execSync(`git show ${baseSha}:${f}`, { stdio: ['ignore','pipe','ignore'] }).toString();
+                baseHas = /^##\s*1\.\s*사용자 요구사항/m.test(baseContent);
+              } catch (e) { /* file new */ }
+              if (!baseHas) continue;
+              const baseS1 = execSync(`git show ${baseSha}:${f}`).toString().match(/^##\s*1\.[\s\S]*?(?=^##\s*2\.)/m);
+              const headS1 = execSync(`git show ${headSha}:${f}`).toString().match(/^##\s*1\.[\s\S]*?(?=^##\s*2\.)/m);
+              if ((baseS1 ? baseS1[0] : '') !== (headS1 ? headS1[0] : '')) {
+                violations.push(f);
+              }
+            }
+
+            if (violations.length === 0) {
+              core.setOutput('result', 'pass');
+              return;
+            }
+
+            const hasBypassMarker = /\[bypass-section-1\]/i.test(prTitle);
+            if (!hasBypassMarker) {
+              core.setOutput('result', 'fail-no-bypass');
+              core.setOutput('violations', violations.join('\n'));
+              core.setFailed(`§1 modification without bypass marker: ${violations.join(', ')}`);
+              return;
+            }
+
+            // CODEOWNERS architect team 추출 (.github/CODEOWNERS 의 docs/stories/** 매핑)
+            const fs = require('fs');
+            let architectTeams = [];
+            try {
+              const co = fs.readFileSync('.github/CODEOWNERS', 'utf8');
+              for (const line of co.split('\n')) {
+                if (line.match(/^\s*docs\/stories\/\*\*/) || line.match(/^\s*\*\*\/stories\/\*\*/)) {
+                  architectTeams = (line.match(/@[\w/-]+/g) || []);
+                  break;
+                }
+              }
+            } catch (e) { /* CODEOWNERS missing */ }
+
+            if (architectTeams.length === 0) {
+              core.setOutput('result', 'fail-no-codeowners');
+              core.setOutput('violations', violations.join('\n'));
+              core.setFailed('Bypass marker present but CODEOWNERS docs/stories/** mapping missing');
+              return;
+            }
+
+            const { data: reviews } = await github.rest.pulls.listReviews({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
+            const approvers = new Set(
+              reviews.filter(r => r.state === 'APPROVED').map(r => r.user.login)
+            );
+
+            let architectMembers = new Set();
+            for (const t of architectTeams) {
+              const m = t.match(/^@([\w-]+)\/([\w-]+)$/);
+              if (!m) continue;
+              try {
+                const { data: members } = await github.rest.teams.listMembersInOrg({
+                  org: m[1],
+                  team_slug: m[2],
+                  per_page: 100
+                });
+                members.forEach(u => architectMembers.add(u.login));
+              } catch (e) {
+                core.warning(`Cannot fetch team ${t}: ${e.message}`);
+              }
+            }
+
+            const architectApproved = [...approvers].some(login => architectMembers.has(login));
+            if (!architectApproved) {
+              core.setOutput('result', 'fail-no-approval');
+              core.setOutput('violations', violations.join('\n'));
+              core.setFailed(`Bypass marker present but no architect team (${architectTeams.join(',')}) approval yet`);
+              return;
+            }
+
+            core.setOutput('result', 'pass-bypass');
+            core.setOutput('violations', violations.join('\n'));
+            core.notice(`§1 modification approved via bypass — files: ${violations.join(', ')}`);
+
+      - name: Comment on PR (failure)
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const result = `${{ steps.detect.outputs.result }}`;
+            const violations = `${{ steps.detect.outputs.violations }}`;
+            const messages = {
+              'fail-no-bypass': `❌ **Story §1 Immutable Violation**\n\n다음 파일에 §1(사용자 요구사항 verbatim) 변경이 감지됨:\n\n\`\`\`\n${violations}\n\`\`\`\n\n**정당한 정정이 필요한 경우** (오타 등):\n1. PR 제목에 \`[bypass-section-1]\` 추가\n2. CODEOWNERS의 architect team 멤버 1명 이상 APPROVED review`,
+              'fail-no-codeowners': `❌ **Bypass 불가** — \`.github/CODEOWNERS\` 의 \`docs/stories/**\` 매핑이 없음. architect team 매핑 추가 필요.`,
+              'fail-no-approval': `⏳ **§1 변경 + bypass marker 감지** — architect team 승인 대기 중. APPROVED review 1건 이상 필요.`
+            };
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: messages[result] || `§1 immutable check failed: ${result}`
+            });

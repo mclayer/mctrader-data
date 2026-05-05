@@ -1,0 +1,90 @@
+name: Phase Label Invariant
+
+on:
+  issues:
+    types: [labeled, closed]
+  pull_request:
+    types: [labeled]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  enforce-single-active:
+    if: github.event.action == 'labeled'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Strip other phase labels
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const target = context.payload.label.name;
+            if (!target.startsWith('phase:')) return;
+            const issueNumber = context.payload.issue?.number || context.payload.pull_request?.number;
+            if (!issueNumber) return;
+            const { data: labels } = await github.rest.issues.listLabelsOnIssue({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber
+            });
+            const phaseLabels = labels.filter(l => l.name.startsWith('phase:') && l.name !== target);
+            for (const l of phaseLabels) {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                name: l.name
+              });
+              core.notice(`detached ${l.name} (single-active phase invariant)`);
+            }
+
+  # CFP-90: Issue close 시 terminal phase 검증 (CFP-85 P1-5 follow-up)
+  # phase progression invariant — closed Issue 가 phase:보안-테스트 (terminal) 또는 early-close:* 형식
+  enforce-terminal-on-close:
+    if: github.event.action == 'closed' && github.event.issue != null
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate terminal phase on Issue close
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const labels = issue.labels.map(l => l.name);
+
+            // Skip non-Story issues
+            const isStory = labels.some(l => l === 'type:story' || l === 'type:epic');
+            if (!isStory) {
+              core.info(`Issue #${issue.number} is not type:story or type:epic — skipping terminal phase check`);
+              return;
+            }
+
+            const phaseLabel = labels.find(l => l.startsWith('phase:'));
+            const earlyCloseLabel = labels.find(l => l.startsWith('early-close:'));
+
+            const TERMINAL_PHASE = 'phase:보안-테스트';
+
+            // PASS 조건: terminal phase 또는 early-close 명시
+            if (phaseLabel === TERMINAL_PHASE || earlyCloseLabel) {
+              core.info(`Issue #${issue.number} closed with valid phase: ${phaseLabel || earlyCloseLabel}`);
+              return;
+            }
+
+            // FAIL: progression 미완 close — comment alert (Story 회복 hint)
+            const currentPhase = phaseLabel || '(no phase label)';
+            const body = `⚠️ **Phase progression invariant violation** (CFP-85 / CFP-90)\n\n` +
+              `Story Issue closed at non-terminal phase: \`${currentPhase}\`.\n\n` +
+              `**Expected**: \`${TERMINAL_PHASE}\` (default after security test PASS) OR \`early-close:<reason>\` label (Epic 종료 / 중복 / Out-of-scope reclassify 등 명시).\n\n` +
+              `**Action required** (one of):\n` +
+              `1. **올바른 progression**: Issue 재open → 정상 lane 진행 → terminal phase 도달 후 close\n` +
+              `2. **Early close 정당화**: \`early-close:<reason>\` label 부착 (예: \`early-close:duplicate\`, \`early-close:reclassified\`, \`early-close:epic-rolled-up\`)\n\n` +
+              `본 alert = \`policy_violation\` defect 추적 source (ADR-025 stop discipline metric).\n\n` +
+              `자동 재open 안 함 (manual decision 의무).`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              body: body
+            });
+            core.warning(`Issue #${issue.number} closed at non-terminal phase: ${currentPhase} — comment alert posted`);
