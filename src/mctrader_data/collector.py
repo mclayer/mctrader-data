@@ -59,6 +59,7 @@ class CollectorDaemon:
         snapshot_id: str | None = None,
         node_id: str | None = None,
         collector_run_id: str | None = None,
+        heartbeat_writer: object | None = None,
     ) -> None:
         if exchange != "bithumb":
             raise ValueError(f"only 'bithumb' exchange supported in v1, got {exchange!r}")
@@ -70,6 +71,7 @@ class CollectorDaemon:
         self._snapshot_id = snapshot_id or _default_snapshot_id(exchange, symbol)
         self._node_id = node_id
         self._collector_run_id = collector_run_id
+        self._heartbeat_writer = heartbeat_writer
         self._tick_writer: TickWriter | None = None
         self._ob_writer: OrderbookWriter | None = None
         self._cancel_event = asyncio.Event()
@@ -117,11 +119,27 @@ class CollectorDaemon:
 
     def _handle_event(self, event) -> None:  # type: ignore[no-untyped-def]
         if isinstance(event, TransactionEvent) and self._tick_writer is not None:
-            self._tick_writer.append(transaction_event_to_record(event))
+            record = transaction_event_to_record(event)
+            self._tick_writer.append(record)
+            # MCT-91 — heartbeat tier timestamp wiring (Codex F-1/F-5 ADOPT)
+            if self._heartbeat_writer is not None:
+                self._heartbeat_writer.update_tier_event_ts(  # type: ignore[attr-defined]
+                    "tick", record.ts_utc
+                )
         elif isinstance(event, OrderbookSnapshotEvent) and self._ob_writer is not None:
-            self._ob_writer.append_many(snapshot_event_to_records(event))
+            records = snapshot_event_to_records(event)
+            self._ob_writer.append_many(records)
+            if self._heartbeat_writer is not None and records:
+                self._heartbeat_writer.update_tier_event_ts(  # type: ignore[attr-defined]
+                    "orderbook", records[0].ts_utc
+                )
         elif isinstance(event, OrderbookDeltaEvent) and self._ob_writer is not None:
-            self._ob_writer.append_many(delta_event_to_records(event))
+            records = delta_event_to_records(event)
+            self._ob_writer.append_many(records)
+            if self._heartbeat_writer is not None and records:
+                self._heartbeat_writer.update_tier_event_ts(  # type: ignore[attr-defined]
+                    "orderbook", records[0].ts_utc
+                )
         # TickerEvent ignored — diagnostic only, not persisted
 
     def _finalize(self) -> None:

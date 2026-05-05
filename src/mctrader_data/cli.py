@@ -323,6 +323,7 @@ def collect(
                 include_transactions=include_tx, include_orderbook=include_ob,
                 snapshot_id=run_id,
                 node_id=resolved_node_id, collector_run_id=run_id,
+                heartbeat_writer=heartbeat,
             )
             for sym in sym_list
         ]

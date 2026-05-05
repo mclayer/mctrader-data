@@ -90,6 +90,43 @@ def test_collector_accepts_node_id_and_collector_run_id(tmp_path: Path) -> None:
     assert d._collector_run_id == "NODE_A-20260505T120000Z"
 
 
+def test_collector_event_propagates_to_heartbeat_tier_ts(tmp_path: Path) -> None:
+    """Codex F-1/F-5 ADOPT — daemon._handle_event 가 heartbeat tier timestamp wiring."""
+    from datetime import datetime, timezone
+    from decimal import Decimal
+    from mctrader_data.heartbeat import HeartbeatWriter
+    from mctrader_market_bithumb.ws_events import TransactionEvent
+
+    hb = HeartbeatWriter(root=tmp_path, node_id="NODE_A", interval_seconds=5.0)
+    d = CollectorDaemon(
+        root=tmp_path, exchange="bithumb",
+        symbol=Symbol.from_string("KRW-BTC"),
+        node_id="NODE_A",
+        collector_run_id="NODE_A-20260505T120000Z",
+        heartbeat_writer=hb,
+    )
+    # Manually wire up writers (run() 거치지 않고 _handle_event 만 검증)
+    from mctrader_data.tick_storage import TickWriter
+    d._tick_writer = TickWriter(
+        root=tmp_path, exchange="bithumb", symbol="KRW-BTC", snapshot_id="ignored",
+        node_id="NODE_A", collector_run_id="NODE_A-20260505T120000Z",
+    )
+
+    event_ts = datetime(2026, 5, 5, 12, 0, 0, tzinfo=timezone.utc)
+    sym = Symbol.from_string("KRW-BTC")
+    txn = TransactionEvent(
+        exchange="bithumb", symbol=sym,
+        event_time=event_ts, received_at=event_ts, raw={"contPrice": "100000000"},
+        price=Decimal("100000000"), quantity=Decimal("0.01"),
+        side="buy",
+    )
+    d._handle_event(txn)
+
+    # heartbeat 의 tier timestamp 가 update 됨 (transaction_event_to_record 의 ts_utc = event_time)
+    assert hb.last_event_ts_per_tier.get("tick") == event_ts.isoformat()
+    d._tick_writer.close()
+
+
 @pytest.mark.asyncio
 async def test_multi_collector_heartbeat_writer_lifecycle(tmp_path: Path, monkeypatch) -> None:
     """MultiSymbolCollector 의 heartbeat_writer = task spawn + cancel + final flush."""

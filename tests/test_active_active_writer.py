@@ -230,7 +230,8 @@ def test_t1_byte_identical_two_node_partitions(tmp_path: Path) -> None:
     assert any("node=NODE_A" in p.as_posix() for p in candle_files)
     assert any("node=NODE_B" in p.as_posix() for p in candle_files)
 
-    # 양 partition 의 row count + close column 값 일치 (T1 byte-identical 기대)
+    # 양 partition 의 row count + 모든 column row-level equality (T1 byte-identical 의무)
+    # — Codex F-4 NIT ADOPT: close 만 비교 → 전체 column equality 로 강화.
     table_a = pq.ParquetFile(
         next(p for p in candle_files if "node=NODE_A" in p.as_posix())
     ).read()
@@ -238,7 +239,15 @@ def test_t1_byte_identical_two_node_partitions(tmp_path: Path) -> None:
         next(p for p in candle_files if "node=NODE_B" in p.as_posix())
     ).read()
     assert table_a.num_rows == table_b.num_rows == 3
-    # close column 값 동일
-    closes_a = [str(c) for c in table_a["close"].to_pylist()]
-    closes_b = [str(c) for c in table_b["close"].to_pylist()]
-    assert closes_a == closes_b, "T1 양 node candle 의 close column mismatch — byte-identical 깨짐"
+    # 모든 column (logical key + value column) row-level equality
+    full_row_columns = ["ts_utc", "open", "high", "low", "close", "volume", "value", "schema_version"]
+    for col in full_row_columns:
+        if col not in table_a.schema.names:
+            continue
+        # Decimal128 + timestamp 모두 stringify 후 비교 (Decimal repr 일관)
+        col_a = [str(v) if v is not None else None for v in table_a[col].to_pylist()]
+        col_b = [str(v) if v is not None else None for v in table_b[col].to_pylist()]
+        assert col_a == col_b, (
+            f"T1 byte-identical violation: column {col!r} mismatch between NODE_A vs NODE_B "
+            f"(NODE_A={col_a}, NODE_B={col_b})"
+        )
