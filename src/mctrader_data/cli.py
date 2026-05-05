@@ -199,6 +199,19 @@ def backfill(
     "--root", type=click.Path(path_type=Path), default=None,
     help="Storage root. Default: $MCTRADER_DATA_ROOT or ~/.local/share/mctrader/data.",
 )
+@click.option(
+    "--node-id", default=None,
+    help="Node identifier for HA active-active (default: socket.gethostname()). "
+         "Per MCT-91 — drives node= partition split + heartbeat-{node_id}.json.",
+)
+@click.option(
+    "--heartbeat-interval", default=5.0, type=float,
+    help="Heartbeat write interval in seconds (default 5.0).",
+)
+@click.option(
+    "--heartbeat-root", type=click.Path(path_type=Path), default=None,
+    help="Heartbeat artifact root (default: same as --root).",
+)
 @click.option("--log-level", default="INFO", type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"]))
 def collect(
     symbols: str | None,
@@ -206,6 +219,9 @@ def collect(
     include: str,
     exchange: str,
     root: Path | None,
+    node_id: str | None,
+    heartbeat_interval: float,
+    heartbeat_root: Path | None,
     log_level: str,
 ) -> None:
     """Forward-only WebSocket collector daemon (MCT-58).
@@ -244,6 +260,15 @@ def collect(
 
     root_resolved = resolve_data_root(root_override=root)
     log.info("storage root: %s", root_resolved)
+
+    # MCT-91 — HA active-active resolution
+    import socket as _socket
+    resolved_node_id = node_id if node_id is not None else _socket.gethostname()
+    resolved_heartbeat_root = heartbeat_root if heartbeat_root is not None else root_resolved
+    log.info(
+        "HA: node_id=%s heartbeat_root=%s heartbeat_interval=%.1fs",
+        resolved_node_id, resolved_heartbeat_root, heartbeat_interval,
+    )
 
     async def _amain() -> None:
         from datetime import datetime, timezone

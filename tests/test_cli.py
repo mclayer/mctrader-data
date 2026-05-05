@@ -79,3 +79,28 @@ def test_backfill_explicit_start_end() -> None:
     assert result.exit_code == 0, result.output
     assert "start: 2026-04-25T00:00:00Z" in result.output
     assert "end: 2026-05-02T00:00:00Z" in result.output
+
+
+# MCT-91 Phase 2 — collect subcommand HA flags
+def test_collect_help_includes_ha_flags() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["collect", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "--node-id" in result.output
+    assert "--heartbeat-interval" in result.output
+    assert "--heartbeat-root" in result.output
+
+
+def test_collect_node_id_default_help_mentions_hostname() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["collect", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "socket.gethostname()" in result.output
+
+
+def test_collect_heartbeat_interval_default_help() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["collect", "--help"])
+    assert result.exit_code == 0, result.output
+    # default 5.0 노출
+    assert "5.0" in result.output or "default 5" in result.output
