@@ -23,11 +23,15 @@ def write_lineage(
     response_hash: str,
     adapter_name: str,
     adapter_version: str,
+    node_id: str | None = None,
 ) -> Path:
     """Write a per-snapshot ``_lineage.json`` sidecar.
 
     File path: ``{partition_dir}/_lineage_{snapshot_id}.json`` so multiple snapshots in the
     same partition coexist without overwrite.
+
+    MCT-91 — ``node_id`` optional kwarg. 명시 시 lineage payload 에 ``node_id`` field 추가.
+    legacy (None) 는 기존 payload 형식 (backward compat).
     """
     record: dict[str, Any] = {
         "snapshot_id": snapshot_id,
@@ -39,6 +43,8 @@ def write_lineage(
         "adapter_name": adapter_name,
         "adapter_version": adapter_version,
     }
+    if node_id is not None:
+        record["node_id"] = node_id
     partition_dir.mkdir(parents=True, exist_ok=True)
     target = partition_dir / f"_lineage_{snapshot_id}.json"
     with target.open("w", encoding="utf-8") as f:
