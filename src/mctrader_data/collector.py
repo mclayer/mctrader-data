@@ -57,6 +57,8 @@ class CollectorDaemon:
         include_transactions: bool = True,
         include_orderbook: bool = True,
         snapshot_id: str | None = None,
+        node_id: str | None = None,
+        collector_run_id: str | None = None,
     ) -> None:
         if exchange != "bithumb":
             raise ValueError(f"only 'bithumb' exchange supported in v1, got {exchange!r}")
@@ -66,6 +68,8 @@ class CollectorDaemon:
         self._include_transactions = include_transactions
         self._include_orderbook = include_orderbook
         self._snapshot_id = snapshot_id or _default_snapshot_id(exchange, symbol)
+        self._node_id = node_id
+        self._collector_run_id = collector_run_id
         self._tick_writer: TickWriter | None = None
         self._ob_writer: OrderbookWriter | None = None
         self._cancel_event = asyncio.Event()
@@ -84,11 +88,13 @@ class CollectorDaemon:
         self._tick_writer = TickWriter(
             root=self._root, exchange=self._exchange,
             symbol=str(self._symbol), snapshot_id=self._snapshot_id,
+            node_id=self._node_id, collector_run_id=self._collector_run_id,
         ) if self._include_transactions else None
 
         self._ob_writer = OrderbookWriter(
             root=self._root, exchange=self._exchange,
             symbol=str(self._symbol), snapshot_id=self._snapshot_id,
+            node_id=self._node_id, collector_run_id=self._collector_run_id,
         ) if self._include_orderbook else None
 
         log.info("[collector] symbol=%s channels=%s root=%s", self._symbol, channels, self._root)
@@ -149,6 +155,7 @@ class CollectorDaemon:
                 response_hash="forward-only-stream",
                 adapter_name="mctrader-market-bithumb-ws",
                 adapter_version="0.3.0",
+                node_id=self._node_id,
             )
         except Exception:
             log.exception("[collector] lineage write failed for %s", parquet_path)
@@ -159,6 +166,9 @@ class MultiSymbolCollector:
 
     On startup, persists a :class:`CollectorManifest` under
     ``<root>/market/manifest/run-{collector_run_id}.json`` (MCT-65, F-21).
+
+    MCT-91 — HA active-active 지원: ``heartbeat_writer`` 인자 명시 시 별도 async task 로
+    spawn 하고 main collector task 종료 시 cancel + final atomic flush 보장.
     """
 
     def __init__(
@@ -167,10 +177,12 @@ class MultiSymbolCollector:
         *,
         manifest: CollectorManifest | None = None,
         manifest_root: Path | None = None,
+        heartbeat_writer: object | None = None,
     ) -> None:
         self._daemons = daemons
         self._manifest = manifest
         self._manifest_root = manifest_root
+        self._heartbeat_writer = heartbeat_writer
 
     async def run(self) -> None:
         if self._manifest is not None and self._manifest_root is not None:
@@ -182,6 +194,18 @@ class MultiSymbolCollector:
                 self._manifest.collector_run_id,
                 len(self._manifest.selected_symbols),
             )
+
+        # MCT-91 — heartbeat task spawn
+        heartbeat_task: asyncio.Task[None] | None = None
+        if self._heartbeat_writer is not None:
+            if self._manifest is not None:
+                self._heartbeat_writer.set_collector_run_id(  # type: ignore[attr-defined]
+                    self._manifest.collector_run_id
+                )
+            heartbeat_task = asyncio.create_task(
+                self._heartbeat_writer.run()  # type: ignore[attr-defined]
+            )
+            log.info("[collector] heartbeat task spawned")
 
         tasks = [asyncio.create_task(d.run()) for d in self._daemons]
         try:
@@ -196,6 +220,13 @@ class MultiSymbolCollector:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await t
             raise
+        finally:
+            # MCT-91 — heartbeat task graceful shutdown (cancel + final atomic flush)
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await heartbeat_task
+                log.info("[collector] heartbeat task shutdown complete")
 
 
 async def fetch_top_n_krw_symbols(n: int = 10) -> list[Symbol]:

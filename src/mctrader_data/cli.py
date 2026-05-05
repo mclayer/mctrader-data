@@ -273,6 +273,7 @@ def collect(
     async def _amain() -> None:
         from datetime import datetime, timezone
 
+        from mctrader_data.heartbeat import HeartbeatWriter
         from mctrader_data.manifest import CollectorManifest, derive_collector_run_id
 
         if symbols:
@@ -286,10 +287,12 @@ def collect(
             selection_method = "top_n_volume"
 
         started_at = datetime.now(timezone.utc)
+        # MCT-91 — HA collector_run_id = {node_id}-{UTC_compact_ts} (legacy hash if node_id=None)
         run_id = derive_collector_run_id(
             started_at_utc=started_at,
             exchange=exchange,
             selected_symbols=[str(s) for s in sym_list],
+            node_id=resolved_node_id,
         )
         channels: list[str] = []
         if include_tx:
@@ -304,6 +307,14 @@ def collect(
             channels=channels,
             selection_method=selection_method,  # type: ignore[arg-type]
             top_n=top_n,
+            node_id=resolved_node_id,
+        )
+
+        # MCT-91 — heartbeat writer (HA active-active)
+        heartbeat = HeartbeatWriter(
+            root=resolved_heartbeat_root,
+            node_id=resolved_node_id,
+            interval_seconds=heartbeat_interval,
         )
 
         daemons = [
@@ -311,10 +322,14 @@ def collect(
                 root=root_resolved, exchange=exchange, symbol=sym,
                 include_transactions=include_tx, include_orderbook=include_ob,
                 snapshot_id=run_id,
+                node_id=resolved_node_id, collector_run_id=run_id,
             )
             for sym in sym_list
         ]
-        collector = MultiSymbolCollector(daemons, manifest=manifest, manifest_root=root_resolved)
+        collector = MultiSymbolCollector(
+            daemons, manifest=manifest, manifest_root=root_resolved,
+            heartbeat_writer=heartbeat,
+        )
         await collector.run()
 
     try:
