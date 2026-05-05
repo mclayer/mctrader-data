@@ -81,6 +81,9 @@ def write_candles(
     root: Path,
     snapshot_id: str,
     mode: Mode | None = None,
+    node_id: str | None = None,
+    collector_run_id: str | None = None,
+    batch_seq: int | None = None,
 ) -> Path:
     """Write a batch of candles as a single Parquet file under the canonical Hive partition.
 
@@ -91,6 +94,14 @@ def write_candles(
     ``mode`` is forwarded to :func:`derive_partition_path`. The default keeps the legacy
     no-mode layout for backward compatibility; paper writers should call
     :func:`mctrader_data.paper_storage.write_paper_candles`.
+
+    MCT-91 — HA active-active kwargs (all optional):
+
+    - ``node_id``: 명시 시 partition path 에 ``node={node_id}`` Hive level 추가
+      (ADR-009 §D2.1). parquet metadata 에 ``node_id`` field 도 추가.
+    - ``collector_run_id`` + ``batch_seq``: 양 값 명시 시 file name =
+      ``{collector_run_id}-{batch_seq}.parquet`` (HA convention). 미명시 시 기존
+      ``part-{snapshot_id}.parquet`` 유지 (legacy backfill compat).
     """
     if not candles:
         raise ValueError("write_candles: empty candles batch")
@@ -102,10 +113,25 @@ def write_candles(
         timeframe=head.timeframe,
         ts_utc=head.ts_utc,
         mode=mode,
+        node_id=node_id,
     )
     partition.mkdir(parents=True, exist_ok=True)
     table = _candles_to_arrow(candles)
-    target = partition / f"part-{snapshot_id}.parquet"
+
+    # MCT-91 — parquet metadata 에 node_id 추가 (logical key 영향 0, file footer)
+    if node_id is not None:
+        existing_meta = table.schema.metadata or {}
+        new_meta = dict(existing_meta)
+        new_meta[b"node_id"] = node_id.encode("utf-8")
+        table = table.replace_schema_metadata(new_meta)
+
+    # MCT-91 — file naming: HA convention vs legacy
+    if collector_run_id is not None and batch_seq is not None:
+        file_name = f"{collector_run_id}-{batch_seq}.parquet"
+    else:
+        file_name = f"part-{snapshot_id}.parquet"
+
+    target = partition / file_name
     pq.write_table(table, target, compression="snappy")
     return partition
 

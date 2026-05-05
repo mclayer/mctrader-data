@@ -199,6 +199,19 @@ def backfill(
     "--root", type=click.Path(path_type=Path), default=None,
     help="Storage root. Default: $MCTRADER_DATA_ROOT or ~/.local/share/mctrader/data.",
 )
+@click.option(
+    "--node-id", default=None,
+    help="Node identifier for HA active-active (default: socket.gethostname()). "
+         "Per MCT-91 — drives node= partition split + heartbeat-{node_id}.json.",
+)
+@click.option(
+    "--heartbeat-interval", default=5.0, type=float,
+    help="Heartbeat write interval in seconds (default 5.0).",
+)
+@click.option(
+    "--heartbeat-root", type=click.Path(path_type=Path), default=None,
+    help="Heartbeat artifact root (default: same as --root).",
+)
 @click.option("--log-level", default="INFO", type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"]))
 def collect(
     symbols: str | None,
@@ -206,6 +219,9 @@ def collect(
     include: str,
     exchange: str,
     root: Path | None,
+    node_id: str | None,
+    heartbeat_interval: float,
+    heartbeat_root: Path | None,
     log_level: str,
 ) -> None:
     """Forward-only WebSocket collector daemon (MCT-58).
@@ -245,9 +261,19 @@ def collect(
     root_resolved = resolve_data_root(root_override=root)
     log.info("storage root: %s", root_resolved)
 
+    # MCT-91 — HA active-active resolution
+    import socket as _socket
+    resolved_node_id = node_id if node_id is not None else _socket.gethostname()
+    resolved_heartbeat_root = heartbeat_root if heartbeat_root is not None else root_resolved
+    log.info(
+        "HA: node_id=%s heartbeat_root=%s heartbeat_interval=%.1fs",
+        resolved_node_id, resolved_heartbeat_root, heartbeat_interval,
+    )
+
     async def _amain() -> None:
         from datetime import datetime, timezone
 
+        from mctrader_data.heartbeat import HeartbeatWriter
         from mctrader_data.manifest import CollectorManifest, derive_collector_run_id
 
         if symbols:
@@ -261,10 +287,12 @@ def collect(
             selection_method = "top_n_volume"
 
         started_at = datetime.now(timezone.utc)
+        # MCT-91 — HA collector_run_id = {node_id}-{UTC_compact_ts} (legacy hash if node_id=None)
         run_id = derive_collector_run_id(
             started_at_utc=started_at,
             exchange=exchange,
             selected_symbols=[str(s) for s in sym_list],
+            node_id=resolved_node_id,
         )
         channels: list[str] = []
         if include_tx:
@@ -279,6 +307,14 @@ def collect(
             channels=channels,
             selection_method=selection_method,  # type: ignore[arg-type]
             top_n=top_n,
+            node_id=resolved_node_id,
+        )
+
+        # MCT-91 — heartbeat writer (HA active-active)
+        heartbeat = HeartbeatWriter(
+            root=resolved_heartbeat_root,
+            node_id=resolved_node_id,
+            interval_seconds=heartbeat_interval,
         )
 
         daemons = [
@@ -286,10 +322,15 @@ def collect(
                 root=root_resolved, exchange=exchange, symbol=sym,
                 include_transactions=include_tx, include_orderbook=include_ob,
                 snapshot_id=run_id,
+                node_id=resolved_node_id, collector_run_id=run_id,
+                heartbeat_writer=heartbeat,
             )
             for sym in sym_list
         ]
-        collector = MultiSymbolCollector(daemons, manifest=manifest, manifest_root=root_resolved)
+        collector = MultiSymbolCollector(
+            daemons, manifest=manifest, manifest_root=root_resolved,
+            heartbeat_writer=heartbeat,
+        )
         await collector.run()
 
     try:

@@ -18,7 +18,11 @@ MANIFEST_SCHEMA_VERSION = "collector_manifest.v1"
 
 
 class CollectorManifest(BaseModel):
-    """Per-collector-run metadata. Pydantic v2 strict, file = JSON."""
+    """Per-collector-run metadata. Pydantic v2 strict, file = JSON.
+
+    MCT-91 (Phase 2) — `node_id` field 추가 (optional, default None).
+    Legacy manifest (pre-HA) 는 `node_id` field 없음 → backward compat read 보장.
+    """
 
     model_config = ConfigDict(strict=True, extra="forbid")
 
@@ -30,6 +34,10 @@ class CollectorManifest(BaseModel):
     channels: list[str]
     selection_method: Literal["explicit", "top_n_volume"]
     top_n: int | None = Field(default=None, description="present iff selection_method=top_n_volume")
+    node_id: str | None = Field(
+        default=None,
+        description="HA node identifier (MCT-91). None = pre-HA legacy manifest.",
+    )
 
 
 def derive_collector_run_id(
@@ -37,8 +45,19 @@ def derive_collector_run_id(
     started_at_utc: datetime,
     exchange: str,
     selected_symbols: list[str],
+    node_id: str | None = None,
 ) -> str:
-    """Deterministic collector_run_id = sha256(exchange|sorted_symbols|started_iso)[:16]."""
+    """Deterministic collector_run_id.
+
+    - Legacy (node_id=None): sha256(exchange|sorted_symbols|started_iso)[:16]
+    - HA (node_id 명시): ``{node_id}-{UTC_compact_ts}`` (e.g., ``NODE_A-20260505T223456Z``)
+
+    HA format 의 의도: heartbeat-{node_id}.json + manifest run-{collector_run_id}.json +
+    parquet file ``{collector_run_id}-{batch_seq}.parquet`` 의 cross-reference key 일관.
+    """
+    if node_id is not None:
+        ts_compact = started_at_utc.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        return f"{node_id}-{ts_compact}"
     sorted_syms = "|".join(sorted(selected_symbols))
     payload = f"{exchange}|{sorted_syms}|{started_at_utc.astimezone(timezone.utc).isoformat()}"
     return hashlib.sha256(payload.encode()).hexdigest()[:16]

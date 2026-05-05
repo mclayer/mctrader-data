@@ -73,3 +73,53 @@ def test_partition_path_parent_root_preserved() -> None:
         ts_utc=datetime(2026, 5, 1, 0, 0, tzinfo=timezone.utc),
     )
     assert "schema_version=ohlcv.v1" in path.as_posix()
+
+
+# MCT-91 — node= partition level (ADR-009 §D2.1 active-active HA)
+def test_derive_partition_path_with_node_id() -> None:
+    """node_id 명시 시 leaf 직전에 node= Hive level 삽입."""
+    root = Path("/data/root")
+    path = derive_partition_path(
+        root=root,
+        exchange="bithumb",
+        symbol=Symbol(base="BTC", quote="KRW"),
+        timeframe=Timeframe.H1,
+        ts_utc=datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc),
+        node_id="NODE_A",
+    )
+    assert "node=NODE_A" in path.parts
+    # leaf 가 node=NODE_A 인지
+    assert path.parts[-1] == "node=NODE_A"
+    assert path.parts[-2] == "date=01"
+
+
+def test_derive_partition_path_without_node_id_legacy() -> None:
+    """node_id=None (default) 시 기존 path (backward compat) — node= level 없음."""
+    root = Path("/data/root")
+    path = derive_partition_path(
+        root=root,
+        exchange="bithumb",
+        symbol=Symbol(base="BTC", quote="KRW"),
+        timeframe=Timeframe.H1,
+        ts_utc=datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc),
+    )
+    assert not any("node=" in p for p in path.parts), f"legacy path should not have node= level: {path}"
+
+
+def test_derive_partition_path_node_id_with_mode() -> None:
+    """mode + node_id 둘 다 명시 시 두 level 모두 적용."""
+    root = Path("/data/root")
+    path = derive_partition_path(
+        root=root,
+        exchange="bithumb",
+        symbol=Symbol(base="BTC", quote="KRW"),
+        timeframe=Timeframe.H1,
+        ts_utc=datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc),
+        mode="paper",
+        node_id="NODE_B",
+    )
+    assert "mode=paper" in path.parts
+    assert "node=NODE_B" in path.parts
+    # mode 는 schema_version 직후, node 는 leaf
+    parts = path.parts
+    assert parts.index("mode=paper") < parts.index("node=NODE_B")

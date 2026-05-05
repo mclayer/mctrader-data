@@ -36,20 +36,28 @@ def derive_partition_path(
     timeframe: Timeframe,
     ts_utc: datetime,
     mode: Mode | None = None,
+    node_id: str | None = None,
 ) -> Path:
     """Build the ADR-009 D2 Hive partition directory.
 
-    Default (``mode=None``) keeps the 0.1.0 layout for backward compatibility:
+    Default (``mode=None``, ``node_id=None``) keeps the 0.1.0 layout for backward
+    compatibility:
     ``{root}/market/ohlcv/schema_version=ohlcv.v1/exchange/symbol/timeframe/year/month/date``
 
     With ``mode`` set (``"historical"`` or ``"paper"``), inserts ``mode={mode}`` between
     ``schema_version`` and ``exchange`` per MCT-20 design (no-mode partitions remain
     historical legacy on read).
+
+    With ``node_id`` set (per MCT-91 / ADR-009 §D2.1), appends ``node={node_id}`` as the
+    leaf-most Hive level for active-active HA partition split (write contention 0). When
+    ``node_id`` is ``None``, no ``node=`` level is added — pre-HA legacy behavior. Mixed
+    legacy partition layout 영구 지원: read-side X3 가 legacy partition 을 ``node=DEFAULT``
+    로 mapping.
     """
     base = root / "market" / "ohlcv" / f"schema_version={SCHEMA_VERSION}"
     if mode is not None:
         base = base / f"mode={mode}"
-    return (
+    leaf = (
         base
         / f"exchange={exchange}"
         / f"symbol={symbol}"
@@ -58,6 +66,9 @@ def derive_partition_path(
         / f"month={ts_utc.month:02d}"
         / f"date={ts_utc.day:02d}"
     )
+    if node_id is not None:
+        leaf = leaf / f"node={node_id}"
+    return leaf
 
 
 def to_duckdb_glob(path: Path) -> str:

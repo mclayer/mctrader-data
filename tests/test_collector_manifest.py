@@ -125,3 +125,71 @@ def test_manifest_path_layout(tmp_path: Path) -> None:
     p = manifest_path(tmp_path, "abc1234567890def")
     expected = tmp_path / "market" / "manifest" / "run-abc1234567890def.json"
     assert p == expected
+
+
+# MCT-91 — node_id field + HA collector_run_id format
+def test_derive_collector_run_id_ha_format_with_node_id() -> None:
+    """node_id 명시 시 collector_run_id = {node_id}-{UTC_compact_ts}."""
+    started = datetime(2026, 5, 5, 22, 34, 56, tzinfo=timezone.utc)
+    rid = derive_collector_run_id(
+        started_at_utc=started, exchange="bithumb",
+        selected_symbols=["KRW-BTC"], node_id="NODE_A",
+    )
+    assert rid == "NODE_A-20260505T223456Z"
+
+
+def test_derive_collector_run_id_legacy_hash_when_no_node_id() -> None:
+    """node_id=None (default) 시 기존 hash format (backward compat)."""
+    rid = derive_collector_run_id(
+        started_at_utc=_ts(0), exchange="bithumb", selected_symbols=["KRW-BTC"],
+    )
+    # 기존 sha256 16자 hex format
+    assert len(rid) == 16
+    assert all(c in "0123456789abcdef" for c in rid)
+
+
+def test_manifest_with_node_id_field(tmp_path: Path) -> None:
+    """CollectorManifest 에 node_id 명시 시 write/read round-trip."""
+    m = CollectorManifest(
+        collector_run_id="NODE_A-20260505T120000Z",
+        started_at_utc=_ts(0),
+        exchange="bithumb",
+        selected_symbols=["KRW-BTC"],
+        channels=["transaction"],
+        selection_method="explicit",
+        top_n=None,
+        node_id="NODE_A",
+    )
+    write_manifest(tmp_path, m)
+    loaded = read_manifest(tmp_path, m.collector_run_id)
+    assert loaded.node_id == "NODE_A"
+
+
+def test_legacy_run_hex_json_read_compat(tmp_path: Path) -> None:
+    """Legacy run-{hex}.json (pre-HA, node_id 부재) read 호환 — Codex F-6 escalation."""
+    import json
+    legacy_payload = {
+        "schema_version": "collector_manifest.v1",
+        "collector_run_id": "deadbeefdeadbeef",
+        "started_at_utc": _ts(0).isoformat(),
+        "exchange": "bithumb",
+        "selected_symbols": ["KRW-BTC"],
+        "channels": ["transaction"],
+        "selection_method": "explicit",
+        "top_n": None,
+        # 의도적 — node_id field 미포함 (legacy)
+    }
+    manifest_dir = tmp_path / "market" / "manifest"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "run-deadbeefdeadbeef.json").write_text(
+        json.dumps(legacy_payload), encoding="utf-8"
+    )
+
+    # read_manifest + list_manifests 양쪽 호환
+    m = read_manifest(tmp_path, "deadbeefdeadbeef")
+    assert m.collector_run_id == "deadbeefdeadbeef"
+    assert m.node_id is None  # legacy default
+
+    manifests = list_manifests(tmp_path)
+    assert len(manifests) == 1
+    assert manifests[0].node_id is None
