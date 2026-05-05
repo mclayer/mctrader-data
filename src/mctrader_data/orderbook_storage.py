@@ -78,12 +78,17 @@ class OrderbookWriter:
         symbol: str,
         snapshot_id: str,
         batch_size: int = 1000,
+        node_id: str | None = None,
+        collector_run_id: str | None = None,
     ) -> None:
         self._root = root
         self._exchange = exchange
         self._symbol = symbol
         self._snapshot_id = snapshot_id
         self._batch_size = batch_size
+        self._node_id = node_id
+        self._collector_run_id = collector_run_id
+        self._batch_seq = 0
         self._lock = threading.Lock()
         self._buffer: list[OrderbookEventRecord] = []
         self._current_date: str | None = None
@@ -133,10 +138,21 @@ class OrderbookWriter:
                 self._current_writer.close()
             partition = self._derive_partition(first.ts_utc)
             partition.mkdir(parents=True, exist_ok=True)
-            target = partition / f"part-{self._snapshot_id}.parquet"
+            # MCT-91 — HA file naming + parquet metadata
+            if self._node_id is not None and self._collector_run_id is not None:
+                file_name = f"{self._collector_run_id}-{self._batch_seq}.parquet"
+                self._batch_seq += 1
+            else:
+                file_name = f"part-{self._snapshot_id}.parquet"
+            target = partition / file_name
             self._current_path = target
+            schema_with_meta = _OB_SCHEMA
+            if self._node_id is not None:
+                meta = dict(schema_with_meta.metadata or {})
+                meta[b"node_id"] = self._node_id.encode("utf-8")
+                schema_with_meta = schema_with_meta.with_metadata(meta)
             self._current_writer = pq.ParquetWriter(
-                target, _OB_SCHEMA, compression="snappy"
+                target, schema_with_meta, compression="snappy"
             )
             self._current_date = date_str
 
@@ -147,7 +163,7 @@ class OrderbookWriter:
 
     def _derive_partition(self, ts_utc: datetime) -> Path:
         date_str = ts_utc.astimezone(timezone.utc).date().isoformat()
-        return (
+        partition = (
             self._root
             / "market"
             / "orderbook"
@@ -156,6 +172,9 @@ class OrderbookWriter:
             / f"symbol={self._symbol}"
             / f"date={date_str}"
         )
+        if self._node_id is not None:
+            partition = partition / f"node={self._node_id}"
+        return partition
 
     @property
     def current_path(self) -> Path | None:
