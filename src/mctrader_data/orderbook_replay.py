@@ -184,7 +184,7 @@ def scan_ticks(
     if start.tzinfo is None or end.tzinfo is None:
         raise ValueError("start/end must be timezone-aware UTC")
 
-    _NODE_RE = re.compile(r"/node=([^/]+)/")
+    node_re = re.compile(r"/node=([^/]+)/")
 
     rows: list[tuple[datetime, datetime, int, int, dict, str]] = []
     for date_str in _date_range(start, end):
@@ -202,7 +202,7 @@ def scan_ticks(
     # multi-node 자동 감지
     distinct_nodes: set[str] = set()
     for _, _, _, _, _, fp in rows:
-        m = _NODE_RE.search(fp)
+        m = node_re.search(fp)
         distinct_nodes.add(m.group(1) if m else NODE_PRIORITY_DEFAULT_SENTINEL)
     multi_node = len(distinct_nodes) >= 2
 
@@ -214,7 +214,7 @@ def scan_ticks(
     # dedup wrapping
     wrapped: list[SimpleNamespace] = []
     for ts, received, _, _, row, fp in rows:
-        m = _NODE_RE.search(fp)
+        m = node_re.search(fp)
         node_id = m.group(1) if m else NODE_PRIORITY_DEFAULT_SENTINEL
         wrapped.append(SimpleNamespace(
             exchange=row["exchange"], symbol=row["symbol"],
@@ -252,7 +252,7 @@ def scan_orderbook_events(
     if start.tzinfo is None or end.tzinfo is None:
         raise ValueError("start/end must be timezone-aware UTC")
 
-    _NODE_RE = re.compile(r"/node=([^/]+)/")
+    node_re = re.compile(r"/node=([^/]+)/")
 
     rows: list[tuple[datetime, datetime, int, int, dict, str]] = []
     for date_str in _date_range(start, end):
@@ -269,7 +269,7 @@ def scan_orderbook_events(
 
     distinct_nodes: set[str] = set()
     for _, _, _, _, _, fp in rows:
-        m = _NODE_RE.search(fp)
+        m = node_re.search(fp)
         distinct_nodes.add(m.group(1) if m else NODE_PRIORITY_DEFAULT_SENTINEL)
     multi_node = len(distinct_nodes) >= 2
 
@@ -280,7 +280,7 @@ def scan_orderbook_events(
 
     wrapped: list[SimpleNamespace] = []
     for ts, received, _, _, row, fp in rows:
-        m = _NODE_RE.search(fp)
+        m = node_re.search(fp)
         node_id = m.group(1) if m else NODE_PRIORITY_DEFAULT_SENTINEL
         wrapped.append(SimpleNamespace(
             exchange=row["exchange"], symbol=row["symbol"],

@@ -248,10 +248,10 @@ def scan_candles(
 
     from mctrader_data.dedup import deduplicate_candles
 
-    _NODE_RE = re.compile(r"[/\\]node=([^/\\]+)[/\\]")
+    node_re = re.compile(r"[/\\]node=([^/\\]+)[/\\]")
 
     def _extract_node_id(filename: str) -> str:
-        m = _NODE_RE.search(filename)
+        m = node_re.search(filename)
         return m.group(1) if m else NODE_PRIORITY_DEFAULT_SENTINEL
 
     wrapped_rows = []

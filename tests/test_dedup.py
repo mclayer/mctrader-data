@@ -4,18 +4,15 @@ Per MCT-92 Phase 3 Task 1 (TDD).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
-import pytest
 
 from mctrader_data.dedup import (
     DEDUP_WINDOW_MS,
     NODE_PRIORITY_DEFAULT_SENTINEL,
-    DedupResult,
-    QuarantineRecord,
     candle_logical_key,
     deduplicate_candles,
     deduplicate_orderbook_events,

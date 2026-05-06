@@ -3,13 +3,13 @@
 Per MCT-92 Phase 3 (X3 of MCT-89). Transparent read-side dedup for active-active HA.
 
 Architect 결정 freeze (plan §"Architect 결정 8항"):
-- T1 hybrid late correction: received_at MAX 우선 + tie-break node priority alphabetical (clock drift mitigation + 결정성)
-- DEFAULT sentinel: zzz_DEFAULT (ASCII order 끝, post-HA partition 우선 의도 정합)
-- Quarantine artifact: root manifest <root>/market/manifest/quarantine/active-active-mismatch/<date>/<symbol>.json
+- T1 hybrid late correction: received_at MAX + tie-break node priority alphabetical
+- DEFAULT sentinel: zzz_DEFAULT (ASCII order 끝, post-HA partition 우선)
+- Quarantine artifact: root manifest <root>/market/manifest/quarantine/...
 - Multi-node mode 자동 감지 (distinct node= ≥ 2)
 - Streaming dedup window: 200ms safety margin (ms-tolerance ±100ms × 2)
 - dedup.py flat module 위치 (단일 책임 + test isolation)
-- Quarantine backpressure: per-second 100 mismatch cap (rate-limit) + 100 초과 시 batching (drop 방지)
+- Quarantine backpressure: per-second 100 cap + batching (drop 방지)
 
 Contract enforcement:
 - ADR-009 §D5 T1 4-key + late correction
@@ -24,7 +24,8 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Iterable, Protocol
+from typing import Any, Protocol
+from collections.abc import Iterable
 
 logger = logging.getLogger(__name__)
 
