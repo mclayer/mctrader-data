@@ -185,3 +185,114 @@ def test_write_candles_batch_seq_resets_per_collector_run_id(tmp_path: Path) -> 
         "NODE_A-20260505T100000Z-0.parquet",
         "NODE_A-20260505T120000Z-0.parquet",
     ]
+
+
+# MCT-92 — multi-node scan + dedup transparent
+def test_scan_candles_two_nodes_auto_dedup(tmp_path: Path) -> None:
+    """양 node partition 있을 때 scan_candles 가 자동 multi-node dedup 적용."""
+    base_ts = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    candles = [_make_candle(base_ts + timedelta(hours=i), Decimal(f"{100 + i}"))
+               for i in range(3)]
+    # 양 node 가 같은 candle 을 각자 partition 에 write (byte-identical)
+    write_candles(candles, root=tmp_path, snapshot_id="ign",
+                  node_id="NODE_A", collector_run_id="NODE_A-A", batch_seq=0)
+    write_candles(candles, root=tmp_path, snapshot_id="ign",
+                  node_id="NODE_B", collector_run_id="NODE_B-A", batch_seq=0)
+
+    result = list(scan_candles(
+        exchange="bithumb",
+        symbol=Symbol(base="BTC", quote="KRW"),
+        timeframe=Timeframe.H1,
+        start=base_ts,
+        end=base_ts + timedelta(hours=10),
+        root=tmp_path,
+    ))
+    # dedup 후 양 partition 의 동일 row 가 1번만 emit (3 rows)
+    assert len(result) == 3
+    closes = [r.close for r in result]
+    assert closes == [Decimal("100"), Decimal("101"), Decimal("102")]
+
+
+def test_scan_candles_legacy_partition_only_no_dedup(tmp_path: Path) -> None:
+    """legacy partition (no node=) 단일 → multi_node=False, no dedup, pass-through."""
+    base_ts = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    candles = [_make_candle(base_ts + timedelta(hours=i), Decimal(f"{100 + i}"))
+               for i in range(3)]
+    write_candles(candles, root=tmp_path, snapshot_id="legacy-1")  # no node_id
+
+    result = list(scan_candles(
+        exchange="bithumb",
+        symbol=Symbol(base="BTC", quote="KRW"),
+        timeframe=Timeframe.H1,
+        start=base_ts,
+        end=base_ts + timedelta(hours=10),
+        root=tmp_path,
+    ))
+    assert len(result) == 3
+
+
+def test_scan_candles_legacy_plus_node_a_dedup(tmp_path: Path) -> None:
+    """legacy partition + NODE_A partition → multi_node mode (legacy = zzz_DEFAULT)."""
+    base_ts = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    candles = [_make_candle(base_ts + timedelta(hours=i), Decimal(f"{100 + i}"))
+               for i in range(3)]
+    write_candles(candles, root=tmp_path, snapshot_id="legacy-1")  # legacy
+    write_candles(candles, root=tmp_path, snapshot_id="ign",
+                  node_id="NODE_A", collector_run_id="NODE_A-A", batch_seq=0)
+
+    result = list(scan_candles(
+        exchange="bithumb",
+        symbol=Symbol(base="BTC", quote="KRW"),
+        timeframe=Timeframe.H1,
+        start=base_ts,
+        end=base_ts + timedelta(hours=10),
+        root=tmp_path,
+    ))
+    # dedup 후 3 row (NODE_A win over zzz_DEFAULT alphabetical)
+    assert len(result) == 3
+
+
+def test_scan_candles_caller_signature_unchanged(tmp_path: Path) -> None:
+    """caller 가 multi-node 인지 모르고 기존 signature 그대로 호출 → transparent."""
+    base_ts = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    candles = [_make_candle(base_ts, Decimal("100"))]
+    write_candles(candles, root=tmp_path, snapshot_id="legacy-1")
+    # 호출자는 node_id 인자 모름 — 기존 signature
+    result = list(scan_candles(
+        exchange="bithumb",
+        symbol=Symbol(base="BTC", quote="KRW"),
+        timeframe=Timeframe.H1,
+        start=base_ts,
+        end=base_ts + timedelta(hours=1),
+        root=tmp_path,
+    ))
+    assert len(result) == 1
+
+
+def test_scan_candles_multi_node_mismatch_node_priority_wins(tmp_path: Path) -> None:
+    """Codex F-1/F-4 fix — scan-level T1 mismatch 시 node priority alphabetical (NODE_A win).
+
+    candle schema 에 received_at 부재 → hybrid 의 received_at phase 무의미,
+    tie-break (node priority) 만 작동. dedup module 자체는 hybrid 지원하나 scan path 한계.
+    NODE_A < NODE_B alphabetical → NODE_A 의 close=100 win.
+    """
+    base_ts = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    # 양 node 가 다른 close (실제로는 byte-identical 기대지만 mismatch 시나리오)
+    candles_a = [_make_candle(base_ts, Decimal("100"))]
+    candles_b = [_make_candle(base_ts, Decimal("200"))]
+    write_candles(candles_a, root=tmp_path, snapshot_id="ign",
+                  node_id="NODE_A", collector_run_id="NODE_A-A", batch_seq=0)
+    write_candles(candles_b, root=tmp_path, snapshot_id="ign",
+                  node_id="NODE_B", collector_run_id="NODE_B-A", batch_seq=0)
+
+    result = list(scan_candles(
+        exchange="bithumb",
+        symbol=Symbol(base="BTC", quote="KRW"),
+        timeframe=Timeframe.H1,
+        start=base_ts,
+        end=base_ts + timedelta(hours=1),
+        root=tmp_path,
+    ))
+    # dedup → 1 row, NODE_A wins (alphabetical tie-break)
+    assert len(result) == 1
+    assert result[0].close == Decimal("100")

@@ -21,6 +21,7 @@ import pyarrow.parquet as pq
 from mctrader_market.candle import CandleLike, CandleModel
 from mctrader_market.types import Symbol, Timeframe
 
+from mctrader_data.dedup import NODE_PRIORITY_DEFAULT_SENTINEL
 from mctrader_data.path import Mode, derive_partition_path, to_duckdb_glob
 from mctrader_data.schema import SCHEMA_VERSION
 
@@ -148,6 +149,10 @@ def _resolve_scan_paths(
 
     For ``historical``, both legacy no-mode and ``mode=historical/`` partitions are
     returned so existing 0.1.0 datasets remain readable.
+
+    MCT-92 — recursive `**/*.parquet` glob already catches both legacy partitions
+    (no `node=` directory) and post-HA partitions (`node=NODE_A`). De-dup paths
+    via ``set`` to avoid redundant DuckDB scans (Codex F-5 fix).
     """
     schema_root = root / "market" / "ohlcv" / f"schema_version={SCHEMA_VERSION}"
     relative_tail = (
@@ -160,13 +165,13 @@ def _resolve_scan_paths(
             candidates.append(schema_root / "mode=historical")
         elif mode == "paper":
             candidates.append(schema_root / "mode=paper")
-    globs: list[str] = []
+    globs: set[str] = set()
     for base in candidates:
         if not base.exists():
             continue
         full = base / relative_tail
-        globs.append(to_duckdb_glob(full))
-    return globs
+        globs.add(to_duckdb_glob(full))
+    return sorted(globs)
 
 
 def scan_candles(
@@ -204,19 +209,26 @@ def scan_candles(
     if not globs:
         return
 
+    # MCT-92 — Architect 결정 #6: hive_partitioning=false + filename=true 로
+    # mixed legacy (no `node=` directory) + post-HA (`node=NODE_A/`) 의 strict
+    # hive 충돌 회피. caller-side regex 로 file path 에서 node 추출 — DuckDB
+    # version 의존 0 + Python 측 sentinel substitution 자유.
     union_select = " UNION ALL BY NAME ".join(
-        f"SELECT * FROM read_parquet('{g}', hive_partitioning=true)" for g in globs
+        f"SELECT * FROM read_parquet('{g}', hive_partitioning=false, filename=true)"
+        for g in globs
     )
 
     con = duckdb.connect(":memory:", read_only=False)
     try:
+        # `filename` column 으로 file path 노출 → Python regex 에서 node 추출.
         rel = con.sql(
             f"""
             SELECT ts_utc, exchange, symbol, timeframe,
                    open::VARCHAR AS open, high::VARCHAR AS high,
                    low::VARCHAR AS low, close::VARCHAR AS close,
                    volume::VARCHAR AS volume,
-                   value::VARCHAR AS value
+                   value::VARCHAR AS value,
+                   filename
             FROM ({union_select}) AS combined
             WHERE ts_utc >= ? AND ts_utc < ?
             ORDER BY ts_utc ASC
@@ -227,15 +239,38 @@ def scan_candles(
     finally:
         con.close()
 
+    # MCT-92 — multi-node mode 자동 감지 + dedup
+    # 1. wrap row 들에 node_id 부여 (file path 에서 regex 로 추출)
+    # 2. distinct node_id ≥ 2 면 multi_node mode (dedup 적용)
+    # 3. dedup 결과를 CandleModel 로 yield (caller transparent)
+    #
+    # **T1 hybrid late correction limitation (Codex F-4 acknowledged)**:
+    # candle parquet schema 에 `received_at` column 부재 → scan path 에서 양 row 의
+    # received_at 이 항상 ts_utc fallback (동일 값). 결과: hybrid 의 "received_at MAX"
+    # phase 는 사실상 무의미 + tie-break (node priority alphabetical) 만 작동.
+    # dedup module 자체는 hybrid 지원 (test_dedup.py::TestT1HybridLateCorrection 검증) —
+    # 향후 candle schema 에 received_at 추가 (별도 ADR amendment) 시 자동 적용.
+    import re
+    from types import SimpleNamespace
+
+    from mctrader_data.dedup import deduplicate_candles
+
+    node_re = re.compile(r"[/\\]node=([^/\\]+)[/\\]")
+
+    def _extract_node_id(filename: str) -> str:
+        m = node_re.search(filename)
+        return m.group(1) if m else NODE_PRIORITY_DEFAULT_SENTINEL
+
+    wrapped_rows = []
     for row in rows:
-        ts_utc, ex, sym_str, tf_str, o, h, lo, cl, vol, val = row
-        # DuckDB on Windows may attach system tz (e.g. Asia/Seoul) — normalize to UTC.
+        ts_utc, ex, sym_str, tf_str, o, h, lo, cl, vol, val, filename = row
         ts_normalized = cast(datetime, ts_utc)
         if ts_normalized.tzinfo is None:
             ts_normalized = ts_normalized.replace(tzinfo=timezone.utc)
         else:
             ts_normalized = ts_normalized.astimezone(timezone.utc)
-        yield CandleModel(
+        node_id = _extract_node_id(filename)
+        wrapped = SimpleNamespace(
             ts_utc=ts_normalized,
             exchange=ex,
             symbol=Symbol.from_string(sym_str),
@@ -246,4 +281,31 @@ def scan_candles(
             close=Decimal(cl),
             volume=Decimal(vol),
             value=Decimal(val) if val is not None else None,
+            received_at=ts_normalized,  # T1 candle: received_at = ts_utc fallback
+            node_id=node_id,
+        )
+        wrapped_rows.append(wrapped)
+
+    # multi_node = distinct node_id (sentinel 포함) ≥ 2
+    distinct_nodes = {w.node_id for w in wrapped_rows}
+    multi_node = len(distinct_nodes) >= 2
+
+    if multi_node:
+        result = deduplicate_candles(wrapped_rows, multi_node=True)
+        emitted = result.emitted
+    else:
+        emitted = sorted(wrapped_rows, key=lambda r: r.ts_utc)
+
+    for r in emitted:
+        yield CandleModel(
+            ts_utc=r.ts_utc,
+            exchange=r.exchange,
+            symbol=r.symbol,
+            timeframe=r.timeframe,
+            open=r.open,
+            high=r.high,
+            low=r.low,
+            close=r.close,
+            volume=r.volume,
+            value=r.value,
         )
