@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
+import pytest
 
 from mctrader_data.dedup import (
     DEDUP_WINDOW_MS,
@@ -363,3 +364,97 @@ class TestQuarantineBackpressure:
 def test_dedup_window_ms_is_200() -> None:
     """Architect 결정 #5 — 200ms safety margin."""
     assert DEDUP_WINDOW_MS == 200
+
+
+# ====================================================================
+# _BackpressureLimiter unit test (Codex F-6 NIT — explicit timing 검증)
+# ====================================================================
+
+class TestBackpressureLimiterUnit:
+    def test_under_cap_emits_immediately(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """100/sec cap 미만이면 즉시 admit + 단일 record batch 반환."""
+        from mctrader_data.dedup import _BackpressureLimiter
+
+        clock = [1000.0]
+        monkeypatch.setattr("time.monotonic", lambda: clock[0])
+        limiter = _BackpressureLimiter(cap_per_sec=3)
+
+        for i in range(3):
+            qr = QuarantineRecord(
+                reason="ACTIVE_ACTIVE_MISMATCH", tier="tick",
+                logical_key=(i,), rows=[], detected_at=datetime.now(),
+            )
+            emit, batch = limiter.admit(qr)
+            assert emit is True
+            assert batch == [qr]
+        assert limiter.artifact_count == 3
+
+    def test_over_cap_batches(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """cap 초과 시 batch 에 추가, 즉시 emit 안 함."""
+        from mctrader_data.dedup import _BackpressureLimiter
+
+        clock = [2000.0]
+        monkeypatch.setattr("time.monotonic", lambda: clock[0])
+        limiter = _BackpressureLimiter(cap_per_sec=2)
+
+        # 2 admits — under cap
+        for _ in range(2):
+            qr = QuarantineRecord(
+                reason="x", tier="tick", logical_key=(0,), rows=[], detected_at=datetime.now(),
+            )
+            limiter.admit(qr)
+        # 3rd, 4th — over cap, batched
+        for _ in range(2):
+            qr = QuarantineRecord(
+                reason="x", tier="tick", logical_key=(0,), rows=[], detected_at=datetime.now(),
+            )
+            emit, batch = limiter.admit(qr)
+            assert emit is False
+            assert batch is None
+
+    def test_window_rollover_flushes_batch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Second tick 도달 시 batched record flush."""
+        from mctrader_data.dedup import _BackpressureLimiter
+
+        clock = [3000.0]
+        monkeypatch.setattr("time.monotonic", lambda: clock[0])
+        limiter = _BackpressureLimiter(cap_per_sec=1)
+
+        qr1 = QuarantineRecord(
+            reason="x", tier="tick", logical_key=(1,), rows=[], detected_at=datetime.now(),
+        )
+        emit1, batch1 = limiter.admit(qr1)
+        assert emit1 is True
+        # 2nd over cap → batch
+        qr2 = QuarantineRecord(
+            reason="x", tier="tick", logical_key=(2,), rows=[], detected_at=datetime.now(),
+        )
+        emit2, batch2 = limiter.admit(qr2)
+        assert emit2 is False
+
+        # window rollover (1.5s 경과)
+        clock[0] += 1.5
+        qr3 = QuarantineRecord(
+            reason="x", tier="tick", logical_key=(3,), rows=[], detected_at=datetime.now(),
+        )
+        emit3, batch3 = limiter.admit(qr3)
+        # rollover → batched 1 record flushed
+        assert emit3 is True
+        assert batch3 == [qr2]
+
+    def test_final_flush_returns_remaining(self) -> None:
+        """flush() 가 batched record 반환."""
+        from mctrader_data.dedup import _BackpressureLimiter
+
+        limiter = _BackpressureLimiter(cap_per_sec=0)  # everything batched
+        qr = QuarantineRecord(
+            reason="x", tier="tick", logical_key=(1,), rows=[], detected_at=datetime.now(),
+        )
+        emit, batch = limiter.admit(qr)
+        assert emit is False
+        flushed = limiter.flush()
+        assert flushed == [qr]
+
+
+# QuarantineRecord import 추가
+from mctrader_data.dedup import QuarantineRecord  # noqa: E402

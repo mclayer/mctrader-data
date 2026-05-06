@@ -243,6 +243,13 @@ def scan_candles(
     # 1. wrap row 들에 node_id 부여 (file path 에서 regex 로 추출)
     # 2. distinct node_id ≥ 2 면 multi_node mode (dedup 적용)
     # 3. dedup 결과를 CandleModel 로 yield (caller transparent)
+    #
+    # **T1 hybrid late correction limitation (Codex F-4 acknowledged)**:
+    # candle parquet schema 에 `received_at` column 부재 → scan path 에서 양 row 의
+    # received_at 이 항상 ts_utc fallback (동일 값). 결과: hybrid 의 "received_at MAX"
+    # phase 는 사실상 무의미 + tie-break (node priority alphabetical) 만 작동.
+    # dedup module 자체는 hybrid 지원 (test_dedup.py::TestT1HybridLateCorrection 검증) —
+    # 향후 candle schema 에 received_at 추가 (별도 ADR amendment) 시 자동 적용.
     import re
     from types import SimpleNamespace
 

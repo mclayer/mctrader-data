@@ -267,3 +267,32 @@ def test_scan_candles_caller_signature_unchanged(tmp_path: Path) -> None:
         root=tmp_path,
     ))
     assert len(result) == 1
+
+
+def test_scan_candles_multi_node_mismatch_node_priority_wins(tmp_path: Path) -> None:
+    """Codex F-1/F-4 fix — scan-level T1 mismatch 시 node priority alphabetical (NODE_A win).
+
+    candle schema 에 received_at 부재 → hybrid 의 received_at phase 무의미,
+    tie-break (node priority) 만 작동. dedup module 자체는 hybrid 지원하나 scan path 한계.
+    NODE_A < NODE_B alphabetical → NODE_A 의 close=100 win.
+    """
+    base_ts = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    # 양 node 가 다른 close (실제로는 byte-identical 기대지만 mismatch 시나리오)
+    candles_a = [_make_candle(base_ts, Decimal("100"))]
+    candles_b = [_make_candle(base_ts, Decimal("200"))]
+    write_candles(candles_a, root=tmp_path, snapshot_id="ign",
+                  node_id="NODE_A", collector_run_id="NODE_A-A", batch_seq=0)
+    write_candles(candles_b, root=tmp_path, snapshot_id="ign",
+                  node_id="NODE_B", collector_run_id="NODE_B-A", batch_seq=0)
+
+    result = list(scan_candles(
+        exchange="bithumb",
+        symbol=Symbol(base="BTC", quote="KRW"),
+        timeframe=Timeframe.H1,
+        start=base_ts,
+        end=base_ts + timedelta(hours=1),
+        root=tmp_path,
+    ))
+    # dedup → 1 row, NODE_A wins (alphabetical tie-break)
+    assert len(result) == 1
+    assert result[0].close == Decimal("100")
