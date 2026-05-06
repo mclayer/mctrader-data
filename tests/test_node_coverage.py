@@ -96,3 +96,18 @@ def test_tier_coverage_empty_partition_node_coverage_empty(tmp_path: Path) -> No
         start=_ts(0), end=_ts(60),
     )
     assert report.node_coverage == {}
+
+
+def test_coverage_report_direct_construction_default_node_coverage() -> None:
+    """Direct CoverageReport(...) without node_coverage → defaults to {}."""
+    from mctrader_data.orderbook_replay import CoverageReport
+    report = CoverageReport(
+        symbol="KRW-BTC",
+        tier="tick",
+        min_ts_utc=None,
+        max_ts_utc=None,
+        gaps=[],
+        collector_run_ids=[],
+        symbol_manifests=[],
+    )
+    assert report.node_coverage == {}

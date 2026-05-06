@@ -98,3 +98,46 @@ def test_persist_quarantine_records_groups_by_tier(tmp_path: Path) -> None:
     names = {p.name for p in paths}
     assert any(n.startswith("tick-") for n in names)
     assert any(n.startswith("orderbook-") for n in names)
+
+
+def test_persist_quarantine_records_concurrent_no_collision(tmp_path: Path) -> None:
+    """Codex F-5 fix verification — 10 concurrent threads, all artifacts written."""
+    import threading
+
+    def _worker(idx: int, results: list) -> None:
+        record = QuarantineRecord(
+            reason="ACTIVE_ACTIVE_MISMATCH", tier="tick",
+            logical_key=(f"key{idx}",), rows=[], detected_at=_ts(0),
+        )
+        paths = persist_quarantine_records(tmp_path, [record])
+        results.append(paths[0])
+
+    results: list[Path] = []
+    threads = [
+        threading.Thread(target=_worker, args=(i, results))
+        for i in range(10)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # All 10 artifacts written, distinct paths (no collision)
+    assert len(results) == 10
+    assert len({p.name for p in results}) == 10
+    # No leftover .tmp files
+    out_dir = tmp_path / "market" / "manifest" / "quarantine"
+    tmp_files = list(out_dir.glob("*.tmp"))
+    assert tmp_files == []
+
+
+def test_persist_quarantine_records_no_temp_residue(tmp_path: Path) -> None:
+    """After successful write, no temp files left behind."""
+    record = QuarantineRecord(
+        reason="ACTIVE_ACTIVE_MISMATCH", tier="tick",
+        logical_key=(), rows=[], detected_at=_ts(0),
+    )
+    persist_quarantine_records(tmp_path, [record])
+    out_dir = tmp_path / "market" / "manifest" / "quarantine"
+    tmp_files = list(out_dir.glob("*.tmp"))
+    assert tmp_files == []

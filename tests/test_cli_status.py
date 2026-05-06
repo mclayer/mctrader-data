@@ -123,3 +123,26 @@ def test_status_lag_red_threshold(tmp_path: Path) -> None:
     runner = CliRunner()
     result = runner.invoke(main, ["status", "--root", str(tmp_path), "--no-color"])
     assert result.exit_code == 2
+
+
+def test_status_lag_yellow_threshold(tmp_path: Path) -> None:
+    now = datetime.now(timezone.utc)
+    last = (now - timedelta(seconds=80)).isoformat()  # > lag_yellow=60, < lag_red=300
+    _write_hb(tmp_path, _hb_payload(
+        node_id="NODE_A", now=now, last_event={"tick": last},
+    ))
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["status", "--root", str(tmp_path), "--no-color"])
+    assert result.exit_code == 1
+
+
+def test_status_malformed_heartbeat_json(tmp_path: Path) -> None:
+    """Malformed JSON → reported as red (worst_level 2)."""
+    hb_dir = tmp_path / "market" / "manifest"
+    hb_dir.mkdir(parents=True, exist_ok=True)
+    (hb_dir / "heartbeat-NODE_BAD.json").write_text("{not valid json", encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["status", "--root", str(tmp_path), "--no-color"])
+    assert result.exit_code == 2

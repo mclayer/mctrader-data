@@ -449,9 +449,17 @@ def persist_quarantine_records(
     Path format: ``{tier}-{detected_at_iso}-{batch_seq:06d}.json``
     - tier: per-record (records grouped by tier defensively)
     - detected_at_iso: ISO compact UTC (``%Y%m%dT%H%M%SZ``)
-    - batch_seq: 6-digit zero-padded, picked as smallest non-existing seq
+    - batch_seq: 6-digit zero-padded, allocated atomically via O_EXCL
 
-    Atomic: temp -> fsync -> os.replace. Append-only (existing 파일 덮어쓰지 않음).
+    Concurrency-safe (Codex F-5 PUSH-BACK fix):
+    - Sequence reservation uses ``os.open(..., O_CREAT | O_EXCL)`` to prevent
+      collision under shared-storage active-active concurrent calls.
+    - Temp file name is unique per writer (pid + thread id + monotonic ns) so
+      two writers reserving the same logical name cannot share a temp.
+    - ``os.replace(temp, candidate)`` then overwrites the (empty) reserved
+      file with payload content atomically.
+
+    Append-only (existing artifacts 손실 방지). atomic write (temp → fsync → replace).
 
     Returns: written file paths (per tier batch).
 
@@ -468,15 +476,22 @@ def persist_quarantine_records(
         by_tier.setdefault(r.tier, []).append(r)
 
     written: list[Path] = []
+    import threading as _threading
+    writer_id = f"{os.getpid()}-{_threading.get_ident()}-{time.monotonic_ns()}"
     for tier, batch in by_tier.items():
         detected_at = batch[0].detected_at
         iso_compact = detected_at.strftime("%Y%m%dT%H%M%SZ")
+        # Atomic sequence reservation via O_EXCL
         seq = 0
+        candidate: Path
         while True:
             candidate = out_dir / f"{tier}-{iso_compact}-{seq:06d}.json"
-            if not candidate.exists():
+            try:
+                fd = os.open(str(candidate), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.close(fd)
                 break
-            seq += 1
+            except FileExistsError:
+                seq += 1
         payload = {
             "tier": tier,
             "count": len(batch),
@@ -490,7 +505,8 @@ def persist_quarantine_records(
                 for r in batch
             ],
         }
-        temp = candidate.with_suffix(candidate.suffix + ".tmp")
+        # Unique per-writer temp (avoid temp collision under concurrent shared storage)
+        temp = candidate.with_suffix(f".{writer_id}.tmp")
         with temp.open("w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, default=str, indent=None)
             f.flush()

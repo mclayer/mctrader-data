@@ -18,6 +18,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Literal
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -523,6 +524,10 @@ def tier_coverage(
         node_min: datetime | None = None
         node_max: datetime | None = None
         for fp in files:
+            # Parquet metadata read is best-effort: ts envelope is diagnostic-only
+            # and partial reads should not abort the entire coverage report.
+            # Catch OSError (file gone / permission) + pyarrow.ArrowException
+            # (schema or read errors).
             try:
                 pf = pq.ParquetFile(fp)
                 for rg_idx in range(pf.num_row_groups):
@@ -536,7 +541,7 @@ def tier_coverage(
                         node_min = ts_min
                     if isinstance(ts_max, datetime) and (node_max is None or ts_max > node_max):
                         node_max = ts_max
-            except Exception:
+            except (OSError, pa.ArrowException):
                 continue
         node_coverage[node_key] = NodeCoverage(
             min_ts_utc=node_min,
@@ -546,12 +551,14 @@ def tier_coverage(
         )
 
     symbol_manifests: list[str] = []
+    # Manifest list is best-effort diagnostic too — OSError / pydantic ValidationError
+    # / json decode error during manifest read should not block CoverageReport.
     try:
         for manifest_obj in list_manifests(root):
             if symbol in manifest_obj.selected_symbols:
                 from mctrader_data.manifest import manifest_path
                 symbol_manifests.append(str(manifest_path(root, manifest_obj.collector_run_id)))
-    except Exception:
+    except (OSError, ValueError):
         pass
 
     return CoverageReport(

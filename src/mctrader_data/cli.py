@@ -392,7 +392,7 @@ def status(
         node_id = f.stem.removeprefix("heartbeat-")
         try:
             data = _json.loads(f.read_text(encoding="utf-8"))
-        except Exception as e:
+        except (OSError, _json.JSONDecodeError) as e:
             click.echo(f"failed to read {f}: {e}", err=True)
             worst_level = max(worst_level, 2)
             continue
