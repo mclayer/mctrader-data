@@ -45,3 +45,26 @@ def test_skip_policy_returns_skip() -> None:
 @pytest.mark.parametrize("policy", list(PartialFailurePolicy))
 def test_policy_enum_values(policy: PartialFailurePolicy) -> None:
     assert policy.value in {"halt", "quarantine", "skip"}
+
+
+# MCT-92 — active-active mismatch reason
+def test_active_active_mismatch_reason_exists() -> None:
+    assert QuarantineReason.ACTIVE_ACTIVE_MISMATCH.value == "ACTIVE_ACTIVE_MISMATCH"
+
+
+def test_active_active_mismatch_default_decision_is_quarantine() -> None:
+    assert (
+        resolve_decision(
+            QuarantineReason.ACTIVE_ACTIVE_MISMATCH, PartialFailurePolicy.QUARANTINE
+        )
+        is PolicyDecision.QUARANTINE
+    )
+
+
+def test_active_active_mismatch_halt_policy_returns_halt() -> None:
+    assert (
+        resolve_decision(
+            QuarantineReason.ACTIVE_ACTIVE_MISMATCH, PartialFailurePolicy.HALT
+        )
+        is PolicyDecision.HALT
+    )

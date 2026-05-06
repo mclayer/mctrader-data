@@ -17,6 +17,8 @@ class QuarantineReason(StrEnum):
     VALUE_OUT_OF_RANGE = "VALUE_OUT_OF_RANGE"
     SCHEMA_MISMATCH = "SCHEMA_MISMATCH"
     VALUE_ABSENCE = "VALUE_ABSENCE"
+    # MCT-92 — active-active multi-node read-side dedup mismatch
+    ACTIVE_ACTIVE_MISMATCH = "ACTIVE_ACTIVE_MISMATCH"
 
 
 class PolicyDecision(StrEnum):
@@ -31,6 +33,8 @@ _DEFAULT_TRIGGER_TABLE: dict[QuarantineReason, PolicyDecision] = {
     QuarantineReason.VALUE_OUT_OF_RANGE: PolicyDecision.QUARANTINE,
     QuarantineReason.SCHEMA_MISMATCH: PolicyDecision.HALT,
     QuarantineReason.VALUE_ABSENCE: PolicyDecision.QUARANTINE,
+    # MCT-92 — multi-node active-active mismatch quarantine (best-effort dedup)
+    QuarantineReason.ACTIVE_ACTIVE_MISMATCH: PolicyDecision.QUARANTINE,
 }
 
 
