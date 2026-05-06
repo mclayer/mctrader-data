@@ -227,3 +227,60 @@ def test_tier_coverage_empty_partition(tmp_path: Path) -> None:
     assert report.max_ts_utc is None
     assert report.gaps == []
     assert report.collector_run_ids == []
+
+
+# MCT-92 — multi-node scan + dedup + tier_coverage 신규 file naming 호환
+def test_scan_ticks_two_nodes_auto_dedup(tmp_path: Path) -> None:
+    """양 node tick partition → multi-node 자동 감지 + dedup transparent."""
+    wa = TickWriter(
+        root=tmp_path, exchange="bithumb", symbol="KRW-BTC", snapshot_id="ign",
+        node_id="NODE_A", collector_run_id="NODE_A-A",
+    )
+    wa.append(_tick(0))
+    wa.append(_tick(1))
+    wa.close()
+    wb = TickWriter(
+        root=tmp_path, exchange="bithumb", symbol="KRW-BTC", snapshot_id="ign",
+        node_id="NODE_B", collector_run_id="NODE_B-A",
+    )
+    wb.append(_tick(0))
+    wb.append(_tick(1))
+    wb.close()
+
+    result = list(scan_ticks(
+        root=tmp_path, exchange="bithumb", symbol="KRW-BTC",
+        start=_ts(0), end=_ts(60),
+    ))
+    # dedup 후 2 row (양 node 동일 logical key idempotent skip)
+    assert len(result) == 2
+
+
+def test_tier_coverage_supports_new_file_naming(tmp_path: Path) -> None:
+    """MCT-91 신규 file naming `{collector_run_id}-{batch_seq}.parquet` collector_run_ids harvest."""
+    wa = TickWriter(
+        root=tmp_path, exchange="bithumb", symbol="KRW-BTC", snapshot_id="ign",
+        node_id="NODE_A", collector_run_id="NODE_A-20260506T120000Z",
+    )
+    wa.append(_tick(0))
+    wa.close()
+
+    report = tier_coverage(
+        root=tmp_path, exchange="bithumb", symbol="KRW-BTC", tier="tick",
+        start=_ts(0), end=_ts(60),
+    )
+    assert "NODE_A-20260506T120000Z" in report.collector_run_ids
+
+
+def test_tier_coverage_legacy_part_naming_still_works(tmp_path: Path) -> None:
+    """legacy part-{snapshot_id}.parquet backward compat."""
+    w = TickWriter(
+        root=tmp_path, exchange="bithumb", symbol="KRW-BTC", snapshot_id="legacy-s1",
+    )
+    w.append(_tick(0))
+    w.close()
+
+    report = tier_coverage(
+        root=tmp_path, exchange="bithumb", symbol="KRW-BTC", tier="tick",
+        start=_ts(0), end=_ts(60),
+    )
+    assert "legacy-s1" in report.collector_run_ids

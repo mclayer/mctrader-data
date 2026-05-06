@@ -134,21 +134,26 @@ def _row_to_event(row: dict) -> OrderbookEventRecord:
     )
 
 
-def _read_parquet_rows(part_dir: Path) -> Iterator[tuple[int, int, dict]]:
-    """Yield ``(file_offset, row_idx, row_dict)`` from all parquet files in dir.
+def _read_parquet_rows(part_dir: Path) -> Iterator[tuple[int, int, dict, str]]:
+    """Yield ``(file_offset, row_idx, row_dict, file_path)`` from all parquet files.
 
     file_offset = lex-sorted file index (deterministic across runs).
     row_idx = position within file.
+    file_path = posix-form file path string (for node= extraction by caller).
+
+    MCT-92 — recursive `rglob` 로 `node=NODE_A/` 등 sub-directory 의 file 도 read.
+    legacy `part-*.parquet` (no `node=` directory) + 신규 `{collector_run_id}-{batch_seq}.parquet`
+    양쪽 호환.
     """
     if not part_dir.exists():
         return
-    files = sorted(part_dir.glob("*.parquet"))
+    files = sorted(part_dir.rglob("*.parquet"))
     for file_offset, fp in enumerate(files):
         pf = pq.ParquetFile(fp)
         table = pf.read()
         rows = table.to_pylist()
         for row_idx, row in enumerate(rows):
-            yield (file_offset, row_idx, row)
+            yield (file_offset, row_idx, row, fp.as_posix())
 
 
 def scan_ticks(
@@ -164,23 +169,66 @@ def scan_ticks(
 
     ``simulated_clock`` 주입 시 ``received_at <= simulated_clock`` filter (lookahead 방어).
     Sort: ``(ts_utc ASC, received_at ASC, file_offset ASC)``.
+
+    MCT-92 — multi-node mode 자동 감지 (distinct `node=` ≥ 2). multi-node 시 ADR-009
+    §D10.7 6-tuple logical key dedup 적용 + content mismatch quarantine.
     """
+    import re
+    from types import SimpleNamespace
+
+    from mctrader_data.dedup import (
+        NODE_PRIORITY_DEFAULT_SENTINEL,
+        deduplicate_ticks,
+    )
+
     if start.tzinfo is None or end.tzinfo is None:
         raise ValueError("start/end must be timezone-aware UTC")
-    rows: list[tuple[datetime, datetime, int, int, dict]] = []
+
+    _NODE_RE = re.compile(r"/node=([^/]+)/")
+
+    rows: list[tuple[datetime, datetime, int, int, dict, str]] = []
     for date_str in _date_range(start, end):
         part_dir = _tick_partition_dir(root, exchange, symbol, date_str)
-        for file_offset, row_idx, row in _read_parquet_rows(part_dir):
+        for file_offset, row_idx, row, file_path in _read_parquet_rows(part_dir):
             ts = row["ts_utc"]
             received = row["received_at"]
             if not (start <= ts < end):
                 continue
             if simulated_clock is not None and received > simulated_clock:
                 continue
-            rows.append((ts, received, file_offset, row_idx, row))
+            rows.append((ts, received, file_offset, row_idx, row, file_path))
     rows.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
-    for _, _, _, _, row in rows:
-        yield _row_to_tick(row)
+
+    # multi-node 자동 감지
+    distinct_nodes: set[str] = set()
+    for _, _, _, _, _, fp in rows:
+        m = _NODE_RE.search(fp)
+        distinct_nodes.add(m.group(1) if m else NODE_PRIORITY_DEFAULT_SENTINEL)
+    multi_node = len(distinct_nodes) >= 2
+
+    if not multi_node:
+        for _, _, _, _, row, _ in rows:
+            yield _row_to_tick(row)
+        return
+
+    # dedup wrapping
+    wrapped: list[SimpleNamespace] = []
+    for ts, received, _, _, row, fp in rows:
+        m = _NODE_RE.search(fp)
+        node_id = m.group(1) if m else NODE_PRIORITY_DEFAULT_SENTINEL
+        wrapped.append(SimpleNamespace(
+            exchange=row["exchange"], symbol=row["symbol"],
+            ts_utc=ts, received_at=received,
+            price=Decimal(str(row["price"])),
+            quantity=Decimal(str(row["quantity"])),
+            side=row["side"],
+            raw_json=row.get("raw_json"),
+            _row_dict=row,
+            node_id=node_id,
+        ))
+    result = deduplicate_ticks(wrapped, multi_node=True)
+    for r in result.emitted:
+        yield _row_to_tick(r._row_dict)
 
 
 def scan_orderbook_events(
@@ -193,22 +241,61 @@ def scan_orderbook_events(
     simulated_clock: datetime | None = None,
 ) -> Iterator[OrderbookEventRecord]:
     """Scan orderbook.v1 partitions for ``[start, end)`` half-open. Same filter/sort as ticks."""
+    import re
+    from types import SimpleNamespace
+
+    from mctrader_data.dedup import (
+        NODE_PRIORITY_DEFAULT_SENTINEL,
+        deduplicate_orderbook_events,
+    )
+
     if start.tzinfo is None or end.tzinfo is None:
         raise ValueError("start/end must be timezone-aware UTC")
-    rows: list[tuple[datetime, datetime, int, int, dict]] = []
+
+    _NODE_RE = re.compile(r"/node=([^/]+)/")
+
+    rows: list[tuple[datetime, datetime, int, int, dict, str]] = []
     for date_str in _date_range(start, end):
         part_dir = _orderbook_partition_dir(root, exchange, symbol, date_str)
-        for file_offset, row_idx, row in _read_parquet_rows(part_dir):
+        for file_offset, row_idx, row, file_path in _read_parquet_rows(part_dir):
             ts = row["ts_utc"]
             received = row["received_at"]
             if not (start <= ts < end):
                 continue
             if simulated_clock is not None and received > simulated_clock:
                 continue
-            rows.append((ts, received, file_offset, row_idx, row))
+            rows.append((ts, received, file_offset, row_idx, row, file_path))
     rows.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
-    for _, _, _, _, row in rows:
-        yield _row_to_event(row)
+
+    distinct_nodes: set[str] = set()
+    for _, _, _, _, _, fp in rows:
+        m = _NODE_RE.search(fp)
+        distinct_nodes.add(m.group(1) if m else NODE_PRIORITY_DEFAULT_SENTINEL)
+    multi_node = len(distinct_nodes) >= 2
+
+    if not multi_node:
+        for _, _, _, _, row, _ in rows:
+            yield _row_to_event(row)
+        return
+
+    wrapped: list[SimpleNamespace] = []
+    for ts, received, _, _, row, fp in rows:
+        m = _NODE_RE.search(fp)
+        node_id = m.group(1) if m else NODE_PRIORITY_DEFAULT_SENTINEL
+        wrapped.append(SimpleNamespace(
+            exchange=row["exchange"], symbol=row["symbol"],
+            ts_utc=ts, received_at=received,
+            event_type=row["event_type"], side=row["side"],
+            level=int(row["level"]),
+            price=Decimal(str(row["price"])),
+            quantity=Decimal(str(row["quantity"])),
+            raw_json=row.get("raw_json"),
+            _row_dict=row,
+            node_id=node_id,
+        ))
+    result = deduplicate_orderbook_events(wrapped, multi_node=True)
+    for r in result.emitted:
+        yield _row_to_event(r._row_dict)
 
 
 def get_orderbook_at(
@@ -387,15 +474,22 @@ def tier_coverage(
                 )
             )
 
+    # MCT-92 — recursive glob (`rglob`) 로 legacy `part-{run_id}.parquet` (no node=) +
+    # 신규 `{collector_run_id}-{batch_seq}.parquet` (node=NODE_A/ subdir 안) 양쪽 catch.
     collector_run_ids: set[str] = set()
     for date_str in _date_range(start, end):
         part_dir = partition_resolver(root, exchange, symbol, date_str)
         if part_dir.exists():
-            for fp in sorted(part_dir.glob("part-*.parquet")):
-                # filename = part-{collector_run_id}.parquet
-                stem = fp.stem  # part-{run_id}
+            for fp in sorted(part_dir.rglob("*.parquet")):
+                stem = fp.stem
                 if stem.startswith("part-"):
+                    # legacy: part-{collector_run_id}
                     collector_run_ids.add(stem[len("part-"):])
+                elif "-" in stem:
+                    # MCT-92 신규: {collector_run_id}-{batch_seq}
+                    # collector_run_id 자체에 `-` 포함 (NODE_A-20260505T120000Z)
+                    # → split 시 마지막 `-` 가 batch_seq separator
+                    collector_run_ids.add(stem.rsplit("-", 1)[0])
 
     symbol_manifests: list[str] = []
     try:
