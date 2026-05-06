@@ -18,8 +18,9 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Literal
 
+import pyarrow as pa
 import pyarrow.parquet as pq
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from mctrader_data.orderbook_storage import (
     ORDERBOOK_SCHEMA_VERSION,
@@ -412,6 +413,20 @@ class GapEntry(BaseModel):
     gap_seconds: float
 
 
+class NodeCoverage(BaseModel):
+    """Per-node coverage breakdown (MCT-93 X4).
+
+    legacy partition (no node= level) → key = NODE_PRIORITY_DEFAULT_SENTINEL ("zzz_DEFAULT").
+    """
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    min_ts_utc: datetime | None = None
+    max_ts_utc: datetime | None = None
+    gaps: list[GapEntry] = Field(default_factory=list)
+    collector_run_ids: list[str] = Field(default_factory=list)
+
+
 class CoverageReport(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid", arbitrary_types_allowed=True)
 
@@ -422,6 +437,7 @@ class CoverageReport(BaseModel):
     gaps: list[GapEntry]
     collector_run_ids: list[str]
     symbol_manifests: list[str]
+    node_coverage: dict[str, NodeCoverage] = Field(default_factory=dict)
 
 
 def tier_coverage(
@@ -476,28 +492,73 @@ def tier_coverage(
 
     # MCT-92 — recursive glob (`rglob`) 로 legacy `part-{run_id}.parquet` (no node=) +
     # 신규 `{collector_run_id}-{batch_seq}.parquet` (node=NODE_A/ subdir 안) 양쪽 catch.
+    # MCT-93 — per-node breakdown (`node_coverage`) populated via `node=` regex on path.
+    import re as _re
+    from mctrader_data.dedup import NODE_PRIORITY_DEFAULT_SENTINEL
+    node_re = _re.compile(r"[/\\]node=([^/\\]+)[/\\]")
+
     collector_run_ids: set[str] = set()
+    node_run_ids: dict[str, set[str]] = {}
+    node_files: dict[str, list[Path]] = {}
     for date_str in _date_range(start, end):
         part_dir = partition_resolver(root, exchange, symbol, date_str)
         if part_dir.exists():
             for fp in sorted(part_dir.rglob("*.parquet")):
                 stem = fp.stem
                 if stem.startswith("part-"):
-                    # legacy: part-{collector_run_id}
-                    collector_run_ids.add(stem[len("part-"):])
-                elif "-" in stem:
-                    # MCT-92 신규: {collector_run_id}-{batch_seq}
-                    # collector_run_id 자체에 `-` 포함 (NODE_A-20260505T120000Z)
-                    # → split 시 마지막 `-` 가 batch_seq separator
-                    collector_run_ids.add(stem.rsplit("-", 1)[0])
+                    run_id = stem[len("part-"):]
+                else:
+                    run_id = stem.rsplit("-", 1)[0] if "-" in stem else stem
+                collector_run_ids.add(run_id)
+
+                node_match = node_re.search(str(fp))
+                node_key = node_match.group(1) if node_match else NODE_PRIORITY_DEFAULT_SENTINEL
+                node_run_ids.setdefault(node_key, set()).add(run_id)
+                node_files.setdefault(node_key, []).append(fp)
+
+    # Per-node ts envelope from parquet metadata (column 0 = ts_utc per
+    # tick_storage._TICK_SCHEMA / orderbook_storage._OB_SCHEMA).
+    # gaps = union-level (per-node gap re-computation 은 후속 minor — 단순 X4 scope).
+    node_coverage: dict[str, NodeCoverage] = {}
+    for node_key, files in node_files.items():
+        node_min: datetime | None = None
+        node_max: datetime | None = None
+        for fp in files:
+            # Parquet metadata read is best-effort: ts envelope is diagnostic-only
+            # and partial reads should not abort the entire coverage report.
+            # Catch OSError (file gone / permission) + pyarrow.ArrowException
+            # (schema or read errors).
+            try:
+                pf = pq.ParquetFile(fp)
+                for rg_idx in range(pf.num_row_groups):
+                    col_meta = pf.metadata.row_group(rg_idx).column(0)
+                    stats = col_meta.statistics
+                    if stats is None:
+                        continue
+                    ts_min = stats.min
+                    ts_max = stats.max
+                    if isinstance(ts_min, datetime) and (node_min is None or ts_min < node_min):
+                        node_min = ts_min
+                    if isinstance(ts_max, datetime) and (node_max is None or ts_max > node_max):
+                        node_max = ts_max
+            except (OSError, pa.ArrowException):
+                continue
+        node_coverage[node_key] = NodeCoverage(
+            min_ts_utc=node_min,
+            max_ts_utc=node_max,
+            gaps=[],
+            collector_run_ids=sorted(node_run_ids[node_key]),
+        )
 
     symbol_manifests: list[str] = []
+    # Manifest list is best-effort diagnostic too — OSError / pydantic ValidationError
+    # / json decode error during manifest read should not block CoverageReport.
     try:
-        for m in list_manifests(root):
-            if symbol in m.selected_symbols:
+        for manifest_obj in list_manifests(root):
+            if symbol in manifest_obj.selected_symbols:
                 from mctrader_data.manifest import manifest_path
-                symbol_manifests.append(str(manifest_path(root, m.collector_run_id)))
-    except Exception:
+                symbol_manifests.append(str(manifest_path(root, manifest_obj.collector_run_id)))
+    except (OSError, ValueError):
         pass
 
     return CoverageReport(
@@ -508,4 +569,5 @@ def tier_coverage(
         gaps=gaps,
         collector_run_ids=sorted(collector_run_ids),
         symbol_manifests=symbol_manifests,
+        node_coverage=node_coverage,
     )
