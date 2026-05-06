@@ -7,6 +7,10 @@ Atomic write: write-temp -> fsync -> os.replace.
 Per MCT-91 (X2 of MCT-89). 5s default interval. Each node writes its own file
 (cross-host write contention 0). Consumer reads via read_heartbeat() with
 schema_version best-effort parse + warning on mismatch.
+
+MCT-93 (X4 of MCT-89): HeartbeatCounterSink concrete adapter for
+DedupCounterSink Protocol — composition + threading.Lock for cross-thread
+safety (collector asyncio loop ↔ scan caller sync).
 """
 from __future__ import annotations
 
@@ -15,6 +19,7 @@ import contextlib
 import json
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -142,3 +147,24 @@ def read_heartbeat(root: Path | str, node_id: str) -> dict[str, Any]:
             node_id, data.get("schema_version"), HEARTBEAT_SCHEMA_VERSION,
         )
     return data
+
+
+class HeartbeatCounterSink:
+    """DedupCounterSink Protocol concrete impl, wrapping HeartbeatWriter.
+
+    MCT-93 X4 — composition (not inheritance) over HeartbeatWriter.
+    threading.Lock chosen (not asyncio.Lock) because dedup callers are
+    synchronous and may run outside the collector's asyncio event loop.
+    """
+
+    def __init__(self, writer: HeartbeatWriter):
+        self._writer = writer
+        self._lock = threading.Lock()
+
+    def increment_dup_skip(self, n: int = 1) -> None:
+        with self._lock:
+            self._writer.metrics.dup_skip_count += n
+
+    def increment_quarantine(self, n: int = 1) -> None:
+        with self._lock:
+            self._writer.metrics.quarantine_count += n

@@ -1,6 +1,7 @@
 """Tier-별 logical key extractor + node priority + content mismatch detector.
 
 Per MCT-92 Phase 3 (X3 of MCT-89). Transparent read-side dedup for active-active HA.
+MCT-93 Phase 4 (X4): persist_quarantine_records helper for caller-side artifact write.
 
 Architect 결정 freeze (plan §"Architect 결정 8항"):
 - T1 hybrid late correction: received_at MAX + tie-break node priority alphabetical
@@ -16,16 +17,20 @@ Contract enforcement:
 - ADR-009 §D10.7 T2 6-tuple fallback (Bithumb tx_id 부재)
 - ADR-009 §D11.8 T3 8-tuple fallback best-effort
 - heartbeat-schema.v1 metrics.dup_skip_count / quarantine_count emit hook (DedupCounterSink protocol)
+- heartbeat-schema.v1 §Related Manifest Artifacts (X4 amendment) — quarantine artifact path/payload
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, Protocol
-from collections.abc import Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -354,6 +359,7 @@ def deduplicate_ticks(
 # T3 orderbook dedup (8-tuple, best-effort, mismatch → quarantine)
 # ----------------------------------------------------------------------
 
+
 def deduplicate_orderbook_events(
     rows: Iterable[Any],
     *,
@@ -420,3 +426,75 @@ def deduplicate_orderbook_events(
         quarantine_count=quarantine_count,
         quarantine_records=quarantine_records,
     )
+
+
+# ----------------------------------------------------------------------
+# Quarantine artifact persistence (MCT-93 X4)
+# ----------------------------------------------------------------------
+
+def _serialize_value(v: Any) -> Any:
+    if isinstance(v, datetime):
+        return v.isoformat()
+    if isinstance(v, Decimal):
+        return str(v)
+    return str(v)
+
+
+def persist_quarantine_records(
+    root: Path | str,
+    records: list[QuarantineRecord],
+) -> list[Path]:
+    """Atomic write quarantine artifacts under <root>/market/manifest/quarantine/.
+
+    Path format: ``{tier}-{detected_at_iso}-{batch_seq:06d}.json``
+    - tier: per-record (records grouped by tier defensively)
+    - detected_at_iso: ISO compact UTC (``%Y%m%dT%H%M%SZ``)
+    - batch_seq: 6-digit zero-padded, picked as smallest non-existing seq
+
+    Atomic: temp -> fsync -> os.replace. Append-only (existing 파일 덮어쓰지 않음).
+
+    Returns: written file paths (per tier batch).
+
+    See heartbeat-schema.v1.md §Related Manifest Artifacts.
+    """
+    if not records:
+        return []
+    root_p = Path(root)
+    out_dir = root_p / "market" / "manifest" / "quarantine"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    by_tier: dict[str, list[QuarantineRecord]] = {}
+    for r in records:
+        by_tier.setdefault(r.tier, []).append(r)
+
+    written: list[Path] = []
+    for tier, batch in by_tier.items():
+        detected_at = batch[0].detected_at
+        iso_compact = detected_at.strftime("%Y%m%dT%H%M%SZ")
+        seq = 0
+        while True:
+            candidate = out_dir / f"{tier}-{iso_compact}-{seq:06d}.json"
+            if not candidate.exists():
+                break
+            seq += 1
+        payload = {
+            "tier": tier,
+            "count": len(batch),
+            "records": [
+                {
+                    "reason": r.reason,
+                    "logical_key": [_serialize_value(x) for x in r.logical_key],
+                    "rows": [str(row) for row in r.rows],
+                    "detected_at": r.detected_at.isoformat(),
+                }
+                for r in batch
+            ],
+        }
+        temp = candidate.with_suffix(candidate.suffix + ".tmp")
+        with temp.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, default=str, indent=None)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp, candidate)
+        written.append(candidate)
+    return written

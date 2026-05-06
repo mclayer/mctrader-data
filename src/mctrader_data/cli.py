@@ -340,5 +340,126 @@ def collect(
         sys.exit(0)
 
 
+# MCT-93 (X4 of MCT-89) — diagnostic surface
+
+
+def _level_color(level: int) -> str:
+    if level == 0:
+        return "\033[32m"  # green
+    if level == 1:
+        return "\033[33m"  # yellow
+    return "\033[31m"  # red
+
+
+@main.command()
+@click.option("--root", type=click.Path(path_type=Path), default=None)
+@click.option("--fresh-yellow-seconds", default=10.0, type=float)
+@click.option("--fresh-red-seconds", default=30.0, type=float)
+@click.option("--lag-yellow-seconds", default=60.0, type=float)
+@click.option("--lag-red-seconds", default=300.0, type=float)
+@click.option("--format", "fmt", type=click.Choice(["human", "json"]), default="human")
+@click.option("--no-color", is_flag=True, help="Disable ANSI color codes (auto-disabled in JSON).")
+def status(
+    root: Path | None,
+    fresh_yellow_seconds: float,
+    fresh_red_seconds: float,
+    lag_yellow_seconds: float,
+    lag_red_seconds: float,
+    fmt: str,
+    no_color: bool,
+) -> None:
+    """Show heartbeat freshness / lag / dedup metrics for all nodes.
+
+    Exit code: 0 (all green) / 1 (any yellow) / 2 (any red or no heartbeat).
+    """
+    import json as _json
+    from datetime import datetime as _datetime
+    from datetime import timezone as _tz
+
+    root_resolved = resolve_data_root(root_override=root)
+    hb_dir = root_resolved / "market" / "manifest"
+
+    files = sorted(hb_dir.glob("heartbeat-*.json"))
+    if not files:
+        click.echo(f"no heartbeat files in {hb_dir}", err=True)
+        sys.exit(2)
+
+    now_wall = _datetime.now(_tz.utc)
+    nodes: list[dict] = []
+    worst_level = 0
+
+    for f in files:
+        node_id = f.stem.removeprefix("heartbeat-")
+        try:
+            data = _json.loads(f.read_text(encoding="utf-8"))
+        except Exception as e:
+            click.echo(f"failed to read {f}: {e}", err=True)
+            worst_level = max(worst_level, 2)
+            continue
+
+        try:
+            hb_now = _datetime.fromisoformat(data["now"].replace("Z", "+00:00"))
+            freshness = (now_wall - hb_now).total_seconds()
+        except (KeyError, ValueError):
+            freshness = float("inf")
+
+        ws = data.get("ws_state", "unknown")
+        node_level = 0
+        if ws == "disconnected" or freshness >= fresh_red_seconds:
+            node_level = 2
+        elif freshness >= fresh_yellow_seconds:
+            node_level = 1
+
+        tier_lags: dict[str, float] = {}
+        for tier, ts_iso in (data.get("last_event_ts_per_tier") or {}).items():
+            try:
+                ts = _datetime.fromisoformat(ts_iso.replace("Z", "+00:00"))
+                lag = (now_wall - ts).total_seconds()
+                tier_lags[tier] = lag
+                if lag >= lag_red_seconds:
+                    node_level = max(node_level, 2)
+                elif lag >= lag_yellow_seconds:
+                    node_level = max(node_level, 1)
+            except (ValueError, AttributeError):
+                continue
+
+        worst_level = max(worst_level, node_level)
+        nodes.append({
+            "node_id": node_id,
+            "freshness_seconds": round(freshness, 1) if freshness != float("inf") else None,
+            "ws_state": ws,
+            "tier_lags": {k: round(v, 1) for k, v in tier_lags.items()},
+            "metrics": data.get("metrics") or {},
+            "level": node_level,
+        })
+
+    if fmt == "json":
+        click.echo(_json.dumps({"nodes": nodes, "worst_level": worst_level}, indent=2))
+    else:
+        click.echo(f"Heartbeat status (root={root_resolved})")
+        click.echo(
+            f"{'node_id':<14}{'fresh':<10}{'ws_state':<16}"
+            f"{'lag_tick':<12}{'lag_ob':<12}{'dup_skip':<10}{'quarantine':<10}"
+        )
+        for n in nodes:
+            color = "" if no_color else _level_color(n["level"])
+            reset = "" if no_color else "\033[0m"
+            fresh_str = (
+                f"{n['freshness_seconds']:.1f}s" if n["freshness_seconds"] is not None else "—"
+            )
+            lag_t = n["tier_lags"].get("tick")
+            lag_o = n["tier_lags"].get("orderbook")
+            click.echo(
+                f"{color}{n['node_id']:<14}{fresh_str:<10}{n['ws_state']:<16}"
+                f"{(f'{lag_t:.1f}s' if lag_t is not None else '—'):<12}"
+                f"{(f'{lag_o:.1f}s' if lag_o is not None else '—'):<12}"
+                f"{n['metrics'].get('dup_skip_count', 0):<10}"
+                f"{n['metrics'].get('quarantine_count', 0):<10}"
+                f"{reset}"
+            )
+
+    sys.exit(worst_level)
+
+
 if __name__ == "__main__":  # pragma: no cover
     main()
