@@ -4,6 +4,9 @@
 project:
   name: mctrader
 
+# CFP-128 / ADR-033 — Docker-first 채택 명시 (default와 동일하나 explicit)
+infra_strategy: docker_first
+
 github:
   org: mclayer
   repo: mctrader-data

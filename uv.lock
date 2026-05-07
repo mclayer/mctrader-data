@@ -177,7 +177,7 @@ wheels = [
 
 [[package]]
 name = "mctrader-data"
-version = "0.7.0"
+version = "0.9.0"
 source = { editable = "." }
 dependencies = [
     { name = "click" },

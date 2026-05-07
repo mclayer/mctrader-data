@@ -1,0 +1,56 @@
+# CFP-128 / ADR-033 — mctrader-data .dockerignore
+# build context 축소 + secret leak 방지
+
+# Build artifacts
+dist
+build
+*.egg-info
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.coverage
+htmlcov
+
+# Git / VCS
+.git
+.gitignore
+.gitattributes
+
+# CI / GitHub
+.github
+
+# Codeforge
+.claude
+.claude-work
+
+# Docs / markdown
+*.md
+docs
+# Exception: README.md required by hatch (pyproject.toml readme field).
+!README.md
+
+# Env / secrets
+.env
+.env.*
+*.pem
+*.key
+*.crt
+
+# IDE
+.vscode
+.idea
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local data (Parquet outputs)
+data
+out
+
+# uv lock (regenerated in build)
+uv.lock
+
+# Tests (production image excludes)
+tests

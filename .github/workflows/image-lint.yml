@@ -1,0 +1,32 @@
+name: Image Lint (hadolint)
+
+# CFP-128 / ADR-033 — Docker-first 1st-layer image lint (hadolint).
+# trivy image scan은 ghcr publish Story 후속 (Pilot 외).
+# Reference: mclayer/plugin-codeforge/templates/github-workflows/container-image-scan.yml
+
+on:
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'compose.yml'
+      - '.github/workflows/image-lint.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+
+jobs:
+  hadolint:
+    name: Dockerfile lint (hadolint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          recursive: false
+          failure-threshold: warning
+          format: tty
+          no-color: false
