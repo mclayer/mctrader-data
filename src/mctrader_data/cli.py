@@ -212,6 +212,11 @@ def backfill(
     "--heartbeat-root", type=click.Path(path_type=Path), default=None,
     help="Heartbeat artifact root (default: same as --root).",
 )
+@click.option(
+    "--health-port", type=int, default=None,
+    help="HTTP /health endpoint port (Docker HEALTHCHECK). "
+         "Default: $MCTRADER_HEALTH_PORT or 8080. CFP-128 / ADR-033.",
+)
 @click.option("--log-level", default="INFO", type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"]))
 def collect(
     symbols: str | None,
@@ -222,6 +227,7 @@ def collect(
     node_id: str | None,
     heartbeat_interval: float,
     heartbeat_root: Path | None,
+    health_port: int | None,
     log_level: str,
 ) -> None:
     """Forward-only WebSocket collector daemon (MCT-58).
@@ -317,6 +323,11 @@ def collect(
             interval_seconds=heartbeat_interval,
         )
 
+        # CFP-128 / ADR-033 Pilot — HealthServer for Docker HEALTHCHECK
+        from mctrader_data.health_server import HealthServer
+        health = HealthServer(heartbeat_writer=heartbeat, port=health_port)
+        log.info("health server bound port=%d", health.port)
+
         daemons = [
             CollectorDaemon(
                 root=root_resolved, exchange=exchange, symbol=sym,
@@ -330,6 +341,7 @@ def collect(
         collector = MultiSymbolCollector(
             daemons, manifest=manifest, manifest_root=root_resolved,
             heartbeat_writer=heartbeat,
+            health_server=health,
         )
         await collector.run()
 

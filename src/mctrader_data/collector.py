@@ -196,11 +196,13 @@ class MultiSymbolCollector:
         manifest: CollectorManifest | None = None,
         manifest_root: Path | None = None,
         heartbeat_writer: object | None = None,
+        health_server: object | None = None,
     ) -> None:
         self._daemons = daemons
         self._manifest = manifest
         self._manifest_root = manifest_root
         self._heartbeat_writer = heartbeat_writer
+        self._health_server = health_server
 
     async def run(self) -> None:
         if self._manifest is not None and self._manifest_root is not None:
@@ -225,6 +227,14 @@ class MultiSymbolCollector:
             )
             log.info("[collector] heartbeat task spawned")
 
+        # CFP-128 / ADR-033 Pilot — HealthServer (HTTP /health) for Docker HEALTHCHECK
+        if self._health_server is not None:
+            self._health_server.start()  # type: ignore[attr-defined]
+            log.info(
+                "[collector] health server started on port %s",
+                getattr(self._health_server, "port", "?"),
+            )
+
         tasks = [asyncio.create_task(d.run()) for d in self._daemons]
         try:
             await asyncio.gather(*tasks, return_exceptions=False)
@@ -245,6 +255,11 @@ class MultiSymbolCollector:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await heartbeat_task
                 log.info("[collector] heartbeat task shutdown complete")
+            # CFP-128 / ADR-033 — HealthServer graceful stop
+            if self._health_server is not None:
+                with contextlib.suppress(Exception):
+                    self._health_server.stop()  # type: ignore[attr-defined]
+                log.info("[collector] health server shutdown complete")
 
 
 async def fetch_top_n_krw_symbols(n: int = 10) -> list[Symbol]:
