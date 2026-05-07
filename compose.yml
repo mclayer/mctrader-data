@@ -1,0 +1,46 @@
+# mctrader-data Pilot — Docker-first compose (CFP-128 / ADR-033 §7.4 mandate)
+# §7.4 OpRiskArch 4 항목 박제:
+#   - restart policy: unless-stopped (forward-only, 데이터 누락 회피)
+#   - volume DR: named volume mctrader_data (host path leak 방지)
+#   - health check: HTTP /health endpoint (interval 30s, start_period 60s)
+#   - network mode: bridge default, 호스트 port 매핑 0 (HealthServer = container 내부)
+
+services:
+  collector:
+    build: .
+    image: mctrader-data:pilot
+    container_name: mctrader-collector
+    restart: unless-stopped
+    environment:
+      MCTRADER_DATA_ROOT: /var/lib/mctrader/data
+      MCTRADER_HEALTH_PORT: "8080"
+      PYTHONUNBUFFERED: "1"
+      # MCTRADER_NODE_ID: "collector-prod-1"   # uncomment to override hostname-based default
+    volumes:
+      - mctrader_data:/var/lib/mctrader/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health').status==200 else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - mctrader-net
+    # No `ports:` — HealthServer (8080) is internal only.
+    # Outbound: pubwss.bithumb.com:443 (WS) + api.bithumb.com:443 (HTTPS).
+
+volumes:
+  mctrader_data:
+    name: mctrader_data
+    # Default driver = local. Backup recipe (host-side, ad-hoc):
+    #   docker run --rm -v mctrader_data:/src -v "$(pwd)":/dst alpine \
+    #     tar czf /dst/mctrader_data-$(date +%Y%m%d).tar.gz -C /src .
+    # ADR-009 invariant: tick/orderbook = forward-only, backfill 불가 → 일 1회 backup 권장.
+
+networks:
+  mctrader-net:
+    driver: bridge
