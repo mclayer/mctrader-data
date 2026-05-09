@@ -23,6 +23,8 @@ class _DecimalEncoder(json.JSONEncoder):
 def _decimal_iterencode(obj: object, encoder: _DecimalEncoder) -> object:
     """Recursively yield JSON fragments, emitting Decimal as raw number strings."""
     if isinstance(obj, Decimal):
+        if obj.is_nan() or obj.is_infinite():
+            raise ValueError(f"Cannot JSON-encode non-finite Decimal: {obj!r}")
         # Use format(obj, 'f') to avoid scientific notation for normal values
         yield format(obj, "f")
     elif isinstance(obj, dict):

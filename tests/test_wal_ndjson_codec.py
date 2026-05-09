@@ -54,3 +54,9 @@ def test_decode_non_decimal_number_preserved_as_decimal() -> None:
     decoded = decode_line(line)
     assert isinstance(decoded["qty"], Decimal)
     assert decoded["qty"] == Decimal("1.5")
+
+
+def test_encode_nan_decimal_raises() -> None:
+    """NaN Decimal must raise, not produce invalid JSON."""
+    with pytest.raises(ValueError, match="non-finite"):
+        encode_record({"price": Decimal("NaN")})
