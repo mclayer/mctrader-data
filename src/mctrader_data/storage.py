@@ -340,7 +340,7 @@ def scan_exchange_metadata(
     Partition scan: fetched_date from oldest available up to ts_utc.date().
     """
     import pyarrow.parquet as _pq
-    from datetime import date as _date, datetime as _datetime
+    from datetime import date as _date
 
     meta_root = (
         root
@@ -390,21 +390,41 @@ def scan_exchange_metadata(
                 if fetched_at > ts_utc_aware:
                     continue
                 if best is None or fetched_at > best.fetched_at:
-                    from decimal import Decimal as _D
+                    from decimal import Decimal as Dec
+                    raw_date = row["fetched_date"]
+                    parsed_date = (
+                        raw_date if hasattr(raw_date, "year")
+                        else _date.fromisoformat(str(raw_date))
+                    )
                     best = ExchangeMetadataRecord(
                         exchange=str(row["exchange"]),
                         symbol=str(row["symbol"]),
-                        fetched_date=row["fetched_date"] if hasattr(row["fetched_date"], "year") else _date.fromisoformat(str(row["fetched_date"])),
+                        fetched_date=parsed_date,
                         fetched_at=fetched_at,
                         source_snapshot_id=str(row["source_snapshot_id"]),
                         data_hash=str(row["data_hash"]),
                         asset_status=str(row["asset_status"]),
-                        acc_trade_value_24h=_D(str(row["acc_trade_value_24h"])),
-                        tick_size=_D(str(row["tick_size"])) if row.get("tick_size") is not None else None,
-                        min_order_qty=_D(str(row["min_order_qty"])) if row.get("min_order_qty") is not None else None,
-                        fee_maker=_D(str(row["fee_maker"])) if row.get("fee_maker") is not None else None,
-                        fee_taker=_D(str(row["fee_taker"])) if row.get("fee_taker") is not None else None,
-                        min_order_notional_krw=_D(str(row["min_order_notional_krw"])) if row.get("min_order_notional_krw") is not None else None,
+                        acc_trade_value_24h=Dec(str(row["acc_trade_value_24h"])),
+                        tick_size=(
+                            Dec(str(row["tick_size"]))
+                            if row.get("tick_size") is not None else None
+                        ),
+                        min_order_qty=(
+                            Dec(str(row["min_order_qty"]))
+                            if row.get("min_order_qty") is not None else None
+                        ),
+                        fee_maker=(
+                            Dec(str(row["fee_maker"]))
+                            if row.get("fee_maker") is not None else None
+                        ),
+                        fee_taker=(
+                            Dec(str(row["fee_taker"]))
+                            if row.get("fee_taker") is not None else None
+                        ),
+                        min_order_notional_krw=(
+                            Dec(str(row["min_order_notional_krw"]))
+                            if row.get("min_order_notional_krw") is not None else None
+                        ),
                     )
     return best
 
@@ -429,7 +449,7 @@ def scan_orderbook_snapshots(
     Returns an iterable of :class:`OrderbookSnapshotRecord`.
     """
     import pyarrow.parquet as _pq
-    from datetime import date as _date, timedelta as _td
+    from datetime import timedelta as _td
 
     if start.tzinfo is None or end.tzinfo is None:
         raise ValueError("start/end must be timezone-aware UTC")
@@ -477,7 +497,7 @@ def scan_orderbook_snapshots(
 
     rows_all.sort(key=lambda x: (x[0], x[1]))
 
-    from decimal import Decimal as _D
+    from decimal import Decimal as Dec
     for ts, baseline_seq, row in rows_all:
         received = row["received_at"]
         if hasattr(received, "tzinfo") and received.tzinfo is None:
@@ -490,8 +510,8 @@ def scan_orderbook_snapshots(
             baseline_seq=int(baseline_seq),
             side=row["side"],
             level=int(row["level"]),
-            price=_D(str(row["price"])),
-            quantity=_D(str(row["quantity"])),
+            price=Dec(str(row["price"])),
+            quantity=Dec(str(row["quantity"])),
             payload_hash=row["payload_hash"],
             raw_json=row.get("raw_json"),
         )

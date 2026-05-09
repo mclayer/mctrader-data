@@ -290,22 +290,21 @@ def test_tier_coverage_legacy_part_naming_still_works(tmp_path: Path) -> None:
 
 def _write_d14_snapshot(tmp_path: Path, ts_sec: int, n_levels: int = 3) -> None:
     """Write a §D14 orderbook_snapshot.v1 parquet partition."""
-    from types import SimpleNamespace as _NS
+    from types import SimpleNamespace
     from mctrader_data.orderbook_snapshot_storage import (
         OrderbookSnapshotWriter,
         snapshot_event_to_snapshot_records,
     )
     ts = _ts(ts_sec)
-    ts_micro = int(ts.timestamp() * 1_000_000)
 
-    class Sym(_NS):
+    class Sym(SimpleNamespace):
         def __str__(self) -> str:
             return "KRW-BTC"
 
-    class Level(_NS):
+    class Level(SimpleNamespace):
         pass
 
-    event = _NS(
+    event = SimpleNamespace(
         exchange="bithumb",
         symbol=Sym(),
         event_time=ts,

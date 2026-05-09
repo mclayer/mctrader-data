@@ -354,7 +354,6 @@ class MetadataRefreshScheduler:
         """Run until cancelled. First refresh fires immediately at startup."""
         from mctrader_data.metadata_storage import (
             ExchangeMetadataWriter,
-            fetch_exchange_metadata_records,
         )
 
         writer = ExchangeMetadataWriter(
@@ -369,8 +368,7 @@ class MetadataRefreshScheduler:
             while True:
                 # Sleep until next UTC midnight + grace
                 now = datetime.now(timezone.utc)
-                tomorrow = (now.date().isoformat())
-                from datetime import date as _date, timedelta as _td
+                from datetime import timedelta as _td
                 next_midnight = datetime(
                     *(now.date() + _td(days=1)).timetuple()[:3],
                     tzinfo=timezone.utc

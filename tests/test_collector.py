@@ -194,7 +194,7 @@ async def test_collector_orderbook_snapshot_routes_to_d14_writer(
     tmp_path: Path, monkeypatch
 ) -> None:
     """OrderbookSnapshotEvent must be routed to §D14 writer, NOT §D11 writer."""
-    from decimal import Decimal as _D
+    from decimal import Decimal
     from datetime import datetime, timezone as _tz
 
     from mctrader_market_bithumb.ws_events import _OrderbookLevel, OrderbookSnapshotEvent
@@ -205,13 +205,10 @@ async def test_collector_orderbook_snapshot_routes_to_d14_writer(
         symbol=Symbol.from_string("KRW-BTC"),
         event_time=ts,
         received_at=ts,
-        bids=[_OrderbookLevel(price=_D("118900000"), quantity=_D("0.1"))],
-        asks=[_OrderbookLevel(price=_D("119000000"), quantity=_D("0.1"))],
+        bids=[_OrderbookLevel(price=Decimal("118900000"), quantity=Decimal("0.1"))],
+        asks=[_OrderbookLevel(price=Decimal("119000000"), quantity=Decimal("0.1"))],
         raw={},
     )
-
-    d14_written: list = []
-    d11_written: list = []
 
     class _StubStream:
         def __init__(self, **kwargs):
