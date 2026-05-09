@@ -35,10 +35,10 @@ from mctrader_market_bithumb.ws_events import (
 
 from mctrader_data.lineage import write_lineage
 from mctrader_data.manifest import CollectorManifest
+from mctrader_data.orderbook_snapshot_storage import OrderbookSnapshotWriter
 from mctrader_data.orderbook_storage import (
     OrderbookWriter,
     delta_event_to_records,
-    snapshot_event_to_records,
 )
 from mctrader_data.tick_storage import TickWriter, transaction_event_to_record
 
@@ -56,6 +56,7 @@ class CollectorDaemon:
         symbol: Symbol,
         include_transactions: bool = True,
         include_orderbook: bool = True,
+        include_orderbook_snapshot: bool = True,
         snapshot_id: str | None = None,
         node_id: str | None = None,
         collector_run_id: str | None = None,
@@ -68,12 +69,14 @@ class CollectorDaemon:
         self._symbol = symbol
         self._include_transactions = include_transactions
         self._include_orderbook = include_orderbook
+        self._include_orderbook_snapshot = include_orderbook_snapshot
         self._snapshot_id = snapshot_id or _default_snapshot_id(exchange, symbol)
         self._node_id = node_id
         self._collector_run_id = collector_run_id
         self._heartbeat_writer = heartbeat_writer
         self._tick_writer: TickWriter | None = None
         self._ob_writer: OrderbookWriter | None = None
+        self._ob_snapshot_writer: OrderbookSnapshotWriter | None = None
         self._cancel_event = asyncio.Event()
 
     async def run(self) -> None:
@@ -84,8 +87,12 @@ class CollectorDaemon:
             channels.append("transaction")
         if self._include_orderbook:
             channels.append("orderbookdepth")
+        if self._include_orderbook_snapshot:
+            channels.append("orderbooksnapshot")  # type: ignore[arg-type]
         if not channels:
-            raise ValueError("at least one of transactions/orderbook must be included")
+            raise ValueError(
+                "at least one of transactions/orderbook/orderbook_snapshot must be included"
+            )
 
         self._tick_writer = TickWriter(
             root=self._root, exchange=self._exchange,
@@ -98,6 +105,12 @@ class CollectorDaemon:
             symbol=str(self._symbol), snapshot_id=self._snapshot_id,
             node_id=self._node_id, collector_run_id=self._collector_run_id,
         ) if self._include_orderbook else None
+
+        self._ob_snapshot_writer = OrderbookSnapshotWriter(
+            root=self._root, exchange=self._exchange,
+            symbol=str(self._symbol), snapshot_id=self._snapshot_id,
+            node_id=self._node_id, collector_run_id=self._collector_run_id,
+        ) if self._include_orderbook_snapshot else None
 
         log.info("[collector] symbol=%s channels=%s root=%s", self._symbol, channels, self._root)
 
@@ -126,14 +139,15 @@ class CollectorDaemon:
                 self._heartbeat_writer.update_tier_event_ts(  # type: ignore[attr-defined]
                     "tick", record.ts_utc
                 )
-        elif isinstance(event, OrderbookSnapshotEvent) and self._ob_writer is not None:
-            records = snapshot_event_to_records(event)
-            self._ob_writer.append_many(records)
-            if self._heartbeat_writer is not None and records:
+        elif isinstance(event, OrderbookSnapshotEvent) and self._ob_snapshot_writer is not None:
+            # MCT-104 §D14 — orderbooksnapshot goes to §D14 partition (NOT §D11)
+            accepted = self._ob_snapshot_writer.append_event(event)
+            if accepted and self._heartbeat_writer is not None:
                 self._heartbeat_writer.update_tier_event_ts(  # type: ignore[attr-defined]
-                    "orderbook", records[0].ts_utc
+                    "orderbook_snapshot", event.received_at
                 )
         elif isinstance(event, OrderbookDeltaEvent) and self._ob_writer is not None:
+            # §D11 partition: delta-only (snapshot separated to §D14 above)
             records = delta_event_to_records(event)
             self._ob_writer.append_many(records)
             if self._heartbeat_writer is not None and records:
@@ -157,6 +171,15 @@ class CollectorDaemon:
                     self._write_lineage(self._ob_writer.current_path, "orderbook")
         except Exception:
             log.exception("[collector] orderbook writer close failed")
+        try:
+            if self._ob_snapshot_writer is not None:
+                self._ob_snapshot_writer.close()
+                if self._ob_snapshot_writer.current_path is not None:
+                    self._write_lineage(
+                        self._ob_snapshot_writer.current_path, "orderbook_snapshot"
+                    )
+        except Exception:
+            log.exception("[collector] orderbook snapshot writer close failed")
 
     def _write_lineage(self, parquet_path: Path, kind: str) -> None:
         partition = parquet_path.parent
@@ -300,3 +323,89 @@ def _default_snapshot_id(exchange: str, symbol: Symbol) -> str:
     return hashlib.sha256(
         f"{exchange}|{symbol}|{today}|collector".encode()
     ).hexdigest()[:16]
+
+
+class MetadataRefreshScheduler:
+    """Daily §D13 exchange metadata refresh scheduler.
+
+    Fires once at startup + once per UTC calendar day (at UTC midnight + 1min grace).
+    Each fire fetches /ticker/ALL_KRW + /assetsstatus/multichain/ALL, builds
+    ExchangeMetadataRecord list, and writes via ExchangeMetadataWriter.
+
+    Runs as a separate asyncio task, cancelled when the collector daemon shuts down.
+    """
+
+    GRACE_SECONDS: float = 60.0  # UTC midnight + 1min grace per §D13
+
+    def __init__(
+        self,
+        *,
+        root: Path,
+        exchange: str,
+        node_id: str | None = None,
+        collector_run_id: str | None = None,
+    ) -> None:
+        self._root = root
+        self._exchange = exchange
+        self._node_id = node_id
+        self._collector_run_id = collector_run_id
+
+    async def run(self) -> None:
+        """Run until cancelled. First refresh fires immediately at startup."""
+        from mctrader_data.metadata_storage import (
+            ExchangeMetadataWriter,
+        )
+
+        writer = ExchangeMetadataWriter(
+            root=self._root,
+            exchange=self._exchange,
+            node_id=self._node_id,
+            collector_run_id=self._collector_run_id,
+        )
+        try:
+            # Initial fetch at startup
+            await self._do_refresh(writer)
+            while True:
+                # Sleep until next UTC midnight + grace
+                now = datetime.now(timezone.utc)
+                from datetime import timedelta as _td
+                next_midnight = datetime(
+                    *(now.date() + _td(days=1)).timetuple()[:3],
+                    tzinfo=timezone.utc
+                )
+                wait = (next_midnight - now).total_seconds() + self.GRACE_SECONDS
+                log.info(
+                    "[metadata] next refresh in %.0fs (UTC %s + grace)",
+                    wait, next_midnight.isoformat()
+                )
+                await asyncio.sleep(wait)
+                await self._do_refresh(writer)
+        except asyncio.CancelledError:
+            log.info("[metadata] scheduler cancelled — flushing")
+            writer.close()
+            raise
+
+    async def _do_refresh(self, writer: object) -> None:
+        from mctrader_data.metadata_storage import fetch_exchange_metadata_records
+        try:
+            records = await fetch_exchange_metadata_records(
+                exchange=self._exchange,
+                node_id=self._node_id,
+                collector_run_id=self._collector_run_id,
+            )
+            written = skipped = quarantine = 0
+            for rec in records:
+                status = writer.append(rec)  # type: ignore[attr-defined]
+                if status == "written":
+                    written += 1
+                elif status == "skipped":
+                    skipped += 1
+                else:
+                    quarantine += 1
+            writer.flush()  # type: ignore[attr-defined]
+            log.info(
+                "[metadata] refresh done: written=%d skipped=%d quarantine=%d",
+                written, skipped, quarantine,
+            )
+        except Exception:
+            log.exception("[metadata] refresh failed — will retry next cycle")
