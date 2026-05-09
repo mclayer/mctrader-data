@@ -11,6 +11,18 @@ services:
     image: mctrader-data:pilot
     container_name: mctrader-collector
     restart: unless-stopped
+    # MCT-103: 50-symbol universe (scored selection, see docs/stories/MCT-103.md in mctrader-hub).
+    # Override Dockerfile CMD `--top-n 10` (raw volume) with explicit scored 50.
+    # Forward-only invariant (ADR-009 §D12): all symbols collected from this commit forward,
+    # no historical backfill possible. Universe rebalance = monthly only (preserve history of dropped syms).
+    command:
+      - "collect"
+      - "--symbols"
+      - "KRW-XRP,KRW-SOL,KRW-VIRTUAL,KRW-DOGE,KRW-USDT,KRW-ETH,KRW-WLD,KRW-TON,KRW-ONDO,KRW-STRK,KRW-POLA,KRW-SUI,KRW-ADA,KRW-XLM,KRW-ETC,KRW-BTC,KRW-PEPE,KRW-SHIB,KRW-LINK,KRW-PENGU,KRW-NEAR,KRW-ENA,KRW-MERL,KRW-H,KRW-BABY,KRW-TRUMP,KRW-APT,KRW-B3,KRW-SWAP,KRW-GALA,KRW-VVV,KRW-SAND,KRW-ATH,KRW-NIL,KRW-FIL,KRW-KSM,KRW-BIO,KRW-HBAR,KRW-TRX,KRW-CYS,KRW-SOON,KRW-ZBT,KRW-HOOK,KRW-IP,KRW-AGI,KRW-CHIP,KRW-D,KRW-HEMI,KRW-GWEI,KRW-SEI"
+      - "--include"
+      - "transactions,orderbook"
+      - "--log-level"
+      - "INFO"
     environment:
       MCTRADER_DATA_ROOT: /var/lib/mctrader/data
       MCTRADER_HEALTH_PORT: "8080"
