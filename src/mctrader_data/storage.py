@@ -8,6 +8,8 @@ MCT-20 extension:
 
 from __future__ import annotations
 
+import hashlib
+import uuid
 from collections.abc import Iterable, Sequence
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -39,8 +41,39 @@ ScanMode = Literal["historical", "paper"]
 # Full implementations at end of module to avoid circular imports.
 
 
-def _candles_to_arrow(candles: Sequence[CandleLike]) -> pa.Table:
-    """Build a PyArrow Table with ADR-009 v1 column order + types."""
+def _compute_data_hash(c: CandleLike) -> str:
+    """Compute SHA-256 of the canonical (ts_utc, open, high, low, close, volume) tuple."""
+    payload = "|".join(
+        [
+            c.ts_utc.isoformat() if hasattr(c.ts_utc, "isoformat") else str(c.ts_utc),
+            str(c.open),
+            str(c.high),
+            str(c.low),
+            str(c.close),
+            str(c.volume),
+        ]
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _candles_to_arrow(
+    candles: Sequence[CandleLike],
+    *,
+    snapshot_id: str | None = None,
+    ingested_at: datetime | None = None,
+) -> pa.Table:
+    """Build a PyArrow Table with all 16 ADR-009 v1 columns in canonical order.
+
+    Storage-layer columns that are not present on the incoming :class:`CandleLike`
+    objects are synthesised here:
+
+    - ``trade_count``: ``None`` (nullable int64)
+    - ``is_complete``: ``True``
+    - ``source_ingested_at``: ``ingested_at`` arg (defaults to ``datetime.now(UTC)``)
+    - ``data_snapshot_id``: ``snapshot_id`` arg (may be ``None``)
+    - ``data_hash``: SHA-256 of ``(ts_utc|open|high|low|close|volume)`` canonical strings
+    """
+    now_utc = ingested_at or datetime.now(timezone.utc)
     rows = {
         "ts_utc": [c.ts_utc for c in candles],
         "exchange": [c.exchange for c in candles],
@@ -52,7 +85,12 @@ def _candles_to_arrow(candles: Sequence[CandleLike]) -> pa.Table:
         "close": [str(c.close) for c in candles],
         "volume": [str(c.volume) for c in candles],
         "value": [str(c.value) if c.value is not None else None for c in candles],
+        "trade_count": [None] * len(candles),
+        "is_complete": [True] * len(candles),
         "schema_version": [SCHEMA_VERSION] * len(candles),
+        "source_ingested_at": [now_utc] * len(candles),
+        "data_snapshot_id": [snapshot_id] * len(candles),
+        "data_hash": [_compute_data_hash(c) for c in candles],
     }
     schema = pa.schema(
         [
@@ -66,7 +104,12 @@ def _candles_to_arrow(candles: Sequence[CandleLike]) -> pa.Table:
             ("close", pa.decimal128(38, 18)),
             ("volume", pa.decimal128(38, 18)),
             ("value", pa.decimal128(38, 18)),
+            ("trade_count", pa.int64()),
+            ("is_complete", pa.bool_()),
             ("schema_version", pa.string()),
+            ("source_ingested_at", pa.timestamp("us", tz="UTC")),
+            ("data_snapshot_id", pa.string()),
+            ("data_hash", pa.string()),
         ]
     )
     decimal_cols = ("open", "high", "low", "close", "volume", "value")
@@ -80,8 +123,6 @@ def _candles_to_arrow(candles: Sequence[CandleLike]) -> pa.Table:
                     type=field.type,
                 )
             )
-        elif field.name == "ts_utc":
-            arrays.append(pa.array(col_data, type=field.type))
         else:
             arrays.append(pa.array(col_data, type=field.type))
     return pa.Table.from_arrays(arrays, schema=schema)
@@ -128,7 +169,8 @@ def write_candles(
         node_id=node_id,
     )
     partition.mkdir(parents=True, exist_ok=True)
-    table = _candles_to_arrow(candles)
+    ingested_at = datetime.now(timezone.utc)
+    table = _candles_to_arrow(candles, snapshot_id=snapshot_id, ingested_at=ingested_at)
 
     # MCT-91 — parquet metadata 에 node_id 추가 (logical key 영향 0, file footer)
     if node_id is not None:
@@ -144,7 +186,34 @@ def write_candles(
         file_name = f"part-{snapshot_id}.parquet"
 
     target = partition / file_name
-    pq.write_table(table, target, compression="snappy")
+
+    # Idempotency guard: if the target already exists and every data_hash matches,
+    # the batch is a duplicate — skip the write entirely.
+    if target.exists():
+        try:
+            existing = pq.read_table(target, columns=["data_hash"])
+            existing_hashes = set(existing.column("data_hash").to_pylist())
+            new_hashes = set(table.column("data_hash").to_pylist())
+            if existing_hashes == new_hashes:
+                return partition
+        except Exception:
+            pass  # corrupted / unreadable existing file → overwrite
+
+    # Atomic write: write to a sibling temp file, then rename into place.
+    # rename() on the same filesystem is atomic on POSIX; on Windows it replaces
+    # the destination atomically as of Python 3.3+ (os.replace semantics).
+    tmp_path = target.with_name(f".t{uuid.uuid4().hex[:8]}.parquet")
+    try:
+        pq.write_table(table, tmp_path, compression="snappy")
+        tmp_path.rename(target)
+    except Exception:
+        # Clean up orphaned temp file on failure
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
     return partition
 
 

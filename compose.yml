@@ -11,6 +11,7 @@ services:
     image: mctrader-data:pilot
     container_name: mctrader-collector
     restart: unless-stopped
+    stop_grace_period: 30s
     # MCT-103: 50-symbol universe (scored selection, see docs/stories/MCT-103.md in mctrader-hub).
     # Override Dockerfile CMD `--top-n 10` (raw volume) with explicit scored 50.
     # Forward-only invariant (ADR-009 §D12): all symbols collected from this commit forward,
