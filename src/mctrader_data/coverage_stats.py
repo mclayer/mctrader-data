@@ -28,7 +28,7 @@ class GapEvent:
 @dataclass
 class TierStats:
     row_count_today: int = 0
-    file_count_today: int = 0
+    file_count_today: int = 0  # reserved — always 0 at WAL layer; set by compactor in future
     file_size_bytes_today: int = 0
     last_event_ts: str | None = None
     gap_events: list[GapEvent] = field(default_factory=list)

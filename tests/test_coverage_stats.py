@@ -95,12 +95,15 @@ async def test_run_final_flush_on_cancel(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_run_flushes_periodically(tmp_path: Path) -> None:
+    import unittest.mock
+
     writer = CoverageStatsWriter(tmp_path, "NODE_A", "run-1")
     writer.FLUSH_INTERVAL_SECONDS = 0.05
-    task = asyncio.create_task(writer.run())
-    await asyncio.sleep(0.15)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    out = tmp_path / "market" / "manifest" / "coverage-stats.json"
-    assert out.exists()
+    with unittest.mock.patch.object(writer, "flush", wraps=writer.flush) as mock_flush:
+        task = asyncio.create_task(writer.run())
+        await asyncio.sleep(0.15)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    # At 0.05s interval over 0.15s: ≥2 periodic flushes + 1 cancel flush = ≥3 total
+    assert mock_flush.call_count >= 2, f"expected ≥2 flush calls, got {mock_flush.call_count}"
