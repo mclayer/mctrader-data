@@ -1,6 +1,7 @@
 """INV-1: Force-kill after N messages → 0 records lost in WAL."""
 from __future__ import annotations
 
+import pathlib
 import subprocess
 import sys
 import textwrap
@@ -19,9 +20,12 @@ def test_force_kill_zero_loss(tmp_path: Path, n_messages: int) -> None:
     # Use a sentinel file to know when all writes are done
     done_flag = tmp_path / "writes_done.flag"
 
+    _repo_root = pathlib.Path(__file__).resolve().parents[1]
+    _src_path = str(_repo_root / "src")
+
     script = textwrap.dedent(f"""
 import sys, time
-sys.path.insert(0, 'src')
+sys.path.insert(0, {_src_path!r})
 from pathlib import Path
 from decimal import Decimal
 from mctrader_data.wal.ingester import WalIngester
@@ -41,7 +45,7 @@ time.sleep(60)
 """)
     proc = subprocess.Popen(
         [sys.executable, "-c", script],
-        cwd="c:/workspace/mclayer/mctrader-data",
+        cwd=str(_repo_root),
     )
 
     # Wait for all writes to complete (flag file created)
