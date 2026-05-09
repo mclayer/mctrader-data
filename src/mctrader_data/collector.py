@@ -29,13 +29,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from mctrader_market.types import Symbol
-from mctrader_market_bithumb.ws_client import BithumbWebSocketStream
-from mctrader_market_bithumb.ws_events import (
-    OrderbookDeltaEvent,
-    OrderbookSnapshotEvent,
-    TransactionEvent,
-)
 
+from mctrader_data import adapters
 from mctrader_data.manifest import CollectorManifest
 from mctrader_data.wal.ingester import WalIngester
 
@@ -60,8 +55,6 @@ class CollectorDaemon:
         heartbeat_writer: object | None = None,
         coverage_stats_writer: object | None = None,
     ) -> None:
-        if exchange != "bithumb":
-            raise ValueError(f"only 'bithumb' exchange supported in v1, got {exchange!r}")
         self._root = root
         self._exchange = exchange
         self._symbol = symbol
@@ -81,7 +74,7 @@ class CollectorDaemon:
                 root=root, exchange=exchange, symbol=str(symbol),
                 channel="transaction", node_id=_node_id,
             )
-        if include_orderbook:
+        if include_orderbook and exchange == "bithumb":
             self._wal_ingesters["orderbookdepth"] = WalIngester(
                 root=root, exchange=exchange, symbol=str(symbol),
                 channel="orderbookdepth", node_id=_node_id,
@@ -94,23 +87,14 @@ class CollectorDaemon:
         self._cancel_event = asyncio.Event()
 
     async def run(self) -> None:
-        from mctrader_market_bithumb.ws_subscribe import Channel
+        log.info("[collector] exchange=%s symbol=%s root=%s", self._exchange, self._symbol, self._root)
 
-        channels: list[Channel] = []
-        if self._include_transactions:
-            channels.append("transaction")
-        if self._include_orderbook:
-            channels.append("orderbookdepth")
-        if self._include_orderbook_snapshot:
-            channels.append("orderbooksnapshot")  # type: ignore[arg-type]
-        if not channels:
-            raise ValueError(
-                "at least one of transactions/orderbook/orderbook_snapshot must be included"
-            )
-
-        log.info("[collector] symbol=%s channels=%s root=%s", self._symbol, channels, self._root)
-
-        stream = BithumbWebSocketStream(symbol=self._symbol, channels=channels)
+        stream = adapters.get_ws_stream(
+            self._exchange, self._symbol,
+            include_transactions=self._include_transactions,
+            include_orderbook=self._include_orderbook,
+            include_orderbook_snapshot=self._include_orderbook_snapshot,
+        )
         try:
             async with stream:
                 async for event in stream.messages():
@@ -131,18 +115,19 @@ class CollectorDaemon:
         self._cancel_event.set()
 
     def _emit_to_wal(self, event) -> None:  # type: ignore[no-untyped-def]
-        if isinstance(event, TransactionEvent):
+        raw = getattr(event, "raw", None)
+        if event.kind == "transaction":
             ingester = self._wal_ingesters.get("transaction")
             if ingester is not None:
                 record = {
                     "ts_utc": event.event_time,
                     "received_at": event.received_at,
-                    "exchange": event.exchange,
-                    "symbol": str(event.symbol),
+                    "exchange": self._exchange,
+                    "symbol": str(self._symbol),
                     "price": event.price,
                     "quantity": event.quantity,
                     "side": event.side,
-                    "raw_json": json.dumps(event.raw, ensure_ascii=False) if event.raw else None,
+                    "raw_json": json.dumps(raw, ensure_ascii=False) if raw else None,
                     "channel": "transaction",
                 }
                 ingester.append(record)
@@ -154,14 +139,14 @@ class CollectorDaemon:
                     self._coverage_stats_writer.record_event(  # type: ignore[attr-defined]
                         str(self._symbol), "tick", event.event_time
                     )
-        elif isinstance(event, OrderbookSnapshotEvent):
+        elif event.kind == "orderbook_snapshot":
             ingester = self._wal_ingesters.get("orderbooksnapshot")
             if ingester is not None:
                 record = {
                     "ts_utc": event.event_time,
                     "received_at": event.received_at,
-                    "exchange": event.exchange,
-                    "symbol": str(event.symbol),
+                    "exchange": self._exchange,
+                    "symbol": str(self._symbol),
                     "bids": [
                         {"price": lvl.price, "quantity": lvl.quantity}
                         for lvl in event.bids
@@ -170,7 +155,7 @@ class CollectorDaemon:
                         {"price": lvl.price, "quantity": lvl.quantity}
                         for lvl in event.asks
                     ],
-                    "raw_json": json.dumps(event.raw, ensure_ascii=False) if event.raw else None,
+                    "raw_json": json.dumps(raw, ensure_ascii=False) if raw else None,
                     "channel": "orderbooksnapshot",
                 }
                 ingester.append(record)
@@ -182,19 +167,19 @@ class CollectorDaemon:
                     self._coverage_stats_writer.record_event(  # type: ignore[attr-defined]
                         str(self._symbol), "orderbook", event.received_at
                     )
-        elif isinstance(event, OrderbookDeltaEvent):
+        elif event.kind == "orderbook_delta":
             ingester = self._wal_ingesters.get("orderbookdepth")
             if ingester is not None:
                 record = {
                     "ts_utc": event.event_time,
                     "received_at": event.received_at,
-                    "exchange": event.exchange,
-                    "symbol": str(event.symbol),
+                    "exchange": self._exchange,
+                    "symbol": str(self._symbol),
                     "changes": [
                         {"side": ch.side, "price": ch.price, "quantity": ch.quantity}
                         for ch in event.changes
                     ],
-                    "raw_json": json.dumps(event.raw, ensure_ascii=False) if event.raw else None,
+                    "raw_json": json.dumps(raw, ensure_ascii=False) if raw else None,
                     "channel": "orderbookdepth",
                 }
                 ingester.append(record)
@@ -206,7 +191,7 @@ class CollectorDaemon:
                     self._coverage_stats_writer.record_event(  # type: ignore[attr-defined]
                         str(self._symbol), "orderbook", event.event_time
                     )
-        # TickerEvent ignored — diagnostic only, not persisted
+        # TickerEvent / 기타 kind 는 무시 (diagnostic only)
 
     # backward-compatibility alias
     _handle_event = _emit_to_wal

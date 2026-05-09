@@ -34,6 +34,10 @@ def get_ws_stream(
             channels.append("orderbookdepth")
         if include_orderbook_snapshot:
             channels.append("orderbooksnapshot")
+        if not channels:
+            raise ValueError(
+                "at least one of transactions/orderbook/orderbook_snapshot must be included"
+            )
         return BithumbWebSocketStream(symbol=symbol, channels=channels, **kwargs)
 
     if exchange == "upbit":
@@ -45,6 +49,10 @@ def get_ws_stream(
         # Upbit은 orderbook snapshot만 존재 — 두 플래그 모두 "orderbook" 채널로 매핑
         if include_orderbook or include_orderbook_snapshot:
             channels.append("orderbook")
+        if not channels:
+            raise ValueError(
+                "at least one of transactions/orderbook/orderbook_snapshot must be included"
+            )
         return UpbitWebSocketStream(symbol=symbol, channels=channels, **kwargs)
 
     raise ValueError(f"unknown exchange: {exchange!r}")

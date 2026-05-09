@@ -26,12 +26,15 @@ def test_default_snapshot_id_differs_per_symbol() -> None:
     assert a != b
 
 
-def test_collector_rejects_unknown_exchange(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="bithumb"):
-        CollectorDaemon(
-            root=tmp_path, exchange="upbit",
-            symbol=Symbol.from_string("KRW-BTC"),
-        )
+@pytest.mark.asyncio
+async def test_collector_rejects_unknown_exchange(tmp_path: Path) -> None:
+    """Unknown exchange should raise ValueError at run() time via adapters."""
+    d = CollectorDaemon(
+        root=tmp_path, exchange="unknown_exchange",
+        symbol=Symbol.from_string("KRW-BTC"),
+    )
+    with pytest.raises(ValueError, match="unknown exchange"):
+        await d.run()
 
 
 @pytest.mark.asyncio
@@ -70,7 +73,7 @@ async def test_collector_cancel_event_triggers_exit(tmp_path: Path, monkeypatch)
                 yield None  # async generator type hint, never runs
 
     monkeypatch.setattr(
-        "mctrader_data.collector.BithumbWebSocketStream", _StubStream,
+        "mctrader_data.adapters.get_ws_stream", lambda *a, **kw: _StubStream(),
     )
 
     await d.cancel()
@@ -220,7 +223,9 @@ async def test_collector_orderbook_snapshot_routes_to_wal_snapshot_channel(
         async def messages(self):
             yield snapshot_event
 
-    monkeypatch.setattr("mctrader_data.collector.BithumbWebSocketStream", _StubStream)
+    monkeypatch.setattr(
+        "mctrader_data.adapters.get_ws_stream", lambda *a, **kw: _StubStream(),
+    )
 
     daemon = CollectorDaemon(
         root=tmp_path, exchange="bithumb",
