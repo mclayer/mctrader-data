@@ -1,17 +1,16 @@
 """INV-1: Force-kill after N messages → 0 records lost in WAL."""
 from __future__ import annotations
 
+import contextlib
 import pathlib
 import subprocess
 import sys
 import textwrap
-from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 from mctrader_data.wal.ndjson_codec import decode_line
-from mctrader_data.wal.segment import scan_sealed
 
 
 @pytest.mark.parametrize("n_messages", [1, 500])
@@ -73,17 +72,13 @@ time.sleep(60)
             (p.name.endswith(".ndjson") and not p.name.endswith(".sealed"))
             or p.name.endswith(".ndjson.sealed")
         ):
-            try:
+            with contextlib.suppress(Exception):
                 content = p.read_text(errors="replace")
                 for line in content.splitlines():
                     line = line.strip()
                     if line:
-                        try:
+                        with contextlib.suppress(Exception):  # last partial line on crash
                             all_lines.append(decode_line(line))
-                        except Exception:
-                            pass  # last partial line on crash
-            except Exception:
-                pass
 
     seqs = {r["seq"] for r in all_lines}
     assert seqs == set(range(n_messages)), (

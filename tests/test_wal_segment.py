@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 import os
-import time
 from pathlib import Path
 
-import pytest
 
 from mctrader_data.wal.segment import (
     active_segment_path,
-    compacted_path,
     is_active,
     is_compacted,
     is_sealed,

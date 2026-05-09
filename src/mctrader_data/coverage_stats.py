@@ -7,6 +7,7 @@ import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+import contextlib
 
 log = logging.getLogger(__name__)
 
@@ -95,7 +96,5 @@ class CoverageStatsWriter:
             os.replace(tmp_path, out_path)
         except OSError:
             log.warning("coverage-stats flush failed; last-good file preserved")
-            try:
+            with contextlib.suppress(OSError):
                 tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass

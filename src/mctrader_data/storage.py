@@ -34,6 +34,7 @@ from mctrader_data.orderbook_snapshot_storage import (
 )
 from mctrader_data.path import Mode, derive_partition_path, to_duckdb_glob
 from mctrader_data.schema import SCHEMA_VERSION
+import contextlib
 
 ScanMode = Literal["historical", "paper"]
 
@@ -208,10 +209,8 @@ def write_candles(
         tmp_path.rename(target)
     except Exception:
         # Clean up orphaned temp file on failure
-        try:
+        with contextlib.suppress(Exception):
             tmp_path.unlink(missing_ok=True)
-        except Exception:
-            pass
         raise
 
     return partition

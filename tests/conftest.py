@@ -14,7 +14,7 @@ from mctrader_data.wal.segment import scan_sealed
 def compact_now(tmp_path: Path):
     """Fixture: compacts all sealed WAL segments to L1 Parquet immediately."""
     def _compact(root: Path = tmp_path) -> list[Path]:
-        compactor = L1Compactor(root)
+        compactor = L1Compactor(root=root)
         results = []
         for sealed in scan_sealed(root):
             results.append(compactor.compact_segment(sealed))
