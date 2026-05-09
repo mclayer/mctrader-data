@@ -336,6 +336,7 @@ def backfill(
 
     _endpoint = "https://api.bithumb.com" if exchange == "bithumb" else "https://api.upbit.com"
     _adapter_name = f"mctrader-market-{exchange}"
+    _adapter_version = "0.3.0" if exchange == "bithumb" else "0.1.0"
     write_lineage(
         partition_dir=partition,
         snapshot_id=resolved_snapshot,
@@ -345,7 +346,7 @@ def backfill(
         fetched_at_utc=_dt.now(_tz.utc),
         response_hash=response_hash,
         adapter_name=_adapter_name,
-        adapter_version="0.1.0",
+        adapter_version=_adapter_version,
     )
 
     click.echo(f"[backfill] fetched {len(candles)} candles")
