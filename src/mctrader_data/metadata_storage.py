@@ -29,7 +29,7 @@ import logging
 import threading
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +39,14 @@ import pyarrow.parquet as pq
 log = logging.getLogger(__name__)
 
 EXCHANGE_METADATA_SCHEMA_VERSION = "exchange_metadata.v1"
+
+_DECIMAL_38_18_QUANTUM = Decimal("1e-18")
+
+
+def _to_decimal_38_18(raw: str) -> Decimal:
+    with localcontext() as ctx:
+        ctx.prec = 50
+        return Decimal(raw).quantize(_DECIMAL_38_18_QUANTUM, rounding=ROUND_HALF_EVEN)
 
 _META_SCHEMA = pa.schema([
     # Non-nullable public-fillable columns (§D13.10)
@@ -355,9 +363,9 @@ async def fetch_exchange_metadata_records(
         if code == "date" or not isinstance(ticker, dict):
             continue
         try:
-            acc_value = Decimal(str(ticker.get("acc_trade_value_24H", "0")))
+            acc_value = _to_decimal_38_18(str(ticker.get("acc_trade_value_24H", "0")))
         except Exception:
-            acc_value = Decimal("0")
+            acc_value = _to_decimal_38_18("0")
         symbol = f"KRW-{code}"
         asset_status = asset_status_map.get(code, "0")
 
