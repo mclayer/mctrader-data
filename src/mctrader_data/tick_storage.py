@@ -58,6 +58,12 @@ class TickRecord:
     side: str
     raw_json: str | None = None
 
+    def __post_init__(self) -> None:
+        if isinstance(self.price, float):
+            raise TypeError("float not allowed for price; use Decimal or str")
+        if isinstance(self.quantity, float):
+            raise TypeError("float not allowed for quantity; use Decimal or str")
+
 
 class TickWriter:
     """Append-only writer that buffers in-memory and flushes per-batch.

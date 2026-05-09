@@ -74,6 +74,12 @@ class OrderbookSnapshotRecord:
     payload_hash: str          # SHA256(canonical body)[:16]
     raw_json: str | None = None
 
+    def __post_init__(self) -> None:
+        if isinstance(self.price, float):
+            raise TypeError("float not allowed for price; use Decimal or str")
+        if isinstance(self.quantity, float):
+            raise TypeError("float not allowed for quantity; use Decimal or str")
+
 
 def _compute_payload_hash(exchange: str, symbol: str, baseline_seq: int,
                            bids: list, asks: list) -> str:

@@ -67,6 +67,12 @@ class OrderbookEventRecord:
     quantity: Decimal
     raw_json: str | None = None
 
+    def __post_init__(self) -> None:
+        if isinstance(self.price, float):
+            raise TypeError("float not allowed for price; use Decimal or str")
+        if isinstance(self.quantity, float):
+            raise TypeError("float not allowed for quantity; use Decimal or str")
+
 
 class OrderbookWriter:
     """Append-only orderbook event writer with daily partition rotation."""
