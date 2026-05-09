@@ -61,6 +61,7 @@ class HeartbeatWriter:
         self.queue_depth: int = 0
         self.metrics = HeartbeatMetrics()
         self._write_failure_count = 0
+        self.last_heartbeat_ts: datetime | None = None
 
     @property
     def ws_state(self) -> WsState:
@@ -116,6 +117,7 @@ class HeartbeatWriter:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(temp, path)
+            self.last_heartbeat_ts = datetime.now(timezone.utc)
         except OSError as exc:
             self._write_failure_count += 1
             logger.warning(
