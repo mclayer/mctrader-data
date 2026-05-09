@@ -117,14 +117,14 @@ async def test_two_writers_no_contention_t1_t2_t3(tmp_path: Path) -> None:
     # Manifest — 양 node 모두 persist
     manifest_a = CollectorManifest(
         collector_run_id=run_a, started_at_utc=started_a,
-        exchange="bithumb", selected_symbols=["KRW-BTC"],
-        channels=["transaction", "orderbookdepth"],
+        exchange="bithumb", selected_symbols=["KRW-BTC"],  # type: ignore[arg-type]
+        channels=["transaction", "orderbookdepth"],  # type: ignore[arg-type]
         selection_method="explicit", top_n=None, node_id="NODE_A",
     )
     manifest_b = CollectorManifest(
         collector_run_id=run_b, started_at_utc=started_b,
-        exchange="bithumb", selected_symbols=["KRW-BTC"],
-        channels=["transaction", "orderbookdepth"],
+        exchange="bithumb", selected_symbols=["KRW-BTC"],  # type: ignore[arg-type]
+        channels=["transaction", "orderbookdepth"],  # type: ignore[arg-type]
         selection_method="explicit", top_n=None, node_id="NODE_B",
     )
     write_manifest(tmp_path, manifest_a)

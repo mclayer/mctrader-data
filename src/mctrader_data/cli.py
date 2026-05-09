@@ -501,8 +501,8 @@ def collect(
             collector_run_id=run_id,
             started_at_utc=started_at,
             exchange=exchange,
-            selected_symbols=[str(s) for s in sym_list],
-            channels=channels,
+            selected_symbols=tuple(str(s) for s in sym_list),
+            channels=tuple(channels),
             selection_method=selection_method,  # type: ignore[arg-type]
             top_n=top_n,
             node_id=resolved_node_id,

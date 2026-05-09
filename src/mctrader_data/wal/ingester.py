@@ -49,6 +49,10 @@ class WalIngester:
     # ------------------------------------------------------------------ public
 
     def append(self, record: dict) -> None:
+        # ADR-018 D5: O_APPEND+fsync 패턴 (tmp-rename 불필요한 이유):
+        #   1) 각 NDJSON 라인은 완결된 레코드 — encode_record() 가 newline 보장.
+        #   2) threading.Lock 이 단일 writer 직렬화 → write 후 fsync 가 충분.
+        #   3) tmp-rename 은 세그먼트 봉인(seal) 시에만 사용 (_seal_current / close).
         if self._closed:
             raise RuntimeError("WalIngester is closed")
         with self._lock:

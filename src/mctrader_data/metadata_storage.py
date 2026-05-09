@@ -86,6 +86,19 @@ class ExchangeMetadataRecord:
     fee_taker: Decimal | None = None
     min_order_notional_krw: Decimal | None = None
 
+    def __post_init__(self) -> None:
+        _decimal_fields = (
+            ("acc_trade_value_24h", self.acc_trade_value_24h),
+            ("tick_size", self.tick_size),
+            ("min_order_qty", self.min_order_qty),
+            ("fee_maker", self.fee_maker),
+            ("fee_taker", self.fee_taker),
+            ("min_order_notional_krw", self.min_order_notional_krw),
+        )
+        for name, val in _decimal_fields:
+            if isinstance(val, float):
+                raise TypeError(f"float not allowed for {name}; use Decimal or str")
+
     @property
     def available_from_ts(self) -> datetime:
         """ADR-005 path-c lookahead guard: available_from_ts := fetched_at."""

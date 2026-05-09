@@ -10,9 +10,9 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 MANIFEST_SCHEMA_VERSION = "collector_manifest.v1"
 
@@ -24,14 +24,14 @@ class CollectorManifest(BaseModel):
     Legacy manifest (pre-HA) 는 `node_id` field 없음 → backward compat read 보장.
     """
 
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
 
     schema_version: Literal["collector_manifest.v1"] = "collector_manifest.v1"
     collector_run_id: str
     started_at_utc: datetime
     exchange: str
-    selected_symbols: list[str]
-    channels: list[str]
+    selected_symbols: Annotated[tuple[str, ...], BeforeValidator(tuple)]
+    channels: Annotated[tuple[str, ...], BeforeValidator(tuple)]
     selection_method: Literal["explicit", "top_n_volume"]
     top_n: int | None = Field(default=None, description="present iff selection_method=top_n_volume")
     node_id: str | None = Field(
