@@ -23,7 +23,7 @@ L3_INTERVAL_SECONDS = 3600
 class CompactorRunner:
     def __init__(self, root: Path) -> None:
         self._root = root
-        self._l1 = L1Compactor(root)
+        self._l1 = L1Compactor(root=root)
         self._l2 = L2Compactor(root)
         self._l3 = L3Compactor(root)
         self._last_l2 = 0.0

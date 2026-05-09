@@ -567,6 +567,42 @@ def collect(
         sys.exit(0)
 
 
+@main.command("compact")
+@click.option("--root", envvar="MCTRADER_DATA_ROOT", required=True, type=click.Path())
+@click.option("--once", is_flag=True, default=False, help="Run one scan cycle then exit.")
+@click.option("--log-level", default="INFO")
+def compact_cmd(root: str, once: bool, log_level: str) -> None:
+    """Run the WAL compactor (L1/L2/L3 tiered compaction)."""
+    import asyncio
+    import logging
+    from pathlib import Path
+    from mctrader_data.compactor.runner import CompactorRunner
+
+    logging.basicConfig(
+        level=getattr(logging, log_level),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+    async def _run() -> None:
+        runner = CompactorRunner(Path(root))
+        if once:
+            await runner._tick()
+            return
+        try:
+            import signal as _signal
+            loop = asyncio.get_running_loop()
+            task = asyncio.current_task()
+            loop.add_signal_handler(_signal.SIGTERM, lambda: task.cancel() if task else None)
+        except NotImplementedError:
+            pass  # Windows: signal handlers not supported in asyncio
+        await runner.run()
+
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        pass
+
+
 # MCT-93 (X4 of MCT-89) — diagnostic surface
 
 
