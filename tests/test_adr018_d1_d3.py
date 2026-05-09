@@ -5,11 +5,15 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
+from pydantic import ValidationError as PydanticValidationError
 
-from mctrader_data.tick_storage import TickRecord
-from mctrader_data.orderbook_storage import OrderbookEventRecord
-from mctrader_data.orderbook_snapshot_storage import OrderbookSnapshotRecord
+from mctrader_data.manifest import CollectorManifest
 from mctrader_data.metadata_storage import ExchangeMetadataRecord
+from mctrader_data.orderbook_snapshot_storage import OrderbookSnapshotRecord
+from mctrader_data.orderbook_storage import OrderbookEventRecord
+from mctrader_data.schema import OhlcvRow
+from mctrader_data.tick_storage import TickRecord
+from mctrader_market.types import Symbol, Timeframe
 
 
 _TS = datetime(2026, 5, 1, 0, 0, tzinfo=timezone.utc)
@@ -163,9 +167,6 @@ def test_exchange_metadata_record_accepts_none_optionals() -> None:
 
 # ─── D2: CollectorManifest frozen + tuple ─────────────────────────────────────
 
-from mctrader_data.manifest import CollectorManifest
-
-
 def test_collector_manifest_frozen() -> None:
     m = CollectorManifest(
         collector_run_id="run-001",
@@ -175,7 +176,7 @@ def test_collector_manifest_frozen() -> None:
         channels=["transaction"],
         selection_method="explicit",
     )
-    with pytest.raises(Exception):
+    with pytest.raises(PydanticValidationError):
         m.collector_run_id = "tampered"  # type: ignore[misc]
 
 
@@ -221,11 +222,6 @@ def test_collector_manifest_roundtrip_json_preserves_tuple() -> None:
 
 
 # ─── D3: OhlcvRow cross-field invariant ──────────────────────────────────────
-
-from pydantic import ValidationError as PydanticValidationError
-from mctrader_market.types import Symbol, Timeframe
-from mctrader_data.schema import OhlcvRow
-
 
 _SYM = Symbol(base="BTC", quote="KRW")
 

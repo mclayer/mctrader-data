@@ -59,7 +59,7 @@ class OhlcvRow(BaseModel):
     data_hash: str | None = None
 
     @model_validator(mode="after")
-    def _check_ohlcv_invariants(self) -> "OhlcvRow":
+    def _check_ohlcv_invariants(self) -> OhlcvRow:
         if self.low > self.high:
             raise ValueError(
                 f"OHLCV invariant violated: low ({self.low}) > high ({self.high})"
