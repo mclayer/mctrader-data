@@ -9,6 +9,7 @@ authors = [{ name = "mccho8865", email = "mccho8865@gmail.com" }]
 dependencies = [
     "mctrader-market @ git+https://github.com/mclayer/mctrader-market.git@main",
     "mctrader-market-bithumb @ git+https://github.com/mclayer/mctrader-market-bithumb.git@main",
+    "mctrader-market-upbit @ git+https://github.com/mclayer/mctrader-market-upbit.git@main",
     "pydantic>=2,<3",
     "duckdb>=1,<2",
     "pyarrow>=17",
