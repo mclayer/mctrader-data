@@ -109,11 +109,14 @@ class CompactorRunner:
         out = self._l3.compact_day(
             exchange=exchange, symbol=symbol, channel=channel, date_utc=d,
         )
-        if out is not None and self._minio is not None:
-            try:
-                self._minio.upload(out)
-            except Exception:
-                log.exception("[compactor] MinIO upload failed %s", out)
+        if out is not None:
+            from mctrader_data.metrics import record_l3_compaction
+            record_l3_compaction(exchange=exchange, symbol=symbol, channel=channel)
+            if self._minio is not None:
+                try:
+                    self._minio.upload(out)
+                except Exception:
+                    log.exception("[compactor] MinIO upload failed %s", out)
 
 
 def _extract_partition(path: Path, key: str) -> str:
