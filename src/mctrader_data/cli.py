@@ -136,9 +136,44 @@ def backfill(
     from mctrader_data.lineage import write_lineage
     from mctrader_data.storage import write_candles
 
+    from mctrader_data.policy import (
+        DUPLICATE_SAME_HASH,
+        PartialFailurePolicy as _PFP,
+        PolicyDecision,
+        QuarantineReason,
+        candle_hash,
+        check_duplicate,
+        check_gap,
+        check_schema,
+        check_value_range,
+        resolve_decision,
+    )
+
+    _policy = _PFP(policy)
+
+    # Policy check #6 — API error retry+halt
+    _API_MAX_RETRIES = 3
+    candles = None
+    last_exc: Exception | None = None
     click.echo("[backfill] fetching from Bithumb public REST...")
     provider = BithumbCandleProvider()
-    candles = provider.get_candles(symbol=sym, timeframe=tf, start=start_utc, end=end_utc)
+    for _attempt in range(1, _API_MAX_RETRIES + 1):
+        try:
+            candles = provider.get_candles(symbol=sym, timeframe=tf, start=start_utc, end=end_utc)
+            last_exc = None
+            break
+        except Exception as exc:
+            last_exc = exc
+            click.echo(
+                f"[backfill] API error (attempt {_attempt}/{_API_MAX_RETRIES}): {exc}",
+                err=True,
+            )
+    if last_exc is not None:
+        raise click.ClickException(
+            f"API call failed after {_API_MAX_RETRIES} retries: {last_exc}"
+        )
+    assert candles is not None  # guarded by retry loop above
+
     if not candles:
         raise click.ClickException(
             f"no candles fetched for [{start_utc.isoformat()}, {end_utc.isoformat()})"
@@ -148,7 +183,147 @@ def backfill(
         f"{exchange}|{sym}|{tf.value}|{start_utc.isoformat()}|{end_utc.isoformat()}".encode()
     ).hexdigest()[:16]
 
-    partition = write_candles(candles=candles, root=root_resolved, snapshot_id=resolved_snapshot)
+    # Per-candle policy enforcement before writing.
+    # Tracks: last written ts (for gap check), per-ts hash (for dup check).
+    _prev_ts = None
+    _seen_hashes: dict = {}  # ts_utc → hash of the first written candle at that ts
+    _good: list = []        # candles that pass all checks → bulk write at end
+    _quarantine: list = []  # candles routed to quarantine
+    _skip_count = 0
+
+    for _candle in candles:
+        # Policy check #5 — schema mismatch halt
+        _schema_reason = check_schema(_candle)
+        if _schema_reason is not None:
+            _decision = resolve_decision(_schema_reason, _policy)
+            if _decision is PolicyDecision.HALT:
+                raise click.ClickException(
+                    f"[policy:schema_mismatch] HALT at ts={_candle.ts_utc.isoformat()}: "
+                    f"required field missing"
+                )
+            elif _decision is PolicyDecision.QUARANTINE:
+                _quarantine.append((_candle, _schema_reason))
+                continue
+            else:  # SKIP
+                click.echo(
+                    f"[policy:schema_mismatch] SKIP ts={_candle.ts_utc.isoformat()}", err=True
+                )
+                _skip_count += 1
+                continue
+
+        # Policy check #1 — gap halt
+        _gap_reason = check_gap(_prev_ts, _candle.ts_utc, tf)
+        if _gap_reason is not None:
+            _decision = resolve_decision(_gap_reason, _policy)
+            if _decision is PolicyDecision.HALT:
+                raise click.ClickException(
+                    f"[policy:gap] HALT at ts={_candle.ts_utc.isoformat()}: "
+                    f"gap detected (prev={_prev_ts.isoformat() if _prev_ts else None})"
+                )
+            elif _decision is PolicyDecision.QUARANTINE:
+                _quarantine.append((_candle, _gap_reason))
+                continue
+            else:  # SKIP
+                click.echo(
+                    f"[policy:gap] SKIP ts={_candle.ts_utc.isoformat()}", err=True
+                )
+                _skip_count += 1
+                continue
+
+        # Policy check #4 — value out-of-range quarantine
+        _range_reason = check_value_range(_candle)
+        if _range_reason is not None:
+            _decision = resolve_decision(_range_reason, _policy)
+            if _decision is PolicyDecision.HALT:
+                raise click.ClickException(
+                    f"[policy:value_range] HALT at ts={_candle.ts_utc.isoformat()}: "
+                    f"OHLCV values failed range check"
+                )
+            elif _decision is PolicyDecision.QUARANTINE:
+                _quarantine.append((_candle, _range_reason))
+                continue
+            else:  # SKIP
+                click.echo(
+                    f"[policy:value_range] SKIP ts={_candle.ts_utc.isoformat()}", err=True
+                )
+                _skip_count += 1
+                continue
+
+        # Policy checks #2/#3 — duplicate detection (same-hash skip / diff-hash quarantine)
+        _incoming_hash = candle_hash(_candle)
+        _existing_hash = _seen_hashes.get(_candle.ts_utc)
+        _dup_result = check_duplicate(_existing_hash, _incoming_hash)
+        if _dup_result == DUPLICATE_SAME_HASH:
+            # Same hash → silently skip regardless of policy (idempotent replay)
+            click.echo(
+                f"[policy:dup_same_hash] SKIP ts={_candle.ts_utc.isoformat()} (hash match)",
+                err=True,
+            )
+            _skip_count += 1
+            continue
+        elif _dup_result == QuarantineReason.DUPLICATE_DIFFERENT_HASH:
+            _decision = resolve_decision(QuarantineReason.DUPLICATE_DIFFERENT_HASH, _policy)
+            if _decision is PolicyDecision.HALT:
+                raise click.ClickException(
+                    f"[policy:dup_diff_hash] HALT at ts={_candle.ts_utc.isoformat()}: "
+                    f"hash mismatch for existing record"
+                )
+            elif _decision is PolicyDecision.QUARANTINE:
+                _quarantine.append((_candle, QuarantineReason.DUPLICATE_DIFFERENT_HASH))
+                continue
+            else:  # SKIP
+                click.echo(
+                    f"[policy:dup_diff_hash] SKIP ts={_candle.ts_utc.isoformat()}", err=True
+                )
+                _skip_count += 1
+                continue
+
+        # Candle passed all checks — record for normal write
+        _seen_hashes[_candle.ts_utc] = _incoming_hash
+        _prev_ts = _candle.ts_utc
+        _good.append(_candle)
+
+    # Write quarantined candles to quarantine/ sub-directory
+    _quarantine_count = len(_quarantine)
+    if _quarantine:
+        import json as _json
+
+        _quarantine_root = root_resolved / "quarantine"
+        _quarantine_root.mkdir(parents=True, exist_ok=True)
+        for _q_candle, _q_reason in _quarantine:
+            _q_file = (
+                _quarantine_root
+                / f"{exchange}_{sym}_{tf.value}_{_q_candle.ts_utc.strftime('%Y%m%dT%H%M%SZ')}"
+                  f"_{resolved_snapshot}_{_q_reason}.json"
+            )
+            _q_file.write_text(
+                _json.dumps({
+                    "reason": str(_q_reason),
+                    "snapshot_id": resolved_snapshot,
+                    "exchange": exchange,
+                    "symbol": str(sym),
+                    "timeframe": tf.value,
+                    "ts_utc": _q_candle.ts_utc.isoformat(),
+                    "open": str(_q_candle.open),
+                    "high": str(_q_candle.high),
+                    "low": str(_q_candle.low),
+                    "close": str(_q_candle.close),
+                    "volume": str(_q_candle.volume),
+                    "value": str(_q_candle.value) if _q_candle.value is not None else None,
+                }, indent=2),
+                encoding="utf-8",
+            )
+        click.echo(
+            f"[backfill] quarantined {_quarantine_count} candle(s) → {_quarantine_root}"
+        )
+
+    if not _good:
+        raise click.ClickException(
+            f"all {len(candles)} fetched candles were rejected by policy "
+            f"({_quarantine_count} quarantined, {_skip_count} skipped)"
+        )
+
+    partition = write_candles(candles=_good, root=root_resolved, snapshot_id=resolved_snapshot)
     parquet_path = partition / f"part-{resolved_snapshot}.parquet"
 
     request_hash = hashlib.sha256(
@@ -174,6 +349,10 @@ def backfill(
     )
 
     click.echo(f"[backfill] fetched {len(candles)} candles")
+    click.echo(
+        f"[backfill] policy={policy} written={len(_good)} "
+        f"skipped={_skip_count} quarantined={_quarantine_count}"
+    )
     click.echo(f"[backfill] window: {start_utc.isoformat()} → {end_utc.isoformat()}")
     click.echo(f"[backfill] partition: {partition}")
     click.echo(f"[backfill] parquet: {parquet_path}")

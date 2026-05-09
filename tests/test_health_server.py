@@ -13,6 +13,7 @@ import socket
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,7 @@ def test_health_503_when_heartbeat_writer_missing() -> None:
 def test_health_200_when_ws_connected(tmp_path: Path) -> None:
     writer = HeartbeatWriter(root=tmp_path, node_id="test-node")
     writer.ws_state = "connected"
+    writer.last_heartbeat_ts = datetime.now(timezone.utc)
     port = _free_port()
     server = HealthServer(heartbeat_writer=writer, port=port)
     server.start()
@@ -73,6 +75,7 @@ def test_health_200_when_ws_connected(tmp_path: Path) -> None:
 def test_health_503_when_ws_disconnected(tmp_path: Path) -> None:
     writer = HeartbeatWriter(root=tmp_path, node_id="test-node")
     writer.ws_state = "disconnected"
+    writer.last_heartbeat_ts = datetime.now(timezone.utc)
     port = _free_port()
     server = HealthServer(heartbeat_writer=writer, port=port)
     server.start()
@@ -95,3 +98,23 @@ def test_resolve_port_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     # invalid value falls back to default
     monkeypatch.setenv("MCTRADER_HEALTH_PORT", "not-an-int")
     assert resolve_port() == 8080
+
+
+def test_health_503_when_stale_heartbeat(tmp_path: Path) -> None:
+    """last_heartbeat_ts older than 61s → 503 stale_heartbeat."""
+    from datetime import timedelta
+
+    writer = HeartbeatWriter(root=tmp_path, node_id="test-node")
+    writer.ws_state = "connected"
+    writer.last_heartbeat_ts = datetime.now(timezone.utc) - timedelta(seconds=61)
+    port = _free_port()
+    server = HealthServer(heartbeat_writer=writer, port=port)
+    server.start()
+    try:
+        time.sleep(0.2)
+        code, body = _get_health(port)
+        assert code == 503
+        assert body["status"] == "unhealthy"
+        assert body["reason"] == "stale_heartbeat"
+    finally:
+        server.stop()

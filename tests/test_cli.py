@@ -104,3 +104,59 @@ def test_collect_heartbeat_interval_default_help() -> None:
     assert result.exit_code == 0, result.output
     # default 5.0 노출
     assert "5.0" in result.output or "default 5" in result.output
+
+
+# MCT-109 — quarantine directory JSON creation test
+import tempfile
+from decimal import Decimal
+from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
+
+from mctrader_market.candle import CandleModel
+from mctrader_market.types import Symbol, Timeframe
+
+
+def test_backfill_quarantine_dir_json_created() -> None:
+    """backfill with --policy quarantine creates a .json file under quarantine/ for bad candles."""
+    # A candle with high < low triggers VALUE_OUT_OF_RANGE → QUARANTINE under quarantine policy.
+    bad_candle = CandleModel(
+        ts_utc=datetime(2026, 5, 1, 0, 0, 0, tzinfo=timezone.utc),
+        exchange="test",
+        symbol=Symbol(base="BTC", quote="KRW"),
+        timeframe=Timeframe.H1,
+        open=Decimal("100"),
+        high=Decimal("80"),   # high < low → VALUE_OUT_OF_RANGE
+        low=Decimal("200"),
+        close=Decimal("105"),
+        volume=Decimal("1"),
+        value=None,
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = tmpdir
+        with patch(
+            "mctrader_market_bithumb.adapter.BithumbCandleProvider.get_candles",
+            return_value=[bad_candle],
+        ):
+            runner = CliRunner()
+            result = runner.invoke(
+                main,
+                [
+                    "backfill",
+                    "--exchange", "bithumb",
+                    "--symbol", "KRW-BTC",
+                    "--tf", "1h",
+                    "--start", "2026-05-01T00:00:00Z",
+                    "--end", "2026-05-01T02:00:00Z",
+                    "--policy", "quarantine",
+                    "--root", root,
+                ],
+            )
+
+        import os
+        quarantine_dir = os.path.join(root, "quarantine")
+        json_files = [f for f in os.listdir(quarantine_dir) if f.endswith(".json")]
+        assert len(json_files) >= 1, (
+            f"expected at least 1 quarantine JSON, found {json_files}. "
+            f"CLI output:\n{result.output}"
+        )

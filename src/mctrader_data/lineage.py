@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -47,8 +48,9 @@ def write_lineage(
         record["node_id"] = node_id
     partition_dir.mkdir(parents=True, exist_ok=True)
     target = partition_dir / f"_lineage_{snapshot_id}.json"
-    with target.open("w", encoding="utf-8") as f:
-        json.dump(record, f, ensure_ascii=False, indent=2)
+    tmp = target.with_name(f".tmp_{uuid.uuid4().hex}_{target.name}")
+    tmp.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.rename(target)
     return target
 
 
