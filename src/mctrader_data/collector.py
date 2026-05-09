@@ -59,6 +59,7 @@ class CollectorDaemon:
         collector_run_id: str | None = None,
         heartbeat_writer: object | None = None,
         coverage_stats_writer: object | None = None,
+        redis_publisher: object | None = None,
     ) -> None:
         if exchange != "bithumb":
             raise ValueError(f"only 'bithumb' exchange supported in v1, got {exchange!r}")
@@ -73,6 +74,7 @@ class CollectorDaemon:
         self._collector_run_id = collector_run_id
         self._heartbeat_writer = heartbeat_writer
         self._coverage_stats_writer = coverage_stats_writer
+        self._redis_publisher = redis_publisher
         self._wal_ingesters: dict[str, WalIngester] = {}
         _node_id = node_id or os.environ.get("MCTRADER_NODE_ID") or socket.gethostname()
 
@@ -146,6 +148,12 @@ class CollectorDaemon:
                     "channel": "transaction",
                 }
                 ingester.append(record)
+                if self._redis_publisher is not None:
+                    self._redis_publisher.publish_transaction(  # type: ignore[attr-defined]
+                        exchange=event.exchange,
+                        symbol=str(event.symbol),
+                        record=record,
+                    )
                 if self._heartbeat_writer is not None:
                     self._heartbeat_writer.update_tier_event_ts(  # type: ignore[attr-defined]
                         "tick", event.event_time
@@ -174,6 +182,12 @@ class CollectorDaemon:
                     "channel": "orderbooksnapshot",
                 }
                 ingester.append(record)
+                if self._redis_publisher is not None:
+                    self._redis_publisher.publish_orderbook_snapshot(  # type: ignore[attr-defined]
+                        exchange=event.exchange,
+                        symbol=str(event.symbol),
+                        record=record,
+                    )
                 if self._heartbeat_writer is not None:
                     self._heartbeat_writer.update_tier_event_ts(  # type: ignore[attr-defined]
                         "orderbook_snapshot", event.received_at
