@@ -7,7 +7,6 @@ from decimal import Decimal
 from pathlib import Path
 
 import pyarrow.parquet as pq
-import pytest
 
 from mctrader_data.compactor.l1 import L1Compactor
 from mctrader_data.compactor.l2 import L2Compactor

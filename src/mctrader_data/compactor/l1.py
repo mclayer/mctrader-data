@@ -37,6 +37,7 @@ from mctrader_data.tick_storage import (
     _records_to_arrow as _tick_records_to_arrow,
     _TICK_SCHEMA,
 )
+import contextlib
 
 
 def _schema_version(channel: str) -> str:
@@ -106,10 +107,10 @@ class L1Compactor:
         wal_root = self._root / "wal"
         try:
             rel = sealed.relative_to(wal_root)
-        except ValueError:
+        except ValueError as err:
             raise ValueError(
                 f"Sealed segment {sealed} is not under wal root {wal_root}"
-            )
+            ) from err
         parts = rel.parts  # (exchange, channel, symbol, date, filename)
         if len(parts) < 5:
             raise ValueError(
@@ -246,10 +247,8 @@ class L1Compactor:
             writer.close()
             os.replace(tmp_path, str(target))
         except Exception:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(tmp_path)
-            except OSError:
-                pass
             raise
 
     def _write_lineage(

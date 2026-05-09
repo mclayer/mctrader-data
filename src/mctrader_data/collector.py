@@ -279,7 +279,7 @@ class MultiSymbolCollector:
             )
 
         # Per-symbol backoff delays (index = restart attempt number, capped at last)
-        _RESTART_BACKOFF = [5, 30, 120]
+        _RESTART_BACKOFF = [5, 30, 120]  # noqa: N806
 
         async def _run_with_restart(daemon: CollectorDaemon) -> None:
             """Run a single daemon, restarting on non-cancel errors with backoff."""

@@ -6,7 +6,6 @@ import os
 import sys
 import time
 from decimal import Decimal
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -56,7 +55,7 @@ def test_close_seals_active_segment(tmp_path: Path) -> None:
 def test_wal_file_permission_0640(tmp_path: Path) -> None:
     ing = _make_ingester(tmp_path)
     ing.append({"x": 1})
-    active = list(f for f in (tmp_path / "wal").rglob("*.ndjson") if not f.name.endswith(".sealed"))
+    active = [f for f in (tmp_path / "wal").rglob("*.ndjson") if not f.name.endswith(".sealed")]
     assert len(active) == 1
     if sys.platform != "win32":
         mode = oct(os.stat(active[0]).st_mode)[-4:]
@@ -85,7 +84,7 @@ def test_multiple_appends_all_records_present(tmp_path: Path) -> None:
     for f in sealed_files:
         all_lines.extend(f.read_text().strip().splitlines())
     assert len(all_lines) == 10
-    seqs = sorted(decode_line(l)["seq"] for l in all_lines)
+    seqs = sorted(decode_line(ln)["seq"] for ln in all_lines)
     assert seqs == list(range(10))
 
 

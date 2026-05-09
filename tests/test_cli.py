@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
+import tempfile
+from datetime import datetime, timezone
+from decimal import Decimal
+from unittest.mock import patch
+
 from click.testing import CliRunner
+
+from mctrader_market.candle import CandleModel
+from mctrader_market.types import Symbol, Timeframe
 
 from mctrader_data.cli import main
 
@@ -107,15 +115,6 @@ def test_collect_heartbeat_interval_default_help() -> None:
 
 
 # MCT-109 — quarantine directory JSON creation test
-import tempfile
-from decimal import Decimal
-from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
-
-from mctrader_market.candle import CandleModel
-from mctrader_market.types import Symbol, Timeframe
-
-
 def test_backfill_quarantine_dir_json_created() -> None:
     """backfill with --policy quarantine creates a .json file under quarantine/ for bad candles."""
     # A candle with high < low triggers VALUE_OUT_OF_RANGE → QUARANTINE under quarantine policy.

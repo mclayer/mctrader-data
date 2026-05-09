@@ -9,7 +9,6 @@ from decimal import Decimal
 from pathlib import Path
 
 import pyarrow.parquet as pq
-import pytest
 
 from mctrader_data.wal.ingester import WalIngester
 from mctrader_data.wal.segment import scan_sealed

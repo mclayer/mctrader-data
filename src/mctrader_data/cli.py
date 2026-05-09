@@ -12,6 +12,7 @@ from mctrader_market.types import Symbol, Timeframe
 
 from mctrader_data.path import derive_partition_path, resolve_data_root
 from mctrader_data.policy import PartialFailurePolicy
+import contextlib
 
 
 def _parse_iso_utc(value: str) -> datetime:
@@ -138,7 +139,7 @@ def backfill(
 
     from mctrader_data.policy import (
         DUPLICATE_SAME_HASH,
-        PartialFailurePolicy as _PFP,
+        PartialFailurePolicy as _PFP,  # noqa: N814
         PolicyDecision,
         QuarantineReason,
         candle_hash,
@@ -152,7 +153,7 @@ def backfill(
     _policy = _PFP(policy)
 
     # Policy check #6 — API error retry+halt
-    _API_MAX_RETRIES = 3
+    _API_MAX_RETRIES = 3  # noqa: N806
     candles = None
     last_exc: Exception | None = None
     click.echo("[backfill] fetching from Bithumb public REST...")
@@ -610,10 +611,8 @@ def compact_cmd(root: str, once: bool, log_level: str) -> None:
             pass  # Windows: signal handlers not supported in asyncio
         await runner.run()
 
-    try:
+    with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(_run())
-    except KeyboardInterrupt:
-        pass
 
 
 # MCT-93 (X4 of MCT-89) — diagnostic surface

@@ -2,12 +2,24 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from decimal import Decimal
+
 import pytest
 
+from mctrader_market.candle import CandleModel
+from mctrader_market.types import Symbol, Timeframe
+
 from mctrader_data.policy import (
+    DUPLICATE_SAME_HASH,
     PartialFailurePolicy,
     PolicyDecision,
     QuarantineReason,
+    candle_hash,
+    check_duplicate,
+    check_gap,
+    check_schema,
+    check_value_range,
     resolve_decision,
 )
 
@@ -71,33 +83,19 @@ def test_active_active_mismatch_halt_policy_returns_halt() -> None:
 
 
 # --- MCT-109: check_* 함수 단위 테스트 ---
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal
-from mctrader_market.candle import CandleModel
-from mctrader_market.types import Symbol, Timeframe
-from mctrader_data.policy import (
-    DUPLICATE_SAME_HASH,
-    candle_hash,
-    check_gap,
-    check_duplicate,
-    check_value_range,
-    check_schema,
-)
-
-
 def _make_test_candle(**kwargs):
-    defaults = dict(
-        ts_utc=datetime(2026, 5, 1, tzinfo=timezone.utc),
-        exchange="bithumb",
-        symbol=Symbol(base="BTC", quote="KRW"),
-        timeframe=Timeframe.H1,
-        open=Decimal("100"),
-        high=Decimal("110"),
-        low=Decimal("90"),
-        close=Decimal("105"),
-        volume=Decimal("1"),
-        value=None,
-    )
+    defaults = {
+        "ts_utc": datetime(2026, 5, 1, tzinfo=timezone.utc),
+        "exchange": "bithumb",
+        "symbol": Symbol(base="BTC", quote="KRW"),
+        "timeframe": Timeframe.H1,
+        "open": Decimal("100"),
+        "high": Decimal("110"),
+        "low": Decimal("90"),
+        "close": Decimal("105"),
+        "volume": Decimal("1"),
+        "value": None,
+    }
     defaults.update(kwargs)
     return CandleModel(**defaults)
 

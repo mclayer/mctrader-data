@@ -45,7 +45,7 @@ async def probe(label: str, sub: dict, *, timeout: float = TIMEOUT_S, max_msgs: 
             while count < max_msgs:
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     result["error"] = f"timeout after {timeout}s waiting for msg #{count + 1}"
                     break
                 try:

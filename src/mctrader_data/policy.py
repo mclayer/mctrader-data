@@ -77,7 +77,7 @@ def resolve_decision(
 # ── Policy check functions ─────────────────────────────────────────────────────
 
 
-def candle_hash(candle: "CandleLike") -> str:
+def candle_hash(candle: CandleLike) -> str:
     """SHA-256 hex digest of the canonical OHLCV fields for a candle.
 
     Used by :func:`check_duplicate` to detect same-hash vs diff-hash duplicates.
@@ -98,9 +98,9 @@ def candle_hash(candle: "CandleLike") -> str:
 
 
 def check_gap(
-    prev_ts: "datetime | None",
-    curr_ts: "datetime",
-    timeframe: "Timeframe",
+    prev_ts: datetime | None,
+    curr_ts: datetime,
+    timeframe: Timeframe,
 ) -> QuarantineReason | None:
     """Policy check #1 — gap detection.
 
@@ -138,7 +138,7 @@ def check_duplicate(
     return QuarantineReason.DUPLICATE_DIFFERENT_HASH
 
 
-def check_value_range(candle: "CandleLike") -> QuarantineReason | None:
+def check_value_range(candle: CandleLike) -> QuarantineReason | None:
     """Policy check #4 — OHLCV value range validation.
 
     Returns :attr:`QuarantineReason.VALUE_OUT_OF_RANGE` when any of the
@@ -166,7 +166,7 @@ def check_value_range(candle: "CandleLike") -> QuarantineReason | None:
     return None
 
 
-def check_schema(candle: "CandleLike") -> QuarantineReason | None:
+def check_schema(candle: CandleLike) -> QuarantineReason | None:
     """Policy check #5 — schema presence check (ADR-009).
 
     Returns :attr:`QuarantineReason.SCHEMA_MISMATCH` when any required field is
