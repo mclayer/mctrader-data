@@ -58,6 +58,7 @@ class CollectorDaemon:
         node_id: str | None = None,
         collector_run_id: str | None = None,
         heartbeat_writer: object | None = None,
+        coverage_stats_writer: object | None = None,
     ) -> None:
         if exchange != "bithumb":
             raise ValueError(f"only 'bithumb' exchange supported in v1, got {exchange!r}")
@@ -71,6 +72,7 @@ class CollectorDaemon:
         self._node_id = node_id
         self._collector_run_id = collector_run_id
         self._heartbeat_writer = heartbeat_writer
+        self._coverage_stats_writer = coverage_stats_writer
         self._wal_ingesters: dict[str, WalIngester] = {}
         _node_id = node_id or os.environ.get("MCTRADER_NODE_ID") or socket.gethostname()
 
@@ -144,15 +146,17 @@ class CollectorDaemon:
                     "channel": "transaction",
                 }
                 ingester.append(record)
-                # MCT-91 — heartbeat tier timestamp wiring (Codex F-1/F-5 ADOPT)
                 if self._heartbeat_writer is not None:
                     self._heartbeat_writer.update_tier_event_ts(  # type: ignore[attr-defined]
                         "tick", event.event_time
                     )
+                if self._coverage_stats_writer is not None:
+                    self._coverage_stats_writer.record_event(  # type: ignore[attr-defined]
+                        str(self._symbol), "tick", event.event_time
+                    )
         elif isinstance(event, OrderbookSnapshotEvent):
             ingester = self._wal_ingesters.get("orderbooksnapshot")
             if ingester is not None:
-                # MCT-104 §D14 — orderbooksnapshot goes to separate channel (NOT orderbookdepth)
                 record = {
                     "ts_utc": event.event_time,
                     "received_at": event.received_at,
@@ -174,10 +178,13 @@ class CollectorDaemon:
                     self._heartbeat_writer.update_tier_event_ts(  # type: ignore[attr-defined]
                         "orderbook_snapshot", event.received_at
                     )
+                if self._coverage_stats_writer is not None:
+                    self._coverage_stats_writer.record_event(  # type: ignore[attr-defined]
+                        str(self._symbol), "orderbook", event.received_at
+                    )
         elif isinstance(event, OrderbookDeltaEvent):
             ingester = self._wal_ingesters.get("orderbookdepth")
             if ingester is not None:
-                # §D11 channel: delta-only (snapshot separated to orderbooksnapshot above)
                 record = {
                     "ts_utc": event.event_time,
                     "received_at": event.received_at,
@@ -194,6 +201,10 @@ class CollectorDaemon:
                 if self._heartbeat_writer is not None and event.changes:
                     self._heartbeat_writer.update_tier_event_ts(  # type: ignore[attr-defined]
                         "orderbook", event.event_time
+                    )
+                if self._coverage_stats_writer is not None:
+                    self._coverage_stats_writer.record_event(  # type: ignore[attr-defined]
+                        str(self._symbol), "orderbook", event.event_time
                     )
         # TickerEvent ignored — diagnostic only, not persisted
 
@@ -219,12 +230,14 @@ class MultiSymbolCollector:
         manifest_root: Path | None = None,
         heartbeat_writer: object | None = None,
         health_server: object | None = None,
+        coverage_stats_writer: object | None = None,
     ) -> None:
         self._daemons = daemons
         self._manifest = manifest
         self._manifest_root = manifest_root
         self._heartbeat_writer = heartbeat_writer
         self._health_server = health_server
+        self._coverage_stats_writer = coverage_stats_writer
 
     async def run(self) -> None:
         if self._manifest is not None and self._manifest_root is not None:
@@ -248,6 +261,14 @@ class MultiSymbolCollector:
                 self._heartbeat_writer.run()  # type: ignore[attr-defined]
             )
             log.info("[collector] heartbeat task spawned")
+
+        # Coverage stats task (mirrors heartbeat_task pattern)
+        coverage_task: asyncio.Task[None] | None = None
+        if self._coverage_stats_writer is not None:
+            coverage_task = asyncio.create_task(
+                self._coverage_stats_writer.run()  # type: ignore[attr-defined]
+            )
+            log.info("[collector] coverage-stats task spawned")
 
         # CFP-128 / ADR-033 Pilot — HealthServer (HTTP /health) for Docker HEALTHCHECK
         if self._health_server is not None:
@@ -298,6 +319,12 @@ class MultiSymbolCollector:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await heartbeat_task
                 log.info("[collector] heartbeat task shutdown complete")
+            # Coverage stats graceful shutdown
+            if coverage_task is not None:
+                coverage_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await coverage_task
+                log.info("[collector] coverage-stats task shutdown complete")
             # CFP-128 / ADR-033 — HealthServer graceful stop
             if self._health_server is not None:
                 with contextlib.suppress(Exception):

@@ -250,3 +250,63 @@ async def test_collector_orderbook_snapshot_routes_to_wal_snapshot_channel(
     assert not depth_sealed_with_data, (
         "orderbookdepth WAL must not receive orderbooksnapshot events"
     )
+
+
+# --- CoverageStatsWriter wiring tests ---
+
+def test_collector_daemon_accepts_coverage_stats_writer(tmp_path: Path) -> None:
+    from mctrader_data.coverage_stats import CoverageStatsWriter
+
+    cov = CoverageStatsWriter(tmp_path, "NODE_A", "test")
+    d = CollectorDaemon(
+        root=tmp_path,
+        exchange="bithumb",
+        symbol=Symbol.from_string("KRW-BTC"),
+        coverage_stats_writer=cov,
+    )
+    assert d._coverage_stats_writer is cov
+    for ingester in d._wal_ingesters.values():
+        ingester.close()
+
+
+def test_collector_daemon_calls_record_event_on_transaction(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+    from decimal import Decimal
+    from unittest.mock import MagicMock
+    from mctrader_market_bithumb.ws_events import TransactionEvent
+
+    cov = MagicMock()
+    d = CollectorDaemon(
+        root=tmp_path,
+        exchange="bithumb",
+        symbol=Symbol.from_string("KRW-BTC"),
+        coverage_stats_writer=cov,
+    )
+    ts = datetime(2026, 5, 9, 12, 0, 0, tzinfo=timezone.utc)
+    event = TransactionEvent(
+        exchange="bithumb",
+        symbol=Symbol.from_string("KRW-BTC"),
+        event_time=ts,
+        received_at=ts,
+        raw={},
+        price=Decimal("100000000"),
+        quantity=Decimal("0.001"),
+        side="buy",
+    )
+    d._emit_to_wal(event)
+    cov.record_event.assert_called_once()
+    args = cov.record_event.call_args[0]
+    assert args[0] == "KRW-BTC"
+    assert args[1] == "tick"
+    assert args[2] == ts
+    for ingester in d._wal_ingesters.values():
+        ingester.close()
+
+
+def test_multi_symbol_collector_accepts_coverage_stats_writer(tmp_path: Path) -> None:
+    from mctrader_data.coverage_stats import CoverageStatsWriter
+    from mctrader_data.collector import MultiSymbolCollector
+
+    cov = CoverageStatsWriter(tmp_path, "NODE_A", "test")
+    collector = MultiSymbolCollector(daemons=[], coverage_stats_writer=cov)
+    assert collector._coverage_stats_writer is cov

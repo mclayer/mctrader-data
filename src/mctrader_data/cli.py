@@ -514,6 +514,17 @@ def collect(
             interval_seconds=heartbeat_interval,
         )
 
+        from mctrader_data.coverage_stats import CoverageStatsWriter
+        coverage_writer = CoverageStatsWriter(
+            root=root_resolved,
+            node_id=resolved_node_id,
+            collector_run_id=run_id,
+        )
+        log.info(
+            "[collector] coverage-stats writer initialized: %s",
+            root_resolved / "market" / "manifest" / "coverage-stats.json",
+        )
+
         # CFP-128 / ADR-033 Pilot — HealthServer for Docker HEALTHCHECK
         from mctrader_data.health_server import HealthServer
         health = HealthServer(heartbeat_writer=heartbeat, port=health_port)
@@ -527,6 +538,7 @@ def collect(
                 snapshot_id=run_id,
                 node_id=resolved_node_id, collector_run_id=run_id,
                 heartbeat_writer=heartbeat,
+                coverage_stats_writer=coverage_writer,
             )
             for sym in sym_list
         ]
@@ -534,6 +546,7 @@ def collect(
             daemons, manifest=manifest, manifest_root=root_resolved,
             heartbeat_writer=heartbeat,
             health_server=health,
+            coverage_stats_writer=coverage_writer,
         )
 
         # MCT-104 — MetadataRefreshScheduler (daily §D13 refresh, separate task)
