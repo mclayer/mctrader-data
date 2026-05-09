@@ -7,7 +7,6 @@ from decimal import Decimal
 from pathlib import Path
 
 import pyarrow.parquet as pq
-import pytest
 
 from mctrader_data.metadata_storage import (
     EXCHANGE_METADATA_SCHEMA_VERSION,

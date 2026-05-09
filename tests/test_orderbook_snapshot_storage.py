@@ -2,18 +2,15 @@
 
 from __future__ import annotations
 
-import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
 import pyarrow.parquet as pq
-import pytest
 
 from mctrader_data.orderbook_snapshot_storage import (
     ORDERBOOK_SNAPSHOT_SCHEMA_VERSION,
-    OrderbookSnapshotRecord,
     OrderbookSnapshotWriter,
     _compute_payload_hash,
     snapshot_event_to_snapshot_records,
