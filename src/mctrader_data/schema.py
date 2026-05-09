@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict
+from decimal import Decimal
+
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from mctrader_market.types import Decimal38_18, Symbol, Timeframe, UTCDateTime
 
@@ -55,3 +57,25 @@ class OhlcvRow(BaseModel):
     source_ingested_at: UTCDateTime | None = None
     data_snapshot_id: str | None = None
     data_hash: str | None = None
+
+    @model_validator(mode="after")
+    def _check_ohlcv_invariants(self) -> "OhlcvRow":
+        if self.low > self.high:
+            raise ValueError(
+                f"OHLCV invariant violated: low ({self.low}) > high ({self.high})"
+            )
+        if self.open < self.low or self.open > self.high:
+            raise ValueError(
+                f"OHLCV invariant violated: low <= open <= high required "
+                f"(low={self.low}, open={self.open}, high={self.high})"
+            )
+        if self.close < self.low or self.close > self.high:
+            raise ValueError(
+                f"OHLCV invariant violated: low <= close <= high required "
+                f"(low={self.low}, close={self.close}, high={self.high})"
+            )
+        if self.volume < Decimal(0):
+            raise ValueError(
+                f"OHLCV invariant violated: volume must be >= 0, got {self.volume}"
+            )
+        return self
