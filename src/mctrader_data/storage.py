@@ -202,7 +202,7 @@ def write_candles(
     # Atomic write: write to a sibling temp file, then rename into place.
     # rename() on the same filesystem is atomic on POSIX; on Windows it replaces
     # the destination atomically as of Python 3.3+ (os.replace semantics).
-    tmp_path = target.with_name(f".tmp_{uuid.uuid4().hex}_{target.name}")
+    tmp_path = target.with_name(f".t{uuid.uuid4().hex[:8]}.parquet")
     try:
         pq.write_table(table, tmp_path, compression="snappy")
         tmp_path.rename(target)
