@@ -737,5 +737,40 @@ def status(
     sys.exit(worst_level)
 
 
+@main.command("query")
+@click.option("--sql", required=True, help="DuckDB SQL to execute against Parquet files")
+@click.option("--data-root", default=None, help="Data root path (default: MCTRADER_DATA_ROOT or /var/lib/mctrader/data)")
+@click.option("--minio-endpoint", default=None, envvar="MINIO_ENDPOINT", help="MinIO endpoint URL")
+@click.option("--minio-access-key", default=None, envvar="MINIO_ACCESS_KEY")
+@click.option("--minio-secret-key", default=None, envvar="MINIO_SECRET_KEY")
+def query_cmd(sql: str, data_root: str | None, minio_endpoint: str | None, minio_access_key: str | None, minio_secret_key: str | None) -> None:
+    """Execute a DuckDB SQL query against local or MinIO Parquet files."""
+    import os
+    from pathlib import Path
+    from mctrader_data.duckdb_reader import DuckDBReader, MinioConfig
+
+    root = Path(data_root or os.environ.get("MCTRADER_DATA_ROOT", "/var/lib/mctrader/data"))
+    minio = None
+    if minio_endpoint:
+        minio = MinioConfig(
+            endpoint=minio_endpoint,
+            access_key=minio_access_key or "",
+            secret_key=minio_secret_key or "",
+        )
+
+    reader = DuckDBReader(root=root, minio=minio)
+    with reader.open() as conn:
+        result = conn.execute(sql)
+        columns = [desc[0] for desc in result.description]
+        rows = result.fetchall()
+        col_widths = [max(len(col), max((len(str(row[i])) for row in rows), default=0)) for i, col in enumerate(columns)]
+        header = "  ".join(col.ljust(col_widths[i]) for i, col in enumerate(columns))
+        separator = "  ".join("-" * w for w in col_widths)
+        print(header)
+        print(separator)
+        for row in rows:
+            print("  ".join(str(row[i]).ljust(col_widths[i]) for i in range(len(columns))))
+
+
 if __name__ == "__main__":  # pragma: no cover
     main()

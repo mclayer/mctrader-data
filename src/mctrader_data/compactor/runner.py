@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from mctrader_data.wal.segment import scan_sealed
 from .l1 import L1Compactor
 from .l2 import L2Compactor
 from .l3 import L3Compactor
 from .gc import run_gc
+
+if TYPE_CHECKING:
+    from mctrader_data.compactor.minio_uploader import MinioUploader
 
 log = logging.getLogger(__name__)
 
@@ -21,11 +25,16 @@ L3_INTERVAL_SECONDS = 3600
 
 
 class CompactorRunner:
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self,
+        root: Path,
+        minio_uploader: "MinioUploader | None" = None,
+    ) -> None:
         self._root = root
         self._l1 = L1Compactor(root=root)
         self._l2 = L2Compactor(root)
         self._l3 = L3Compactor(root)
+        self._minio = minio_uploader
         self._last_l2 = 0.0
         self._last_l3 = 0.0
 
@@ -82,11 +91,32 @@ class CompactorRunner:
                 exchange = _extract_partition(parquet, "exchange")
                 symbol = _extract_partition(parquet, "symbol")
                 channel = parquet.parts[list(parquet.parts).index("market") + 1]
-                self._l3.compact_day(
-                    exchange=exchange, symbol=symbol, channel=channel, date_utc=now.date(),
+                self._run_l3_for_parquet(
+                    exchange=exchange, symbol=symbol, channel=channel, now_date=now.date()
                 )
             except Exception:
                 log.exception("[compactor] L3 failed %s", parquet)
+
+    def _run_l3_for_parquet(
+        self,
+        *,
+        exchange: str,
+        symbol: str,
+        channel: str,
+        now_date: date | None,
+    ) -> None:
+        d = now_date or datetime.now(timezone.utc).date()
+        out = self._l3.compact_day(
+            exchange=exchange, symbol=symbol, channel=channel, date_utc=d,
+        )
+        if out is not None:
+            from mctrader_data.metrics import record_l3_compaction
+            record_l3_compaction(exchange=exchange, symbol=symbol, channel=channel)
+            if self._minio is not None:
+                try:
+                    self._minio.upload(out)
+                except Exception:
+                    log.exception("[compactor] MinIO upload failed %s", out)
 
 
 def _extract_partition(path: Path, key: str) -> str:

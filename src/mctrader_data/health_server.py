@@ -108,17 +108,25 @@ class _HealthHandler(BaseHTTPRequestHandler):
     max_stale_seconds: int = DEFAULT_MAX_STALE_SECONDS
 
     def do_GET(self) -> None:  # noqa: N802 (stdlib API)
-        if self.path != "/health":
+        if self.path == "/health":
+            status, body = _build_response(self.heartbeat_writer, self.max_stale_seconds)
+            payload = json.dumps(body).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+        elif self.path == "/metrics":
+            from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+            payload = generate_latest()
+            self.send_response(200)
+            self.send_header("Content-Type", CONTENT_TYPE_LATEST)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+        else:
             self.send_response(404)
             self.end_headers()
-            return
-        status, body = _build_response(self.heartbeat_writer, self.max_stale_seconds)
-        payload = json.dumps(body).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 (stdlib API)
         # Silence default stderr access logs.

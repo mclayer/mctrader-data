@@ -20,6 +20,10 @@ services:
       MCTRADER_NODE_ID: "NODE_BITHUMB_A"
       MCTRADER_HEALTH_PORT: "8080"
       PYTHONUNBUFFERED: "1"
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
     volumes:
       - mctrader_data:/var/lib/mctrader/data
     healthcheck:
@@ -34,6 +38,7 @@ services:
       start_period: 60s
     networks:
       - mctrader-net
+      - mctrader_net
 
   upbit-ingester:
     build: .
@@ -91,6 +96,9 @@ services:
     environment:
       MCTRADER_DATA_ROOT: /var/lib/mctrader/data
       PYTHONUNBUFFERED: "1"
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
     volumes:
       - mctrader_data:/var/lib/mctrader/data
     depends_on:
@@ -104,6 +112,7 @@ services:
       start_period: 30s
     networks:
       - mctrader-net
+      - mctrader_net
 
 volumes:
   mctrader_data:
