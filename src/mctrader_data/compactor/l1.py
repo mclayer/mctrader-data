@@ -39,6 +39,15 @@ from mctrader_data.tick_storage import (
 )
 
 
+def _schema_version(channel: str) -> str:
+    """Return the schema version string for *channel* (module-level helper for L2/L3)."""
+    if channel == "transaction":
+        return TICK_SCHEMA_VERSION
+    raise NotImplementedError(
+        f"_schema_version: channel {channel!r} not supported. Only 'transaction' is implemented."
+    )
+
+
 class L1Compactor:
     """Compact a single sealed WAL segment into a tier=L1 Parquet file.
 
