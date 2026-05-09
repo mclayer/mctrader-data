@@ -22,10 +22,21 @@ from mctrader_market.candle import CandleLike, CandleModel
 from mctrader_market.types import Symbol, Timeframe
 
 from mctrader_data.dedup import NODE_PRIORITY_DEFAULT_SENTINEL
+from mctrader_data.metadata_storage import (
+    EXCHANGE_METADATA_SCHEMA_VERSION,
+    ExchangeMetadataRecord,
+)
+from mctrader_data.orderbook_snapshot_storage import (
+    ORDERBOOK_SNAPSHOT_SCHEMA_VERSION,
+    OrderbookSnapshotRecord,
+)
 from mctrader_data.path import Mode, derive_partition_path, to_duckdb_glob
 from mctrader_data.schema import SCHEMA_VERSION
 
 ScanMode = Literal["historical", "paper"]
+
+# ── §D13/§D14 Read API forward declarations ────────────────────────────────────
+# Full implementations at end of module to avoid circular imports.
 
 
 def _candles_to_arrow(candles: Sequence[CandleLike]) -> pa.Table:
@@ -308,4 +319,199 @@ def scan_candles(
             close=r.close,
             volume=r.volume,
             value=r.value,
+        )
+
+
+# ── §D13 Read API: scan_exchange_metadata ──────────────────────────────────────
+
+def scan_exchange_metadata(
+    *,
+    root: Path,
+    exchange: str,
+    symbol: str,
+    ts_utc: datetime,
+) -> ExchangeMetadataRecord | None:
+    """Return the most recent §D13 metadata record where ``fetched_at <= ts_utc``.
+
+    Implements ADR-005 path-c lookahead guard: only rows with
+    ``available_from_ts (= fetched_at) <= ts_utc`` are eligible.
+    Returns ``None`` if no eligible row exists.
+
+    Partition scan: fetched_date from oldest available up to ts_utc.date().
+    """
+    import pyarrow.parquet as _pq
+    from datetime import date as _date
+
+    meta_root = (
+        root
+        / "market"
+        / "exchange_metadata"
+        / f"schema_version={EXCHANGE_METADATA_SCHEMA_VERSION}"
+        / f"exchange={exchange}"
+    )
+    if not meta_root.exists():
+        return None
+
+    ts_utc_aware = ts_utc.replace(tzinfo=timezone.utc) if ts_utc.tzinfo is None else ts_utc
+    cutoff_date = ts_utc_aware.astimezone(timezone.utc).date()
+
+    # Scan all fetched_date= partitions up to cutoff, collect eligible rows
+    best: ExchangeMetadataRecord | None = None
+    for date_dir in sorted(meta_root.iterdir()):
+        dir_name = date_dir.name  # e.g. "fetched_date=2026-05-09"
+        if not dir_name.startswith("fetched_date="):
+            continue
+        date_str = dir_name[len("fetched_date="):]
+        try:
+            partition_date = _date.fromisoformat(date_str)
+        except ValueError:
+            continue
+        if partition_date > cutoff_date:
+            break  # sorted ascending, stop early
+
+        for fp in sorted(date_dir.rglob("*.parquet")):
+            try:
+                # Use ParquetFile.read() to avoid Hive partition schema merge issues
+                pf = _pq.ParquetFile(fp)
+                table = pf.read()
+            except Exception:
+                continue
+            for row in table.to_pylist():
+                row_symbol = str(row.get("symbol", "")) if row.get("symbol") is not None else ""
+                if row_symbol != symbol:
+                    continue
+                fetched_at = row["fetched_at"]
+                if isinstance(fetched_at, datetime):
+                    if fetched_at.tzinfo is None:
+                        fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+                    else:
+                        fetched_at = fetched_at.astimezone(timezone.utc)
+                # ADR-005 lookahead guard
+                if fetched_at > ts_utc_aware:
+                    continue
+                if best is None or fetched_at > best.fetched_at:
+                    from decimal import Decimal as Dec
+                    raw_date = row["fetched_date"]
+                    parsed_date = (
+                        raw_date if hasattr(raw_date, "year")
+                        else _date.fromisoformat(str(raw_date))
+                    )
+                    best = ExchangeMetadataRecord(
+                        exchange=str(row["exchange"]),
+                        symbol=str(row["symbol"]),
+                        fetched_date=parsed_date,
+                        fetched_at=fetched_at,
+                        source_snapshot_id=str(row["source_snapshot_id"]),
+                        data_hash=str(row["data_hash"]),
+                        asset_status=str(row["asset_status"]),
+                        acc_trade_value_24h=Dec(str(row["acc_trade_value_24h"])),
+                        tick_size=(
+                            Dec(str(row["tick_size"]))
+                            if row.get("tick_size") is not None else None
+                        ),
+                        min_order_qty=(
+                            Dec(str(row["min_order_qty"]))
+                            if row.get("min_order_qty") is not None else None
+                        ),
+                        fee_maker=(
+                            Dec(str(row["fee_maker"]))
+                            if row.get("fee_maker") is not None else None
+                        ),
+                        fee_taker=(
+                            Dec(str(row["fee_taker"]))
+                            if row.get("fee_taker") is not None else None
+                        ),
+                        min_order_notional_krw=(
+                            Dec(str(row["min_order_notional_krw"]))
+                            if row.get("min_order_notional_krw") is not None else None
+                        ),
+                    )
+    return best
+
+
+# ── §D14 Read API: scan_orderbook_snapshots ────────────────────────────────────
+
+def scan_orderbook_snapshots(
+    *,
+    root: Path,
+    exchange: str,
+    symbol: str,
+    start: datetime,
+    end: datetime,
+    simulated_clock: datetime | None = None,
+) -> Iterable[OrderbookSnapshotRecord]:
+    """Scan §D14 orderbook_snapshot.v1 partitions for ``[start, end)`` half-open.
+
+    ADR-005 lookahead guard: ``received_at <= simulated_clock`` filter when
+    ``simulated_clock`` is provided.
+    Sort: ``(ts_utc ASC, baseline_seq ASC)``.
+
+    Returns an iterable of :class:`OrderbookSnapshotRecord`.
+    """
+    import pyarrow.parquet as _pq
+    from datetime import timedelta as _td
+
+    if start.tzinfo is None or end.tzinfo is None:
+        raise ValueError("start/end must be timezone-aware UTC")
+
+    snap_root = (
+        root
+        / "market"
+        / "orderbook_snapshot"
+        / f"schema_version={ORDERBOOK_SNAPSHOT_SCHEMA_VERSION}"
+        / f"exchange={exchange}"
+        / f"symbol={symbol}"
+    )
+    if not snap_root.exists():
+        return
+
+    # Iterate date partitions in range
+    cur_date = start.astimezone(timezone.utc).date()
+    end_date = end.astimezone(timezone.utc).date()
+
+    rows_all: list[tuple[datetime, int, dict]] = []
+    while cur_date <= end_date:
+        date_str = cur_date.isoformat()
+        date_dir = snap_root / f"date={date_str}"
+        if date_dir.exists():
+            for fp in sorted(date_dir.rglob("*.parquet")):
+                try:
+                    pf = _pq.ParquetFile(fp)
+                    table = pf.read()
+                except Exception:
+                    continue
+                for row in table.to_pylist():
+                    ts = row["ts_utc"]
+                    received = row["received_at"]
+                    if hasattr(ts, "tzinfo") and ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    if not (start <= ts < end):
+                        continue
+                    if simulated_clock is not None:
+                        if hasattr(received, "tzinfo") and received.tzinfo is None:
+                            received = received.replace(tzinfo=timezone.utc)
+                        if received > simulated_clock:
+                            continue
+                    rows_all.append((ts, row["baseline_seq"], row))
+        cur_date += _td(days=1)
+
+    rows_all.sort(key=lambda x: (x[0], x[1]))
+
+    from decimal import Decimal as Dec
+    for ts, baseline_seq, row in rows_all:
+        received = row["received_at"]
+        if hasattr(received, "tzinfo") and received.tzinfo is None:
+            received = received.replace(tzinfo=timezone.utc)
+        yield OrderbookSnapshotRecord(
+            ts_utc=ts,
+            received_at=received,
+            exchange=row["exchange"],
+            symbol=row["symbol"],
+            baseline_seq=int(baseline_seq),
+            side=row["side"],
+            level=int(row["level"]),
+            price=Dec(str(row["price"])),
+            quantity=Dec(str(row["quantity"])),
+            payload_hash=row["payload_hash"],
+            raw_json=row.get("raw_json"),
         )

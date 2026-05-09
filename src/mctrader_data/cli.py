@@ -191,8 +191,8 @@ def backfill(
     help="Query Bithumb ticker at startup, pick top N by 24h volume. Mutex with --symbols.",
 )
 @click.option(
-    "--include", default="transactions,orderbook",
-    help='Channels comma-separated: "transactions" + "orderbook" (default both).',
+    "--include", default="transactions,orderbook,orderbook_snapshot",
+    help='Channels comma-separated: "transactions" + "orderbook" + "orderbook_snapshot" (default all three).',
 )
 @click.option("--exchange", default="bithumb", help='Only "bithumb" supported in v1.')
 @click.option(
@@ -258,11 +258,12 @@ def collect(
         raise click.UsageError("either --symbols or --top-n must be provided")
 
     chans = {c.strip() for c in include.split(",") if c.strip()}
-    invalid = chans - {"transactions", "orderbook"}
+    invalid = chans - {"transactions", "orderbook", "orderbook_snapshot"}
     if invalid:
         raise click.BadParameter(f"unknown channel(s): {invalid}")
     include_tx = "transactions" in chans
     include_ob = "orderbook" in chans
+    include_ob_snapshot = "orderbook_snapshot" in chans
 
     root_resolved = resolve_data_root(root_override=root)
     log.info("storage root: %s", root_resolved)
@@ -277,6 +278,7 @@ def collect(
     )
 
     async def _amain() -> None:
+        import asyncio as _asyncio
         from datetime import datetime, timezone
 
         from mctrader_data.heartbeat import HeartbeatWriter
@@ -305,6 +307,8 @@ def collect(
             channels.append("transaction")
         if include_ob:
             channels.append("orderbookdepth")
+        if include_ob_snapshot:
+            channels.append("orderbooksnapshot")
         manifest = CollectorManifest(
             collector_run_id=run_id,
             started_at_utc=started_at,
@@ -332,6 +336,7 @@ def collect(
             CollectorDaemon(
                 root=root_resolved, exchange=exchange, symbol=sym,
                 include_transactions=include_tx, include_orderbook=include_ob,
+                include_orderbook_snapshot=include_ob_snapshot,
                 snapshot_id=run_id,
                 node_id=resolved_node_id, collector_run_id=run_id,
                 heartbeat_writer=heartbeat,
@@ -343,7 +348,30 @@ def collect(
             heartbeat_writer=heartbeat,
             health_server=health,
         )
-        await collector.run()
+
+        # MCT-104 — MetadataRefreshScheduler (daily §D13 refresh, separate task)
+        import contextlib as _ctx
+        if include_ob_snapshot:
+            from mctrader_data.collector import MetadataRefreshScheduler
+            metadata_scheduler = MetadataRefreshScheduler(
+                root=root_resolved,
+                exchange=exchange,
+                node_id=resolved_node_id,
+                collector_run_id=run_id,
+            )
+            metadata_task = _asyncio.create_task(metadata_scheduler.run())
+            log.info("[metadata] refresh scheduler started")
+        else:
+            metadata_task = None
+
+        try:
+            await collector.run()
+        finally:
+            if metadata_task is not None:
+                metadata_task.cancel()
+                with _ctx.suppress(_asyncio.CancelledError, Exception):
+                    await metadata_task
+                log.info("[metadata] refresh scheduler shutdown")
 
     try:
         asyncio.run(_amain())
