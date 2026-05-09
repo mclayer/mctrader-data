@@ -60,3 +60,6 @@ reportUnknownParameterType = "none"
 testpaths = ["tests"]
 addopts = "-v --strict-markers"
 asyncio_mode = "auto"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
