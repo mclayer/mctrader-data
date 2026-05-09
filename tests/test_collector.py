@@ -91,7 +91,7 @@ def test_collector_accepts_node_id_and_collector_run_id(tmp_path: Path) -> None:
 
 
 def test_collector_event_propagates_to_heartbeat_tier_ts(tmp_path: Path) -> None:
-    """Codex F-1/F-5 ADOPT — daemon._handle_event 가 heartbeat tier timestamp wiring."""
+    """Codex F-1/F-5 ADOPT — daemon._emit_to_wal 가 heartbeat tier timestamp wiring."""
     from datetime import datetime, timezone
     from decimal import Decimal
     from mctrader_data.heartbeat import HeartbeatWriter
@@ -105,12 +105,7 @@ def test_collector_event_propagates_to_heartbeat_tier_ts(tmp_path: Path) -> None
         collector_run_id="NODE_A-20260505T120000Z",
         heartbeat_writer=hb,
     )
-    # Manually wire up writers (run() 거치지 않고 _handle_event 만 검증)
-    from mctrader_data.tick_storage import TickWriter
-    d._tick_writer = TickWriter(
-        root=tmp_path, exchange="bithumb", symbol="KRW-BTC", snapshot_id="ignored",
-        node_id="NODE_A", collector_run_id="NODE_A-20260505T120000Z",
-    )
+    # WalIngester for "transaction" channel already created in __init__
 
     event_ts = datetime(2026, 5, 5, 12, 0, 0, tzinfo=timezone.utc)
     sym = Symbol.from_string("KRW-BTC")
@@ -120,11 +115,13 @@ def test_collector_event_propagates_to_heartbeat_tier_ts(tmp_path: Path) -> None
         price=Decimal("100000000"), quantity=Decimal("0.01"),
         side="buy",
     )
-    d._handle_event(txn)
+    d._emit_to_wal(txn)
 
-    # heartbeat 의 tier timestamp 가 update 됨 (transaction_event_to_record 의 ts_utc = event_time)
+    # heartbeat 의 tier timestamp 가 update 됨 (event_time = ts_utc)
     assert hb.last_event_ts_per_tier.get("tick") == event_ts.isoformat()
-    d._tick_writer.close()
+    # Close WAL ingesters
+    for ingester in d._wal_ingesters.values():
+        ingester.close()
 
 
 @pytest.mark.asyncio
@@ -190,10 +187,10 @@ def test_collector_daemon_include_orderbook_snapshot_false(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_collector_orderbook_snapshot_routes_to_d14_writer(
+async def test_collector_orderbook_snapshot_routes_to_wal_snapshot_channel(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """OrderbookSnapshotEvent must be routed to §D14 writer, NOT §D11 writer."""
+    """OrderbookSnapshotEvent must be routed to WAL orderbooksnapshot channel, NOT orderbookdepth."""
     from decimal import Decimal
     from datetime import datetime, timezone as _tz
 
@@ -235,18 +232,21 @@ async def test_collector_orderbook_snapshot_routes_to_d14_writer(
     )
     await daemon.run()
 
-    # §D14 partition must exist
-    d14_root = tmp_path / "market" / "orderbook_snapshot"
-    d11_root = tmp_path / "market" / "orderbook"
-    assert d14_root.exists(), "§D14 partition not created"
-    # §D11 orderbook partition should NOT contain snapshot rows (snapshot-only event)
-    if d11_root.exists():
-        parquets = list(d11_root.rglob("*.parquet"))
-        import pyarrow.parquet as pq
-        for p in parquets:
-            table = pq.read_table(p)
-            rows = table.to_pylist()
-            for row in rows:
-                assert row.get("event_type") != "snapshot", (
-                    "§D11 partition must not receive orderbooksnapshot events"
-                )
+    # WAL orderbooksnapshot channel must have written a sealed segment
+    wal_bithumb = tmp_path / "wal" / "bithumb"
+    assert wal_bithumb.exists(), "WAL bithumb directory not created"
+    snapshot_sealed = [
+        p for p in wal_bithumb.rglob("*.ndjson.sealed")
+        if "orderbooksnapshot" in str(p)
+    ]
+    assert snapshot_sealed, "orderbooksnapshot WAL sealed segment not found after close()"
+    # orderbooksnapshot sealed file must have content (at least 1 record)
+    assert snapshot_sealed[0].stat().st_size > 0, "orderbooksnapshot WAL segment is empty"
+    # orderbookdepth sealed segment should be empty (no delta events were sent)
+    depth_sealed_with_data = [
+        p for p in wal_bithumb.rglob("*.ndjson.sealed")
+        if "orderbookdepth" in str(p) and p.stat().st_size > 0
+    ]
+    assert not depth_sealed_with_data, (
+        "orderbookdepth WAL must not receive orderbooksnapshot events"
+    )

@@ -49,11 +49,13 @@ class HeartbeatWriter:
         node_id: str,
         interval_seconds: float = 5.0,
         version: str = "unknown",
+        role: str = "ingester",
     ):
         self.root = Path(root)
         self.node_id = node_id
         self.interval = interval_seconds
         self.version = version
+        self._role = role
         self.started_at = datetime.now(timezone.utc)
         self.collector_run_id: str | None = None
         self._ws_state: WsState = "connected"
@@ -87,6 +89,7 @@ class HeartbeatWriter:
             "node_id": self.node_id,
             "collector_run_id": self.collector_run_id or "",
             "version": self.version,
+            "role": self._role,
             "started_at": self.started_at.isoformat(),
             "now": now.isoformat(),
             "uptime_seconds": int((now - self.started_at).total_seconds()),
