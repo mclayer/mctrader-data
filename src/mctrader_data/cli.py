@@ -123,16 +123,13 @@ def backfill(
         click.echo("[dry-run] No fetch performed.")
         return
 
-    # MCT-12 retroactive sealing — wire BithumbCandleProvider → write_candles + lineage
+    # MCT-12 retroactive sealing — wire CandleProvider → write_candles + lineage
     # (was previously stub printing "First-commit storage scaffold only").
-    if exchange != "bithumb":
-        raise click.UsageError(f"only 'bithumb' exchange is supported in v1, got {exchange!r}")
-
     import hashlib
     from datetime import datetime as _dt
     from datetime import timezone as _tz
 
-    from mctrader_market_bithumb.adapter import BithumbCandleProvider
+    from mctrader_data.adapters import get_candle_provider
 
     from mctrader_data.lineage import write_lineage
     from mctrader_data.storage import write_candles
@@ -156,8 +153,8 @@ def backfill(
     _API_MAX_RETRIES = 3  # noqa: N806
     candles = None
     last_exc: Exception | None = None
-    click.echo("[backfill] fetching from Bithumb public REST...")
-    provider = BithumbCandleProvider()
+    click.echo(f"[backfill] fetching from {exchange} public REST...")
+    provider = get_candle_provider(exchange)
     for _attempt in range(1, _API_MAX_RETRIES + 1):
         try:
             candles = provider.get_candles(symbol=sym, timeframe=tf, start=start_utc, end=end_utc)
@@ -337,16 +334,18 @@ def backfill(
         ).encode()
     ).hexdigest()
 
+    _endpoint = "https://api.bithumb.com" if exchange == "bithumb" else "https://api.upbit.com"
+    _adapter_name = f"mctrader-market-{exchange}"
     write_lineage(
         partition_dir=partition,
         snapshot_id=resolved_snapshot,
         exchange=exchange,
-        endpoint="https://api.bithumb.com",
+        endpoint=_endpoint,
         request_params_hash=request_hash,
         fetched_at_utc=_dt.now(_tz.utc),
         response_hash=response_hash,
-        adapter_name="mctrader-market-bithumb",
-        adapter_version="0.3.0",
+        adapter_name=_adapter_name,
+        adapter_version="0.1.0",
     )
 
     click.echo(f"[backfill] fetched {len(candles)} candles")
@@ -374,7 +373,7 @@ def backfill(
     "--include", default="transactions,orderbook,orderbook_snapshot",
     help='Channels comma-separated: "transactions" + "orderbook" + "orderbook_snapshot" (default all three).',
 )
-@click.option("--exchange", default="bithumb", help='Only "bithumb" supported in v1.')
+@click.option("--exchange", default="bithumb", show_default=True, help="거래소 이름 (bithumb|upbit)")
 @click.option(
     "--root", type=click.Path(path_type=Path), default=None,
     help="Storage root. Default: $MCTRADER_DATA_ROOT or ~/.local/share/mctrader/data.",
@@ -551,8 +550,9 @@ def collect(
         )
 
         # MCT-104 — MetadataRefreshScheduler (daily §D13 refresh, separate task)
+        # Only bithumb supports MetadataRefreshScheduler (Upbit has no equivalent endpoint)
         import contextlib as _ctx
-        if include_ob_snapshot:
+        if include_ob_snapshot and exchange == "bithumb":
             from mctrader_data.collector import MetadataRefreshScheduler
             metadata_scheduler = MetadataRefreshScheduler(
                 root=root_resolved,
