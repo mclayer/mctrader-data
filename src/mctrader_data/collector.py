@@ -258,9 +258,30 @@ class MultiSymbolCollector:
                 getattr(self._health_server, "port", "?"),
             )
 
-        tasks = [asyncio.create_task(d.run()) for d in self._daemons]
+        # Per-symbol backoff delays (index = restart attempt number, capped at last)
+        _RESTART_BACKOFF = [5, 30, 120]
+
+        async def _run_with_restart(daemon: CollectorDaemon) -> None:
+            """Run a single daemon, restarting on non-cancel errors with backoff."""
+            attempt = 0
+            while True:
+                try:
+                    await daemon.run()
+                    return  # clean exit (cancel_event set)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    delay = _RESTART_BACKOFF[min(attempt, len(_RESTART_BACKOFF) - 1)]
+                    log.error(
+                        "[collector] symbol=%s task error (attempt=%d), restarting in %ds: %r",
+                        daemon._symbol, attempt, delay, exc,
+                    )
+                    attempt += 1
+                    await asyncio.sleep(delay)
+
+        tasks = [asyncio.create_task(_run_with_restart(d)) for d in self._daemons]
         try:
-            await asyncio.gather(*tasks, return_exceptions=False)
+            await asyncio.gather(*tasks, return_exceptions=True)
         except (asyncio.CancelledError, KeyboardInterrupt):
             log.info("[collector] aggregate cancel — propagating to children")
             for d in self._daemons:

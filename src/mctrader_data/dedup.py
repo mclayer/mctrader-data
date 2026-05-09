@@ -21,6 +21,7 @@ Contract enforcement:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -29,6 +30,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
+from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -42,6 +44,68 @@ DEDUP_WINDOW_MS = 200
 
 # Architect 결정 #8 — Quarantine backpressure (per-second 100 mismatch cap → batching)
 QUARANTINE_RATE_LIMIT_PER_SEC = 100
+
+
+# ----------------------------------------------------------------------
+# Candle data_hash (SHA-256 of canonical OHLCV fields)
+# ----------------------------------------------------------------------
+
+def compute_data_hash(candle: Any) -> str:
+    """SHA-256 of (ts_utc, open, high, low, close, volume) as canonical strings joined with '|'.
+
+    All six fields are stringified so that Decimal precision is preserved
+    and the result is independent of Python object identity or JSON encoding.
+    """
+    fields = "|".join([
+        str(candle.ts_utc),
+        str(candle.open),
+        str(candle.high),
+        str(candle.low),
+        str(candle.close),
+        str(candle.volume),
+    ])
+    return hashlib.sha256(fields.encode("utf-8")).hexdigest()
+
+
+class DedupStatus(Enum):
+    """Return value of :func:`is_duplicate`.
+
+    - ``UNIQUE``: no prior record with this ts_utc → write as normal.
+    - ``SAME_HASH``: data_hash matches existing record → skip (exact dup).
+    - ``HASH_CONFLICT``: same ts_utc but different data_hash → quarantine.
+    """
+    UNIQUE = "unique"
+    SAME_HASH = "same_hash"
+    HASH_CONFLICT = "hash_conflict"
+
+
+def is_duplicate(
+    candle: Any,
+    seen_hashes: dict[Any, str],
+) -> DedupStatus:
+    """Check whether *candle* is a duplicate using ``data_hash`` comparison.
+
+    Args:
+        candle: A candle-like object with ``ts_utc``, ``open``, ``high``,
+            ``low``, ``close``, and ``volume`` attributes.
+        seen_hashes: Mutable dict mapping ``ts_utc`` → previously seen
+            ``data_hash``.  The caller owns this dict and passes the same
+            instance across multiple calls to maintain session state.
+
+    Returns:
+        - ``DedupStatus.UNIQUE``        — ts_utc not yet seen; dict updated.
+        - ``DedupStatus.SAME_HASH``     — identical data_hash → skip silently.
+        - ``DedupStatus.HASH_CONFLICT`` — same ts_utc, different hash → quarantine.
+    """
+    current_hash = compute_data_hash(candle)
+    key = candle.ts_utc
+    prior_hash = seen_hashes.get(key)
+    if prior_hash is None:
+        seen_hashes[key] = current_hash
+        return DedupStatus.UNIQUE
+    if prior_hash == current_hash:
+        return DedupStatus.SAME_HASH
+    return DedupStatus.HASH_CONFLICT
 
 
 # ----------------------------------------------------------------------
