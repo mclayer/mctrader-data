@@ -30,8 +30,8 @@ def _manifest(run_id: str = "deadbeefdeadbeef", started: datetime | None = None)
         collector_run_id=run_id,
         started_at_utc=started or _ts(0),
         exchange="bithumb",
-        selected_symbols=["KRW-BTC", "KRW-ETH"],
-        channels=["transaction", "orderbookdepth"],
+        selected_symbols=["KRW-BTC", "KRW-ETH"],  # type: ignore[arg-type]
+        channels=["transaction", "orderbookdepth"],  # type: ignore[arg-type]
         selection_method="top_n_volume",
         top_n=10,
     )
@@ -114,8 +114,8 @@ def test_manifest_selection_method_literal_only() -> None:
             collector_run_id="x",
             started_at_utc=_ts(0),
             exchange="bithumb",
-            selected_symbols=[],
-            channels=[],
+            selected_symbols=[],  # type: ignore[arg-type]
+            channels=[],  # type: ignore[arg-type]
             selection_method="random",  # type: ignore[arg-type]
             top_n=None,
         )
@@ -154,8 +154,8 @@ def test_manifest_with_node_id_field(tmp_path: Path) -> None:
         collector_run_id="NODE_A-20260505T120000Z",
         started_at_utc=_ts(0),
         exchange="bithumb",
-        selected_symbols=["KRW-BTC"],
-        channels=["transaction"],
+        selected_symbols=["KRW-BTC"],  # type: ignore[arg-type]
+        channels=["transaction"],  # type: ignore[arg-type]
         selection_method="explicit",
         top_n=None,
         node_id="NODE_A",

@@ -26,7 +26,7 @@ def test_tick_record_rejects_float_price() -> None:
         TickRecord(
             ts_utc=_TS, received_at=_TS,
             exchange="bithumb", symbol="KRW-BTC",
-            price=1.5,  # float — should raise
+            price=1.5,  # type: ignore[arg-type]  # intentional: testing runtime rejection
             quantity=Decimal("0.001"), side="buy",
         )
 
@@ -36,7 +36,7 @@ def test_tick_record_rejects_float_quantity() -> None:
         TickRecord(
             ts_utc=_TS, received_at=_TS,
             exchange="bithumb", symbol="KRW-BTC",
-            price=Decimal("100000000"), quantity=0.001,  # float — should raise
+            price=Decimal("100000000"), quantity=0.001,  # type: ignore[arg-type]
             side="buy",
         )
 
@@ -58,7 +58,7 @@ def test_orderbook_event_record_rejects_float_price() -> None:
             ts_utc=_TS, received_at=_TS,
             exchange="bithumb", symbol="KRW-BTC",
             event_type="snapshot", side="bid", level=0,
-            price=100.5,  # float — should raise
+            price=100.5,  # type: ignore[arg-type]
             quantity=Decimal("1.0"),
         )
 
@@ -69,7 +69,7 @@ def test_orderbook_event_record_rejects_float_quantity() -> None:
             ts_utc=_TS, received_at=_TS,
             exchange="bithumb", symbol="KRW-BTC",
             event_type="snapshot", side="bid", level=0,
-            price=Decimal("100000000"), quantity=0.5,  # float — should raise
+            price=Decimal("100000000"), quantity=0.5,  # type: ignore[arg-type]
         )
 
 
@@ -92,7 +92,7 @@ def test_orderbook_snapshot_record_rejects_float_price() -> None:
             exchange="bithumb", symbol="KRW-BTC",
             baseline_seq=1234567890,
             side="bid", level=0,
-            price=99.9,  # float — should raise
+            price=99.9,  # type: ignore[arg-type]
             quantity=Decimal("10.0"),
             payload_hash="abc123",
         )
@@ -105,7 +105,7 @@ def test_orderbook_snapshot_record_rejects_float_quantity() -> None:
             exchange="bithumb", symbol="KRW-BTC",
             baseline_seq=1234567890,
             side="bid", level=0,
-            price=Decimal("99000000"), quantity=9.9,  # float — should raise
+            price=Decimal("99000000"), quantity=9.9,  # type: ignore[arg-type]
             payload_hash="abc123",
         )
 
@@ -133,7 +133,7 @@ def test_exchange_metadata_record_rejects_float_acc_trade_value() -> None:
             source_snapshot_id="abc123",
             data_hash="def456",
             asset_status="1",
-            acc_trade_value_24h=12345.6,  # float — should raise
+            acc_trade_value_24h=12345.6,  # type: ignore[arg-type]
         )
 
 
@@ -147,7 +147,7 @@ def test_exchange_metadata_record_rejects_float_tick_size() -> None:
             data_hash="def456",
             asset_status="1",
             acc_trade_value_24h=Decimal("12345000000"),
-            tick_size=1.0,  # float — should raise
+            tick_size=1.0,  # type: ignore[arg-type]
         )
 
 
@@ -172,8 +172,8 @@ def test_collector_manifest_frozen() -> None:
         collector_run_id="run-001",
         started_at_utc=_TS,
         exchange="bithumb",
-        selected_symbols=["KRW-BTC", "KRW-ETH"],
-        channels=["transaction"],
+        selected_symbols=("KRW-BTC", "KRW-ETH"),
+        channels=("transaction",),
         selection_method="explicit",
     )
     with pytest.raises(PydanticValidationError):
@@ -185,8 +185,8 @@ def test_collector_manifest_selected_symbols_is_tuple() -> None:
         collector_run_id="run-001",
         started_at_utc=_TS,
         exchange="bithumb",
-        selected_symbols=["KRW-BTC", "KRW-ETH"],  # list input — should coerce to tuple
-        channels=["transaction"],
+        selected_symbols=["KRW-BTC", "KRW-ETH"],  # type: ignore[arg-type]  # testing BeforeValidator coercion
+        channels=["transaction"],  # type: ignore[arg-type]
         selection_method="explicit",
     )
     assert isinstance(m.selected_symbols, tuple)
@@ -198,8 +198,8 @@ def test_collector_manifest_channels_is_tuple() -> None:
         collector_run_id="run-001",
         started_at_utc=_TS,
         exchange="bithumb",
-        selected_symbols=["KRW-BTC"],
-        channels=["transaction", "orderbook"],  # list input — should coerce to tuple
+        selected_symbols=["KRW-BTC"],  # type: ignore[arg-type]
+        channels=["transaction", "orderbook"],  # type: ignore[arg-type]  # testing BeforeValidator coercion
         selection_method="explicit",
     )
     assert isinstance(m.channels, tuple)
@@ -211,8 +211,8 @@ def test_collector_manifest_roundtrip_json_preserves_tuple() -> None:
         collector_run_id="run-001",
         started_at_utc=_TS,
         exchange="bithumb",
-        selected_symbols=["KRW-BTC"],
-        channels=["transaction"],
+        selected_symbols=("KRW-BTC",),
+        channels=("transaction",),
         selection_method="explicit",
     )
     json_str = m.model_dump_json()
