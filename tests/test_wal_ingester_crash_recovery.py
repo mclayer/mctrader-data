@@ -13,7 +13,7 @@ import pytest
 from mctrader_data.wal.ndjson_codec import decode_line
 
 
-@pytest.mark.parametrize("n_messages", [1, 500])
+@pytest.mark.parametrize("n_messages", [1, 10_000])
 def test_force_kill_zero_loss(tmp_path: Path, n_messages: int) -> None:
     """Write N messages via subprocess, force-kill it, verify all N present in WAL."""
     # Use a sentinel file to know when all writes are done
@@ -49,11 +49,11 @@ time.sleep(60)
 
     # Wait for all writes to complete (flag file created)
     import time
-    deadline = time.time() + 30
+    deadline = time.time() + 60
     while not done_flag.exists() and time.time() < deadline:
         time.sleep(0.1)
 
-    assert done_flag.exists(), f"Subprocess did not complete {n_messages} writes within 30s"
+    assert done_flag.exists(), f"Subprocess did not complete {n_messages} writes within 60s"
 
     # Force-kill without close()
     if sys.platform == "win32":
