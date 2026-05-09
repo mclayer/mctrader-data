@@ -269,6 +269,28 @@ def test_scan_candles_caller_signature_unchanged(tmp_path: Path) -> None:
     assert len(result) == 1
 
 
+def test_write_candles_parquet_has_all_16_adr009_columns(tmp_path: Path) -> None:
+    """ADR-009: write_candles() Parquet 파일에 16컬럼 전체 존재 assertion."""
+    import pyarrow.parquet as pq
+
+    base_ts = datetime(2026, 5, 1, 0, 0, tzinfo=timezone.utc)
+    candles = [_make_candle(base_ts, Decimal("100000000"))]
+    write_candles(candles, root=tmp_path, snapshot_id="test-snap")
+
+    parquet_files = list(tmp_path.rglob("*.parquet"))
+    assert len(parquet_files) >= 1, "no parquet file written"
+    pf = pq.ParquetFile(parquet_files[0])
+    schema_names = set(pf.schema_arrow.names)
+    required_cols = {
+        "ts_utc", "exchange", "symbol", "timeframe",
+        "open", "high", "low", "close", "volume", "value",
+        "trade_count", "is_complete", "schema_version",
+        "source_ingested_at", "data_snapshot_id", "data_hash",
+    }
+    missing = required_cols - schema_names
+    assert not missing, f"missing columns: {missing}"
+
+
 def test_scan_candles_multi_node_mismatch_node_priority_wins(tmp_path: Path) -> None:
     """Codex F-1/F-4 fix — scan-level T1 mismatch 시 node priority alphabetical (NODE_A win).
 
