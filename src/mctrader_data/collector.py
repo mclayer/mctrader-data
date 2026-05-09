@@ -148,6 +148,8 @@ class CollectorDaemon:
                     "channel": "transaction",
                 }
                 ingester.append(record)
+                from mctrader_data.metrics import record_ingester_event
+                record_ingester_event(exchange=event.exchange, symbol=str(event.symbol), channel="transaction")
                 if self._redis_publisher is not None:
                     self._redis_publisher.publish_transaction(  # type: ignore[attr-defined]
                         exchange=event.exchange,
@@ -182,6 +184,8 @@ class CollectorDaemon:
                     "channel": "orderbooksnapshot",
                 }
                 ingester.append(record)
+                from mctrader_data.metrics import record_ingester_event
+                record_ingester_event(exchange=event.exchange, symbol=str(event.symbol), channel="orderbooksnapshot")
                 if self._redis_publisher is not None:
                     self._redis_publisher.publish_orderbook_snapshot(  # type: ignore[attr-defined]
                         exchange=event.exchange,
@@ -212,6 +216,8 @@ class CollectorDaemon:
                     "channel": "orderbookdepth",
                 }
                 ingester.append(record)
+                from mctrader_data.metrics import record_ingester_event
+                record_ingester_event(exchange=event.exchange, symbol=str(event.symbol), channel="orderbookdepth")
                 if self._heartbeat_writer is not None and event.changes:
                     self._heartbeat_writer.update_tier_event_ts(  # type: ignore[attr-defined]
                         "orderbook", event.event_time
