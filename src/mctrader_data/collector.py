@@ -1,8 +1,8 @@
-"""Forward-only WebSocket collector daemon (MCT-58).
+"""Forward-only WebSocket collector daemon (MCT-58, MCT-106).
 
 Subscribes to Bithumb public WebSocket for N symbols × {transaction, orderbook}
-and persists every event as Parquet append-only via :class:`TickWriter` and
-:class:`OrderbookWriter`. Designed for 24/7 systemd operation.
+and persists every event to a WAL (Write-Ahead Log) via :class:`WalIngester`.
+Designed for 24/7 systemd operation.
 
 Lifecycle:
 
@@ -21,7 +21,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import json
 import logging
+import os
+import socket
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -33,14 +36,8 @@ from mctrader_market_bithumb.ws_events import (
     TransactionEvent,
 )
 
-from mctrader_data.lineage import write_lineage
 from mctrader_data.manifest import CollectorManifest
-from mctrader_data.orderbook_snapshot_storage import OrderbookSnapshotWriter
-from mctrader_data.orderbook_storage import (
-    OrderbookWriter,
-    delta_event_to_records,
-)
-from mctrader_data.tick_storage import TickWriter, transaction_event_to_record
+from mctrader_data.wal.ingester import WalIngester
 
 log = logging.getLogger(__name__)
 
@@ -74,9 +71,24 @@ class CollectorDaemon:
         self._node_id = node_id
         self._collector_run_id = collector_run_id
         self._heartbeat_writer = heartbeat_writer
-        self._tick_writer: TickWriter | None = None
-        self._ob_writer: OrderbookWriter | None = None
-        self._ob_snapshot_writer: OrderbookSnapshotWriter | None = None
+        self._wal_ingesters: dict[str, WalIngester] = {}
+        _node_id = node_id or os.environ.get("MCTRADER_NODE_ID") or socket.gethostname()
+
+        if include_transactions:
+            self._wal_ingesters["transaction"] = WalIngester(
+                root=root, exchange=exchange, symbol=str(symbol),
+                channel="transaction", node_id=_node_id,
+            )
+        if include_orderbook:
+            self._wal_ingesters["orderbookdepth"] = WalIngester(
+                root=root, exchange=exchange, symbol=str(symbol),
+                channel="orderbookdepth", node_id=_node_id,
+            )
+        if include_orderbook_snapshot:
+            self._wal_ingesters["orderbooksnapshot"] = WalIngester(
+                root=root, exchange=exchange, symbol=str(symbol),
+                channel="orderbooksnapshot", node_id=_node_id,
+            )
         self._cancel_event = asyncio.Event()
 
     async def run(self) -> None:
@@ -94,24 +106,6 @@ class CollectorDaemon:
                 "at least one of transactions/orderbook/orderbook_snapshot must be included"
             )
 
-        self._tick_writer = TickWriter(
-            root=self._root, exchange=self._exchange,
-            symbol=str(self._symbol), snapshot_id=self._snapshot_id,
-            node_id=self._node_id, collector_run_id=self._collector_run_id,
-        ) if self._include_transactions else None
-
-        self._ob_writer = OrderbookWriter(
-            root=self._root, exchange=self._exchange,
-            symbol=str(self._symbol), snapshot_id=self._snapshot_id,
-            node_id=self._node_id, collector_run_id=self._collector_run_id,
-        ) if self._include_orderbook else None
-
-        self._ob_snapshot_writer = OrderbookSnapshotWriter(
-            root=self._root, exchange=self._exchange,
-            symbol=str(self._symbol), snapshot_id=self._snapshot_id,
-            node_id=self._node_id, collector_run_id=self._collector_run_id,
-        ) if self._include_orderbook_snapshot else None
-
         log.info("[collector] symbol=%s channels=%s root=%s", self._symbol, channels, self._root)
 
         stream = BithumbWebSocketStream(symbol=self._symbol, channels=channels)
@@ -120,86 +114,91 @@ class CollectorDaemon:
                 async for event in stream.messages():
                     if self._cancel_event.is_set():
                         break
-                    self._handle_event(event)
+                    self._emit_to_wal(event)
         except asyncio.CancelledError:
             log.info("[collector] cancelled — flushing buffers")
             raise
         finally:
-            self._finalize()
+            for channel, ingester in self._wal_ingesters.items():
+                try:
+                    ingester.close()
+                except Exception:
+                    log.exception("[collector] wal ingester close failed channel=%s", channel)
 
     async def cancel(self) -> None:
         self._cancel_event.set()
 
-    def _handle_event(self, event) -> None:  # type: ignore[no-untyped-def]
-        if isinstance(event, TransactionEvent) and self._tick_writer is not None:
-            record = transaction_event_to_record(event)
-            self._tick_writer.append(record)
-            # MCT-91 — heartbeat tier timestamp wiring (Codex F-1/F-5 ADOPT)
-            if self._heartbeat_writer is not None:
-                self._heartbeat_writer.update_tier_event_ts(  # type: ignore[attr-defined]
-                    "tick", record.ts_utc
-                )
-        elif isinstance(event, OrderbookSnapshotEvent) and self._ob_snapshot_writer is not None:
-            # MCT-104 §D14 — orderbooksnapshot goes to §D14 partition (NOT §D11)
-            accepted = self._ob_snapshot_writer.append_event(event)
-            if accepted and self._heartbeat_writer is not None:
-                self._heartbeat_writer.update_tier_event_ts(  # type: ignore[attr-defined]
-                    "orderbook_snapshot", event.received_at
-                )
-        elif isinstance(event, OrderbookDeltaEvent) and self._ob_writer is not None:
-            # §D11 partition: delta-only (snapshot separated to §D14 above)
-            records = delta_event_to_records(event)
-            self._ob_writer.append_many(records)
-            if self._heartbeat_writer is not None and records:
-                self._heartbeat_writer.update_tier_event_ts(  # type: ignore[attr-defined]
-                    "orderbook", records[0].ts_utc
-                )
+    def _emit_to_wal(self, event) -> None:  # type: ignore[no-untyped-def]
+        if isinstance(event, TransactionEvent):
+            ingester = self._wal_ingesters.get("transaction")
+            if ingester is not None:
+                record = {
+                    "ts_utc": event.event_time,
+                    "received_at": event.received_at,
+                    "exchange": event.exchange,
+                    "symbol": str(event.symbol),
+                    "price": event.price,
+                    "quantity": event.quantity,
+                    "side": event.side,
+                    "raw_json": json.dumps(event.raw, ensure_ascii=False) if event.raw else None,
+                    "channel": "transaction",
+                }
+                ingester.append(record)
+                # MCT-91 — heartbeat tier timestamp wiring (Codex F-1/F-5 ADOPT)
+                if self._heartbeat_writer is not None:
+                    self._heartbeat_writer.update_tier_event_ts(  # type: ignore[attr-defined]
+                        "tick", event.event_time
+                    )
+        elif isinstance(event, OrderbookSnapshotEvent):
+            ingester = self._wal_ingesters.get("orderbooksnapshot")
+            if ingester is not None:
+                # MCT-104 §D14 — orderbooksnapshot goes to separate channel (NOT orderbookdepth)
+                record = {
+                    "ts_utc": event.event_time,
+                    "received_at": event.received_at,
+                    "exchange": event.exchange,
+                    "symbol": str(event.symbol),
+                    "bids": [
+                        {"price": lvl.price, "quantity": lvl.quantity}
+                        for lvl in event.bids
+                    ],
+                    "asks": [
+                        {"price": lvl.price, "quantity": lvl.quantity}
+                        for lvl in event.asks
+                    ],
+                    "raw_json": json.dumps(event.raw, ensure_ascii=False) if event.raw else None,
+                    "channel": "orderbooksnapshot",
+                }
+                ingester.append(record)
+                if self._heartbeat_writer is not None:
+                    self._heartbeat_writer.update_tier_event_ts(  # type: ignore[attr-defined]
+                        "orderbook_snapshot", event.received_at
+                    )
+        elif isinstance(event, OrderbookDeltaEvent):
+            ingester = self._wal_ingesters.get("orderbookdepth")
+            if ingester is not None:
+                # §D11 channel: delta-only (snapshot separated to orderbooksnapshot above)
+                record = {
+                    "ts_utc": event.event_time,
+                    "received_at": event.received_at,
+                    "exchange": event.exchange,
+                    "symbol": str(event.symbol),
+                    "changes": [
+                        {"side": ch.side, "price": ch.price, "quantity": ch.quantity}
+                        for ch in event.changes
+                    ],
+                    "raw_json": json.dumps(event.raw, ensure_ascii=False) if event.raw else None,
+                    "channel": "orderbookdepth",
+                }
+                ingester.append(record)
+                if self._heartbeat_writer is not None and event.changes:
+                    self._heartbeat_writer.update_tier_event_ts(  # type: ignore[attr-defined]
+                        "orderbook", event.event_time
+                    )
         # TickerEvent ignored — diagnostic only, not persisted
 
-    def _finalize(self) -> None:
-        try:
-            if self._tick_writer is not None:
-                self._tick_writer.close()
-                if self._tick_writer.current_path is not None:
-                    self._write_lineage(self._tick_writer.current_path, "tick")
-        except Exception:
-            log.exception("[collector] tick writer close failed")
-        try:
-            if self._ob_writer is not None:
-                self._ob_writer.close()
-                if self._ob_writer.current_path is not None:
-                    self._write_lineage(self._ob_writer.current_path, "orderbook")
-        except Exception:
-            log.exception("[collector] orderbook writer close failed")
-        try:
-            if self._ob_snapshot_writer is not None:
-                self._ob_snapshot_writer.close()
-                if self._ob_snapshot_writer.current_path is not None:
-                    self._write_lineage(
-                        self._ob_snapshot_writer.current_path, "orderbook_snapshot"
-                    )
-        except Exception:
-            log.exception("[collector] orderbook snapshot writer close failed")
-
-    def _write_lineage(self, parquet_path: Path, kind: str) -> None:
-        partition = parquet_path.parent
-        try:
-            write_lineage(
-                partition_dir=partition,
-                snapshot_id=self._snapshot_id,
-                exchange=self._exchange,
-                endpoint="wss://pubwss.bithumb.com/pub/ws",
-                request_params_hash=hashlib.sha256(
-                    f"{self._symbol}|{kind}|collector".encode()
-                ).hexdigest(),
-                fetched_at_utc=datetime.now(timezone.utc),
-                response_hash="forward-only-stream",
-                adapter_name="mctrader-market-bithumb-ws",
-                adapter_version="0.3.0",
-                node_id=self._node_id,
-            )
-        except Exception:
-            log.exception("[collector] lineage write failed for %s", parquet_path)
+    # backward-compatibility alias
+    _handle_event = _emit_to_wal
 
 
 class MultiSymbolCollector:

@@ -1,21 +1,12 @@
-# mctrader-data Pilot — Docker-first compose (CFP-128 / ADR-033 §7.4 mandate)
-# §7.4 OpRiskArch 4 항목 박제:
-#   - restart policy: unless-stopped (forward-only, 데이터 누락 회피)
-#   - volume DR: named volume mctrader_data (host path leak 방지)
-#   - health check: HTTP /health endpoint (interval 30s, start_period 60s)
-#   - network mode: bridge default, 호스트 port 매핑 0 (HealthServer = container 내부)
-
+# mctrader-data compose.yml — MCT-106 Phase C: ingester + compactor split
+# ADR-033 §7.4 mandate preserved (restart policy, named volume, health check)
 services:
-  collector:
+  bithumb-ingester:
     build: .
     image: mctrader-data:pilot
-    container_name: mctrader-collector
+    container_name: mctrader-ingester-bithumb
     restart: unless-stopped
     stop_grace_period: 30s
-    # MCT-103: 50-symbol universe (scored selection, see docs/stories/MCT-103.md in mctrader-hub).
-    # Override Dockerfile CMD `--top-n 10` (raw volume) with explicit scored 50.
-    # Forward-only invariant (ADR-009 §D12): all symbols collected from this commit forward,
-    # no historical backfill possible. Universe rebalance = monthly only (preserve history of dropped syms).
     command:
       - "collect"
       - "--symbols"
@@ -26,9 +17,9 @@ services:
       - "INFO"
     environment:
       MCTRADER_DATA_ROOT: /var/lib/mctrader/data
+      MCTRADER_NODE_ID: "NODE_BITHUMB_A"
       MCTRADER_HEALTH_PORT: "8080"
       PYTHONUNBUFFERED: "1"
-      # MCTRADER_NODE_ID: "collector-prod-1"   # uncomment to override hostname-based default
     volumes:
       - mctrader_data:/var/lib/mctrader/data
     healthcheck:
@@ -43,16 +34,38 @@ services:
       start_period: 60s
     networks:
       - mctrader-net
-    # No `ports:` — HealthServer (8080) is internal only.
-    # Outbound: pubwss.bithumb.com:443 (WS) + api.bithumb.com:443 (HTTPS).
+
+  compactor:
+    build: .
+    image: mctrader-data:pilot
+    container_name: mctrader-compactor
+    restart: unless-stopped
+    stop_grace_period: 30s
+    command:
+      - "compact"
+      - "--root"
+      - "/var/lib/mctrader/data"
+      - "--log-level"
+      - "INFO"
+    environment:
+      MCTRADER_DATA_ROOT: /var/lib/mctrader/data
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - mctrader_data:/var/lib/mctrader/data
+    depends_on:
+      - bithumb-ingester
+    healthcheck:
+      test: ["CMD", "python", "-c", "import pathlib; pathlib.Path('/var/lib/mctrader/data/wal').exists() or exit(1)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - mctrader-net
 
 volumes:
   mctrader_data:
     name: mctrader_data
-    # Default driver = local. Backup recipe (host-side, ad-hoc):
-    #   docker run --rm -v mctrader_data:/src -v "$(pwd)":/dst alpine \
-    #     tar czf /dst/mctrader_data-$(date +%Y%m%d).tar.gz -C /src .
-    # ADR-009 invariant: tick/orderbook = forward-only, backfill 불가 → 일 1회 backup 권장.
 
 networks:
   mctrader-net:
