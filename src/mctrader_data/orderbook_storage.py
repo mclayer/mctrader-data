@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import threading
+import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -81,6 +82,11 @@ class OrderbookWriter:
         node_id: str | None = None,
         collector_run_id: str | None = None,
     ) -> None:
+        warnings.warn(
+            "OrderbookWriter is deprecated since MCT-106. Use WalIngester + L1Compactor instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self._root = root
         self._exchange = exchange
         self._symbol = symbol
