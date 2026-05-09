@@ -39,7 +39,7 @@ async def test_collector_run_no_channels_raises(tmp_path: Path) -> None:
     d = CollectorDaemon(
         root=tmp_path, exchange="bithumb",
         symbol=Symbol.from_string("KRW-BTC"),
-        include_transactions=False, include_orderbook=False,
+        include_transactions=False, include_orderbook=False, include_orderbook_snapshot=False,
     )
     with pytest.raises(ValueError, match="at least one"):
         await d.run()
@@ -167,3 +167,89 @@ async def test_multi_collector_heartbeat_writer_lifecycle(tmp_path: Path, monkey
     # heartbeat task final flush 후 main file 존재
     main_path = tmp_path / "market" / "manifest" / "heartbeat-NODE_A.json"
     assert main_path.exists(), "heartbeat final flush 미작동 — shutdown ordering broken"
+
+
+# MCT-104 — orderbooksnapshot channel + §D14 routing tests
+
+def test_collector_daemon_include_orderbook_snapshot_default_true(tmp_path: Path) -> None:
+    """include_orderbook_snapshot defaults to True."""
+    d = CollectorDaemon(
+        root=tmp_path, exchange="bithumb",
+        symbol=Symbol.from_string("KRW-BTC"),
+    )
+    assert d._include_orderbook_snapshot is True
+
+
+def test_collector_daemon_include_orderbook_snapshot_false(tmp_path: Path) -> None:
+    d = CollectorDaemon(
+        root=tmp_path, exchange="bithumb",
+        symbol=Symbol.from_string("KRW-BTC"),
+        include_orderbook_snapshot=False,
+    )
+    assert d._include_orderbook_snapshot is False
+
+
+@pytest.mark.asyncio
+async def test_collector_orderbook_snapshot_routes_to_d14_writer(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """OrderbookSnapshotEvent must be routed to §D14 writer, NOT §D11 writer."""
+    from decimal import Decimal as _D
+    from datetime import datetime, timezone as _tz
+
+    from mctrader_market_bithumb.ws_events import _OrderbookLevel, OrderbookSnapshotEvent
+
+    ts = datetime(2026, 5, 9, 0, 0, 0, tzinfo=_tz.utc)
+    snapshot_event = OrderbookSnapshotEvent(
+        exchange="bithumb",
+        symbol=Symbol.from_string("KRW-BTC"),
+        event_time=ts,
+        received_at=ts,
+        bids=[_OrderbookLevel(price=_D("118900000"), quantity=_D("0.1"))],
+        asks=[_OrderbookLevel(price=_D("119000000"), quantity=_D("0.1"))],
+        raw={},
+    )
+
+    d14_written: list = []
+    d11_written: list = []
+
+    class _StubStream:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def messages(self):
+            yield snapshot_event
+
+    monkeypatch.setattr("mctrader_data.collector.BithumbWebSocketStream", _StubStream)
+
+    daemon = CollectorDaemon(
+        root=tmp_path, exchange="bithumb",
+        symbol=Symbol.from_string("KRW-BTC"),
+        include_transactions=False,
+        include_orderbook=True,
+        include_orderbook_snapshot=True,
+        snapshot_id="test-run",
+    )
+    await daemon.run()
+
+    # §D14 partition must exist
+    d14_root = tmp_path / "market" / "orderbook_snapshot"
+    d11_root = tmp_path / "market" / "orderbook"
+    assert d14_root.exists(), "§D14 partition not created"
+    # §D11 orderbook partition should NOT contain snapshot rows (snapshot-only event)
+    if d11_root.exists():
+        parquets = list(d11_root.rglob("*.parquet"))
+        import pyarrow.parquet as pq
+        for p in parquets:
+            table = pq.read_table(p)
+            rows = table.to_pylist()
+            for row in rows:
+                assert row.get("event_type") != "snapshot", (
+                    "§D11 partition must not receive orderbooksnapshot events"
+                )

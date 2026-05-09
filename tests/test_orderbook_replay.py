@@ -284,3 +284,82 @@ def test_tier_coverage_legacy_part_naming_still_works(tmp_path: Path) -> None:
         start=_ts(0), end=_ts(60),
     )
     assert "legacy-s1" in report.collector_run_ids
+
+
+# ── §D14.7 baseline source priority tests (MCT-104) ───────────────────────────
+
+def _write_d14_snapshot(tmp_path: Path, ts_sec: int, n_levels: int = 3) -> None:
+    """Write a §D14 orderbook_snapshot.v1 parquet partition."""
+    from types import SimpleNamespace as _NS
+    from mctrader_data.orderbook_snapshot_storage import (
+        OrderbookSnapshotWriter,
+        snapshot_event_to_snapshot_records,
+    )
+    ts = _ts(ts_sec)
+    ts_micro = int(ts.timestamp() * 1_000_000)
+
+    class Sym(_NS):
+        def __str__(self) -> str:
+            return "KRW-BTC"
+
+    class Level(_NS):
+        pass
+
+    event = _NS(
+        exchange="bithumb",
+        symbol=Sym(),
+        event_time=ts,
+        received_at=ts,
+        bids=[Level(price=Decimal(f"{118900000 - i * 100}"), quantity=Decimal("0.1")) for i in range(n_levels)],
+        asks=[Level(price=Decimal(f"{119000000 + i * 100}"), quantity=Decimal("0.1")) for i in range(n_levels)],
+        raw={},
+    )
+    records = snapshot_event_to_snapshot_records(event)
+    writer = OrderbookSnapshotWriter(
+        root=tmp_path, exchange="bithumb", symbol="KRW-BTC",
+        snapshot_id=f"d14-snap-{ts_sec}",
+    )
+    writer.append_many(records)
+    writer.close()
+
+
+def test_get_orderbook_at_d14_baseline_preferred_over_d11(tmp_path: Path) -> None:
+    """§D14.7: when §D14 snapshot exists, it is preferred over §D11 snapshot."""
+    ob_w = OrderbookWriter(
+        root=tmp_path, exchange="bithumb", symbol="KRW-BTC", snapshot_id="d11-snap",
+    )
+    # §D11 snapshot at sec=0: single bid/ask level
+    ob_w.append(_ob_snapshot_event(0, "bid", "100000000", sec=0))
+    ob_w.append(_ob_snapshot_event(0, "ask", "101000000", sec=0))
+    ob_w.append(_ob_delta_event("bid", "100100000", "0.02", sec=5))
+    ob_w.close()
+
+    # §D14 snapshot at sec=2: newer, higher prices (should win)
+    _write_d14_snapshot(tmp_path, ts_sec=2, n_levels=3)
+
+    # Request at sec=10 (after both baselines + delta)
+    result = get_orderbook_at(
+        root=tmp_path, exchange="bithumb", symbol="KRW-BTC",
+        ts_utc=_ts(10),
+    )
+    # §D14 baseline has bids starting at 118900000; §D11 has 100000000
+    # If §D14 was used as baseline, top bid ≥ 118800000
+    assert result.top_bid is not None
+    assert result.top_bid.price >= Decimal("118800000")
+
+
+def test_get_orderbook_at_d11_fallback_when_d14_absent(tmp_path: Path) -> None:
+    """§D14.7: when §D14 partition absent, falls back to §D11 snapshot."""
+    ob_w = OrderbookWriter(
+        root=tmp_path, exchange="bithumb", symbol="KRW-BTC", snapshot_id="d11-only",
+    )
+    ob_w.append(_ob_snapshot_event(0, "bid", "100000000", sec=0))
+    ob_w.append(_ob_snapshot_event(0, "ask", "101000000", sec=0))
+    ob_w.close()
+
+    result = get_orderbook_at(
+        root=tmp_path, exchange="bithumb", symbol="KRW-BTC",
+        ts_utc=_ts(1),
+    )
+    assert result.top_bid is not None
+    assert result.top_bid.price == Decimal("100000000")

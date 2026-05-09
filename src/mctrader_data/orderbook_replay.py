@@ -299,6 +299,59 @@ def scan_orderbook_events(
         yield _row_to_event(r._row_dict)
 
 
+def _load_baseline_from_d14(
+    *,
+    root: Path,
+    exchange: str,
+    symbol: str,
+    day_start: datetime,
+    day_end: datetime,
+    simulated_clock: datetime | None,
+) -> tuple[datetime, dict[Decimal, Decimal], dict[Decimal, Decimal]] | None:
+    """Attempt to load the most recent §D14 orderbook_snapshot as baseline.
+
+    Returns (baseline_ts, bids, asks) or None if §D14 partition is unavailable.
+    Implements §D14.7 fallback spec: §D14 → §D11 → halt.
+    """
+    try:
+        from mctrader_data.storage import scan_orderbook_snapshots
+    except ImportError:
+        return None
+
+    try:
+        snap_records = list(
+            scan_orderbook_snapshots(
+                root=root, exchange=exchange, symbol=symbol,
+                start=day_start, end=day_end,
+                simulated_clock=simulated_clock,
+            )
+        )
+    except Exception:
+        return None
+
+    if not snap_records:
+        return None
+
+    # Group by baseline_seq (latest before simulated_clock / day_end)
+    from collections import defaultdict
+    groups: dict[int, list] = defaultdict(list)
+    for r in snap_records:
+        groups[r.baseline_seq].append(r)
+
+    # Pick the highest baseline_seq (most recent snapshot)
+    best_seq = max(groups.keys())
+    group = groups[best_seq]
+
+    baseline_ts = group[0].ts_utc
+    bids: dict[Decimal, Decimal] = {}
+    asks: dict[Decimal, Decimal] = {}
+    for r in group:
+        target = bids if r.side == "bid" else asks
+        if r.quantity > 0:
+            target[r.price] = r.quantity
+    return (baseline_ts, bids, asks)
+
+
 def get_orderbook_at(
     *,
     root: Path,
@@ -310,10 +363,13 @@ def get_orderbook_at(
 ) -> OrderbookSnapshot:
     """Reconstruct L2 orderbook at ``ts_utc`` by folding events forward.
 
-    Algorithm:
-    1. Locate baseline = first ``event_type="snapshot"`` group (rows sharing the earliest ts_utc).
-    2. Fold each subsequent ``delta`` event into book state until ``ts <= ts_utc``.
-    3. Halt on gap > threshold / non-monotonic / missing baseline.
+    §D14.7 baseline source priority (MCT-104):
+    1. §D14 ``orderbook_snapshot.v1`` partition (most recent snapshot <= ts_utc day)
+    2. §D11 ``orderbook.v1`` partition ``event_type="snapshot"`` (legacy fallback)
+    3. halt — raises ReconstructionError
+
+    After locating baseline, fold §D11 delta events from (baseline_ts, ts_utc].
+    Caller interface unchanged (zero breaking change per §8.1 Phase 2 deliverable).
     """
     if ts_utc.tzinfo is None:
         raise ValueError("ts_utc must be timezone-aware UTC")
@@ -321,6 +377,14 @@ def get_orderbook_at(
     day_start = ts_utc.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     day_end = day_start + timedelta(days=1)
 
+    # §D14.7 priority 1: try §D14 snapshot partition
+    d14_result = _load_baseline_from_d14(
+        root=root, exchange=exchange, symbol=symbol,
+        day_start=day_start, day_end=day_end,
+        simulated_clock=simulated_clock,
+    )
+
+    # §D11 delta events (always needed for fold-forward after baseline)
     events = list(
         scan_orderbook_events(
             root=root, exchange=exchange, symbol=symbol,
@@ -328,38 +392,50 @@ def get_orderbook_at(
             simulated_clock=simulated_clock,
         )
     )
-    if not events:
-        raise ReconstructionError(
-            f"no orderbook events for symbol={symbol} on {day_start.date().isoformat()}"
+
+    if d14_result is not None:
+        # §D14 baseline found — use it directly
+        baseline_ts, bids, asks = d14_result
+        # Only fold §D11 deltas that arrive after the baseline_ts
+        delta_start_idx = next(
+            (i for i, e in enumerate(events) if e.ts_utc > baseline_ts and e.event_type == "delta"),
+            None,
         )
+        fold_events = events[delta_start_idx:] if delta_start_idx is not None else []
+    else:
+        # §D14.7 priority 2: fall back to §D11 event_type="snapshot"
+        if not events:
+            raise ReconstructionError(
+                f"no orderbook events for symbol={symbol} on {day_start.date().isoformat()}"
+            )
 
-    # Find baseline (first snapshot group)
-    snapshot_idx = next(
-        (i for i, e in enumerate(events) if e.event_type == "snapshot"),
-        None,
-    )
-    if snapshot_idx is None:
-        raise ReconstructionError(
-            f"missing baseline snapshot for symbol={symbol} on {day_start.date().isoformat()}"
+        snapshot_idx = next(
+            (i for i, e in enumerate(events) if e.event_type == "snapshot"),
+            None,
         )
+        if snapshot_idx is None:
+            raise ReconstructionError(
+                f"missing baseline snapshot for symbol={symbol} on {day_start.date().isoformat()}"
+            )
 
-    baseline_ts = events[snapshot_idx].ts_utc
-    bids: dict[Decimal, Decimal] = {}
-    asks: dict[Decimal, Decimal] = {}
+        # §D14.7 priority 2: load baseline from §D11 snapshot group
+        baseline_ts = events[snapshot_idx].ts_utc
+        bids: dict[Decimal, Decimal] = {}
+        asks: dict[Decimal, Decimal] = {}
 
-    # Apply baseline snapshot group (consecutive events with same ts as snapshot_idx)
-    i = snapshot_idx
-    while i < len(events) and events[i].ts_utc == baseline_ts and events[i].event_type == "snapshot":
-        e = events[i]
-        target = bids if e.side == "bid" else asks
-        if e.quantity > 0:
-            target[e.price] = e.quantity
-        i += 1
+        # Apply baseline snapshot group (consecutive events with same ts)
+        i = snapshot_idx
+        while i < len(events) and events[i].ts_utc == baseline_ts and events[i].event_type == "snapshot":
+            e = events[i]
+            target = bids if e.side == "bid" else asks
+            if e.quantity > 0:
+                target[e.price] = e.quantity
+            i += 1
+        fold_events = events[i:]
 
-    # Fold deltas forward
+    # Fold delta events forward from baseline_ts up to ts_utc
     last_ts = baseline_ts
-    while i < len(events):
-        e = events[i]
+    for e in fold_events:
         if e.ts_utc > ts_utc:
             break
         gap = (e.ts_utc - last_ts).total_seconds()
@@ -377,9 +453,8 @@ def get_orderbook_at(
                 target.pop(e.price, None)
             else:
                 target[e.price] = e.quantity
-        # snapshot mid-day = re-baseline (operator restarted collector — accept as new baseline)
+        # §D11 mid-day snapshot group = re-baseline (reconnect restart)
         elif e.event_type == "snapshot" and e.ts_utc != baseline_ts:
-            # if a new snapshot group arrives, reset book and apply
             if e.side == "bid":
                 if last_ts != e.ts_utc:
                     bids.clear()
@@ -391,7 +466,6 @@ def get_orderbook_at(
                 if e.quantity > 0:
                     asks[e.price] = e.quantity
         last_ts = e.ts_utc
-        i += 1
 
     return OrderbookSnapshot(
         symbol=symbol,
