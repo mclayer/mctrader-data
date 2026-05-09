@@ -350,9 +350,9 @@ def collect(
         )
 
         # MCT-104 — MetadataRefreshScheduler (daily §D13 refresh, separate task)
+        import contextlib as _ctx
         if include_ob_snapshot:
             from mctrader_data.collector import MetadataRefreshScheduler
-            import contextlib as _ctx
             metadata_scheduler = MetadataRefreshScheduler(
                 root=root_resolved,
                 exchange=exchange,

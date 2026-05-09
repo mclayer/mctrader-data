@@ -88,7 +88,7 @@ class CollectorDaemon:
         if self._include_orderbook:
             channels.append("orderbookdepth")
         if self._include_orderbook_snapshot:
-            channels.append("orderbooksnapshot")
+            channels.append("orderbooksnapshot")  # type: ignore[arg-type]
         if not channels:
             raise ValueError(
                 "at least one of transactions/orderbook/orderbook_snapshot must be included"
