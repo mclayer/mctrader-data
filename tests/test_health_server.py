@@ -13,6 +13,7 @@ import socket
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,7 @@ def test_health_503_when_heartbeat_writer_missing() -> None:
 def test_health_200_when_ws_connected(tmp_path: Path) -> None:
     writer = HeartbeatWriter(root=tmp_path, node_id="test-node")
     writer.ws_state = "connected"
+    writer.last_heartbeat_ts = datetime.now(timezone.utc)  # simulate prior successful flush
     port = _free_port()
     server = HealthServer(heartbeat_writer=writer, port=port)
     server.start()
@@ -73,6 +75,7 @@ def test_health_200_when_ws_connected(tmp_path: Path) -> None:
 def test_health_503_when_ws_disconnected(tmp_path: Path) -> None:
     writer = HeartbeatWriter(root=tmp_path, node_id="test-node")
     writer.ws_state = "disconnected"
+    writer.last_heartbeat_ts = datetime.now(timezone.utc)  # simulate prior successful flush
     port = _free_port()
     server = HealthServer(heartbeat_writer=writer, port=port)
     server.start()
