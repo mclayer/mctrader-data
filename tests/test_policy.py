@@ -139,4 +139,4 @@ def test_check_schema_missing_field_returns_mismatch() -> None:
         volume = Decimal("1")
         value = None
 
-    assert check_schema(_StubCandle()) is QuarantineReason.SCHEMA_MISMATCH
+    assert check_schema(_StubCandle()) is QuarantineReason.SCHEMA_MISMATCH  # type: ignore[arg-type]

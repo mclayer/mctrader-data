@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from decimal import Decimal
+from collections.abc import Iterator
 
 
 class _DecimalEncoder(json.JSONEncoder):
@@ -15,12 +16,12 @@ class _DecimalEncoder(json.JSONEncoder):
             return obj.isoformat()
         return super().default(obj)
 
-    def iterencode(self, o: object, _one_shot: bool = False) -> object:  # type: ignore[override]
+    def iterencode(self, o: object, _one_shot: bool = False) -> Iterator[str]:  # type: ignore[override]
         """Override iterencode to handle Decimal → raw number literal (no quotes)."""
         return _decimal_iterencode(o, self)
 
 
-def _decimal_iterencode(obj: object, encoder: _DecimalEncoder) -> object:
+def _decimal_iterencode(obj: object, encoder: _DecimalEncoder) -> Iterator[str]:
     """Recursively yield JSON fragments, emitting Decimal as raw number strings."""
     if isinstance(obj, Decimal):
         if obj.is_nan() or obj.is_infinite():
