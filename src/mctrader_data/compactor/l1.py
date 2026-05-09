@@ -7,7 +7,7 @@ Invariants enforced:
   INV-5  Schema       — output schema matches upstream storage module (tick.v1 for transaction)
   INV-6  Lineage      — lineage-{run_id}.json written alongside Parquet
 
-Path layout:
+Path layout (ADR-009 §D2 / ADR-017 — ALL components in key=value Hive format):
   <root>/market/<channel>/schema_version=<version>/tier=L1/
     exchange=<exchange>/symbol=<symbol>/date=<date>/
     node=<node_id>/part-<run_id>.parquet
@@ -131,22 +131,28 @@ class L1Compactor:
         return hashlib.sha256(rel_str.encode("utf-8")).hexdigest()[:16]
 
     def _derive_parquet_path(self, meta: dict, run_id: str) -> Path:
-        """Derive the output Parquet path from metadata."""
+        """Derive the output Parquet path from metadata.
+
+        All path components use key=value Hive format per ADR-009 §D2 and ADR-017.
+        Callers reading individual files must use pq.ParquetFile(f).read() — NOT
+        pq.read_table(directory) — to avoid PyArrow Hive auto-discovery conflicts.
+        """
         channel = meta["channel"]
         schema_version = self._schema_version_for_channel(channel)
-        # Note: exchange, symbol, date use plain directory names (not key=value Hive format)
-        # to avoid PyArrow schema merge errors when pq.read_table auto-discovers partitions.
-        # tier=L1 and node=NODE_X use key=value format as required by the path spec.
+        exchange = meta["exchange"]
+        symbol = meta["symbol"]
+        date = meta["date"]
+        node_id = meta["node_id"]
         return (
             self._root
             / "market"
             / channel
             / f"schema_version={schema_version}"
             / "tier=L1"
-            / meta["exchange"]
-            / meta["symbol"]
-            / meta["date"]
-            / f"node={meta['node_id']}"
+            / f"exchange={exchange}"
+            / f"symbol={symbol}"
+            / f"date={date}"
+            / f"node={node_id}"
             / f"part-{run_id}.parquet"
         )
 

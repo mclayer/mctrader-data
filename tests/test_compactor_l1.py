@@ -53,7 +53,10 @@ def test_l1_compact_produces_parquet(tmp_path: Path) -> None:
     parquet_path = compactor.compact_segment(sealed)
     assert parquet_path.exists()
     assert parquet_path.suffix == ".parquet"
-    tbl = pq.read_table(parquet_path)
+    # Use ParquetFile to read a single file — pq.read_table() triggers Hive
+    # auto-discovery and merges path components (exchange=, symbol=, ...) as
+    # partition columns, conflicting with the columns already in the schema.
+    tbl = pq.ParquetFile(parquet_path).read()
     assert tbl.num_rows == 5
 
 
@@ -65,6 +68,11 @@ def test_l1_parquet_path_contains_tier_and_node(tmp_path: Path) -> None:
     parts = parquet_path.parts
     assert "tier=L1" in parts
     assert "node=NODE_A" in parts
+    assert "exchange=bithumb" in parts
+    assert "symbol=KRW-BTC" in parts
+    # date is dynamic — just check the pattern
+    date_parts = [p for p in parts if p.startswith("date=")]
+    assert len(date_parts) == 1
 
 
 def test_l1_idempotent_double_compaction(tmp_path: Path) -> None:
@@ -85,7 +93,8 @@ def test_l1_out_of_order_sorted(tmp_path: Path) -> None:
     sealed = _write_sealed_segment(tmp_path, records)
     compactor = L1Compactor(root=tmp_path)
     parquet_path = compactor.compact_segment(sealed)
-    tbl = pq.read_table(parquet_path)
+    # Use ParquetFile for single-file reads to avoid Hive partition auto-discovery.
+    tbl = pq.ParquetFile(parquet_path).read()
     ts_col = tbl.column("ts_utc").to_pylist()
     assert ts_col == sorted(ts_col)
 
