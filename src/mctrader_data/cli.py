@@ -279,10 +279,18 @@ def collect(
 
     async def _amain() -> None:
         import asyncio as _asyncio
+        import signal as _signal
         from datetime import datetime, timezone
 
         from mctrader_data.heartbeat import HeartbeatWriter
         from mctrader_data.manifest import CollectorManifest, derive_collector_run_id
+
+        _loop = _asyncio.get_running_loop()
+        _current_task = _asyncio.current_task()
+        _loop.add_signal_handler(
+            _signal.SIGTERM,
+            lambda: _current_task.cancel() if _current_task else None,
+        )
 
         if symbols:
             sym_list = [Symbol.from_string(s.strip()) for s in symbols.split(",") if s.strip()]
