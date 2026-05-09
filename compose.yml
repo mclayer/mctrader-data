@@ -35,6 +35,47 @@ services:
     networks:
       - mctrader-net
 
+  upbit-ingester:
+    build: .
+    image: mctrader-data:pilot
+    container_name: mctrader-ingester-upbit
+    restart: unless-stopped
+    stop_grace_period: 30s
+    command:
+      - "collect"
+      - "--exchange"
+      - "upbit"
+      - "--symbols"
+      - "KRW-BTC,KRW-ETH,KRW-XRP,KRW-SOL,KRW-DOGE,KRW-ADA,KRW-TRX,KRW-LINK,KRW-AVAX,KRW-DOT,KRW-MATIC,KRW-ATOM,KRW-NEAR,KRW-SUI,KRW-HBAR,USDT-BTC,USDT-ETH,USDT-XRP,USDT-SOL,USDT-DOGE"
+      - "--include"
+      - "transactions,orderbook_snapshot"
+      - "--log-level"
+      - "INFO"
+    environment:
+      MCTRADER_DATA_ROOT: /var/lib/mctrader/data
+      MCTRADER_NODE_ID: "NODE_UPBIT_A"
+      MCTRADER_HEALTH_PORT: "8081"
+      PYTHONUNBUFFERED: "1"
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+    volumes:
+      - mctrader_data:/var/lib/mctrader/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8081/health').status==200 else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - mctrader-net
+      - mctrader_net
+
   compactor:
     build: .
     image: mctrader-data:pilot
@@ -54,6 +95,7 @@ services:
       - mctrader_data:/var/lib/mctrader/data
     depends_on:
       - bithumb-ingester
+      - upbit-ingester
     healthcheck:
       test: ["CMD", "python", "-c", "import pathlib; pathlib.Path('/var/lib/mctrader/data/wal').exists() or exit(1)"]
       interval: 60s
@@ -70,3 +112,5 @@ volumes:
 networks:
   mctrader-net:
     driver: bridge
+  mctrader_net:
+    external: true
