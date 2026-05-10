@@ -10,23 +10,19 @@ FROM python:3.12-slim AS deps
 RUN pip install --no-cache-dir uv==0.5.11
 
 WORKDIR /build
+# vendor/ contains pre-built wheels for private git+https deps (mctrader-market family)
+COPY vendor/ ./vendor/
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
 
-# uv pip install --system --no-cache (resolves git+https deps for mctrader-market / -bithumb)
-# git is required for git+https sources, then purged in this stage (deps stage discarded later).
-# BuildKit secret: GITHUB_TOKEN for private repo access (never stored in image layers).
-RUN --mount=type=secret,id=github_token,required=false \
-    apt-get update \
-    && apt-get install --no-install-recommends -y git=1:* \
-    && if [ -f /run/secrets/github_token ]; then \
-         git config --global url."https://$(cat /run/secrets/github_token)@github.com/".insteadOf "https://github.com/"; \
-       fi \
-    && uv pip install --system --no-cache . \
-    && git config --global --remove-section url."https://github.com/" 2>/dev/null || true \
-    && apt-get purge -y git \
-    && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/* /root/.cache
+# 1) Install PyPI deps of vendor packages (websockets etc.) — no git needed.
+# 2) Install vendor wheels (mctrader-market family) without dep checking.
+# 3) Strip git+https entries from pyproject.toml so uv resolves only PyPI deps.
+# 4) Install mctrader-data + remaining PyPI deps via uv.
+RUN uv pip install --system --no-cache "websockets>=12,<14" "pydantic>=2,<3" \
+    && pip install --no-cache-dir --no-deps ./vendor/*.whl \
+    && sed -i '/mctrader-market.*git+/d' pyproject.toml \
+    && uv pip install --system --no-cache .
 
 #─── Stage 2: runner ───
 FROM python:3.12-slim AS runner
@@ -36,9 +32,8 @@ RUN useradd --system --uid 1001 --no-create-home --shell /usr/sbin/nologin mctra
     && mkdir -p /var/lib/mctrader/data \
     && chown -R mctrader:mctrader /var/lib/mctrader
 
-# Copy installed packages + entry script from deps stage
+# Copy installed packages from deps stage
 COPY --from=deps /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
-COPY --from=deps /usr/local/bin/mctrader-data /usr/local/bin/mctrader-data
 
 ENV MCTRADER_DATA_ROOT=/var/lib/mctrader/data \
     MCTRADER_HEALTH_PORT=8080 \
@@ -50,5 +45,5 @@ WORKDIR /var/lib/mctrader
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=60s \
     CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health').status==200 else 1)"]
 
-ENTRYPOINT ["mctrader-data"]
+ENTRYPOINT ["python", "-m", "mctrader_data.cli"]
 CMD ["collect", "--top-n", "10", "--include", "transactions,orderbook", "--log-level", "INFO"]

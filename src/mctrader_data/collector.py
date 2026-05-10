@@ -68,27 +68,32 @@ class CollectorDaemon:
         self._heartbeat_writer = heartbeat_writer
         self._coverage_stats_writer = coverage_stats_writer
         self._redis_publisher = redis_publisher
-        self._wal_ingesters: dict[str, WalIngester] = {}
-        _node_id = node_id or os.environ.get("MCTRADER_NODE_ID") or socket.gethostname()
-
-        if include_transactions:
-            self._wal_ingesters["transaction"] = WalIngester(
-                root=root, exchange=exchange, symbol=str(symbol),
-                channel="transaction", node_id=_node_id,
-            )
-        if include_orderbook and exchange == "bithumb":
-            self._wal_ingesters["orderbookdepth"] = WalIngester(
-                root=root, exchange=exchange, symbol=str(symbol),
-                channel="orderbookdepth", node_id=_node_id,
-            )
-        if include_orderbook_snapshot:
-            self._wal_ingesters["orderbooksnapshot"] = WalIngester(
-                root=root, exchange=exchange, symbol=str(symbol),
-                channel="orderbooksnapshot", node_id=_node_id,
-            )
+        self._resolved_node_id = node_id or os.environ.get("MCTRADER_NODE_ID") or socket.gethostname()
+        self._wal_ingesters: dict[str, WalIngester] = self._build_ingesters()
         self._cancel_event = asyncio.Event()
 
+    def _build_ingesters(self) -> dict[str, WalIngester]:
+        ingesters: dict[str, WalIngester] = {}
+        if self._include_transactions:
+            ingesters["transaction"] = WalIngester(
+                root=self._root, exchange=self._exchange, symbol=str(self._symbol),
+                channel="transaction", node_id=self._resolved_node_id,
+            )
+        if self._include_orderbook and self._exchange == "bithumb":
+            ingesters["orderbookdepth"] = WalIngester(
+                root=self._root, exchange=self._exchange, symbol=str(self._symbol),
+                channel="orderbookdepth", node_id=self._resolved_node_id,
+            )
+        if self._include_orderbook_snapshot:
+            ingesters["orderbooksnapshot"] = WalIngester(
+                root=self._root, exchange=self._exchange, symbol=str(self._symbol),
+                channel="orderbooksnapshot", node_id=self._resolved_node_id,
+            )
+        return ingesters
+
     async def run(self) -> None:
+        if self._wal_ingesters and any(i._closed for i in self._wal_ingesters.values()):
+            self._wal_ingesters = self._build_ingesters()
         log.info("[collector] exchange=%s symbol=%s root=%s", self._exchange, self._symbol, self._root)
 
         stream = adapters.get_ws_stream(
@@ -134,10 +139,10 @@ class CollectorDaemon:
                 }
                 ingester.append(record)
                 from mctrader_data.metrics import record_ingester_event
-                record_ingester_event(exchange=event.exchange, symbol=str(event.symbol), channel="transaction")
+                record_ingester_event(exchange=self._exchange, symbol=str(event.symbol), channel="transaction")
                 if self._redis_publisher is not None:
                     self._redis_publisher.publish_transaction(  # type: ignore[attr-defined]
-                        exchange=event.exchange,
+                        exchange=self._exchange,
                         symbol=str(event.symbol),
                         record=record,
                     )
@@ -170,10 +175,10 @@ class CollectorDaemon:
                 }
                 ingester.append(record)
                 from mctrader_data.metrics import record_ingester_event
-                record_ingester_event(exchange=event.exchange, symbol=str(event.symbol), channel="orderbooksnapshot")
+                record_ingester_event(exchange=self._exchange, symbol=str(event.symbol), channel="orderbooksnapshot")
                 if self._redis_publisher is not None:
                     self._redis_publisher.publish_orderbook_snapshot(  # type: ignore[attr-defined]
-                        exchange=event.exchange,
+                        exchange=self._exchange,
                         symbol=str(event.symbol),
                         record=record,
                     )
@@ -202,7 +207,7 @@ class CollectorDaemon:
                 }
                 ingester.append(record)
                 from mctrader_data.metrics import record_ingester_event
-                record_ingester_event(exchange=event.exchange, symbol=str(event.symbol), channel="orderbookdepth")
+                record_ingester_event(exchange=self._exchange, symbol=str(event.symbol), channel="orderbookdepth")
                 if self._heartbeat_writer is not None and event.changes:
                     self._heartbeat_writer.update_tier_event_ts(  # type: ignore[attr-defined]
                         "orderbook", event.event_time
