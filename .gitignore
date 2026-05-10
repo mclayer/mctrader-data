@@ -22,3 +22,6 @@ data/parquet/
 
 # git worktrees (ADR-019)
 .worktrees/
+
+# local env files (credentials)
+.env

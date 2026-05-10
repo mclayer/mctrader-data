@@ -15,9 +15,15 @@ COPY src/ ./src/
 
 # uv pip install --system --no-cache (resolves git+https deps for mctrader-market / -bithumb)
 # git is required for git+https sources, then purged in this stage (deps stage discarded later).
-RUN apt-get update \
+# BuildKit secret: GITHUB_TOKEN for private repo access (never stored in image layers).
+RUN --mount=type=secret,id=github_token,required=false \
+    apt-get update \
     && apt-get install --no-install-recommends -y git=1:* \
+    && if [ -f /run/secrets/github_token ]; then \
+         git config --global url."https://$(cat /run/secrets/github_token)@github.com/".insteadOf "https://github.com/"; \
+       fi \
     && uv pip install --system --no-cache . \
+    && git config --global --remove-section url."https://github.com/" 2>/dev/null || true \
     && apt-get purge -y git \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/* /root/.cache
