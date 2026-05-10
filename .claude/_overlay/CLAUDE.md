@@ -33,3 +33,27 @@
 - `.github/ISSUE_TEMPLATE/` — 3 forms (audit / bug / story)
 
 신규 도메인 specialization agent 는 first iteration 에 hub-shared (DomainAgent / DataEngineerAgent) 만 reuse. repo-specific agent 는 후속 iteration.
+
+### plugin 버전 메모 (MCT-129, 2026-05-11)
+
+codeforge 4종 최신 버전 (MCT-127/MCT-128 반영):
+
+```
+codeforge-design@mclayer        # 0.5.0 — CFP-319: ArchitectAgent WS stream push_interval 실증 의무
+codeforge-develop@mclayer       # 0.4.0 — presets/docker-compose.test.yml (IntegrationTestAgent §8.6)
+codeforge-test@mclayer          # REVIVED (ADR-055/CFP-367) — IntegrationTestAgent(Sonnet) active; TestAgent/StatefulTestAgent deprecated (spawn 불가); test-verdict-v2
+codeforge-review@mclayer        # 1.2.0 — CFP-318: 3 ReviewPL bootstrap-labels.sh preflight; review-verdict v4
+```
+
+### Story workflow phase (MCT-129, 2026-05-11)
+
+요구사항 → 설계 → 설계-리뷰 → 구현 → 구현-리뷰 → CI 테스트 (ADR-048) → **통합테스트 (IntegrationTestAgent, ADR-055, §8.6, test-verdict-v2)** → 보안-테스트 → 완료 → PMO 회고 (의무)
+
+### Agent model tier (ADR-042 Amendment 2, 2026-05-11)
+
+InfraEngineerAgent·QADeveloperAgent·DataEngineerAgent = `claude-haiku-4-5` (기계적 패턴 실행 카테고리).
+나머지 모든 agent = Sonnet 이상.
+
+### Plugin 업그레이드 체크리스트
+
+`mctrader-hub/.claude/_overlay/CLAUDE.md` §"codeforge 업그레이드 프로세스" (step 1~6) 참조.
