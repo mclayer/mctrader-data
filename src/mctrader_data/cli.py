@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import socket
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -41,6 +43,11 @@ def _last_closed_boundary(now_utc: datetime, timeframe: Timeframe) -> datetime:
     epoch = int(now_utc.timestamp())
     floor_epoch = epoch - (epoch % seconds)
     return datetime.fromtimestamp(floor_epoch, tz=timezone.utc)
+
+
+def _resolve_node_id(explicit: str | None) -> str:
+    """Priority: --node-id CLI > MCTRADER_NODE_ID env var > socket.gethostname(). MCT-129."""
+    return explicit or os.environ.get("MCTRADER_NODE_ID") or socket.gethostname()
 
 
 @click.group()
@@ -448,9 +455,8 @@ def collect(
     root_resolved = resolve_data_root(root_override=root)
     log.info("storage root: %s", root_resolved)
 
-    # MCT-91 — HA active-active resolution
-    import socket as _socket
-    resolved_node_id = node_id if node_id is not None else _socket.gethostname()
+    # MCT-91 — HA active-active resolution (MCT-129: env var priority)
+    resolved_node_id = _resolve_node_id(node_id)
     resolved_heartbeat_root = heartbeat_root if heartbeat_root is not None else root_resolved
     log.info(
         "HA: node_id=%s heartbeat_root=%s heartbeat_interval=%.1fs",
