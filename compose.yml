@@ -114,6 +114,66 @@ services:
       - mctrader-net
       - mctrader_net
 
+  backfill-bithumb:
+    build: .
+    image: mctrader-data:pilot
+    container_name: mctrader-backfill-bithumb
+    restart: unless-stopped
+    stop_grace_period: 10s
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        SYMBOLS="KRW-XRP KRW-SOL KRW-VIRTUAL KRW-DOGE KRW-USDT KRW-ETH KRW-WLD KRW-TON KRW-ONDO KRW-STRK KRW-POLA KRW-SUI KRW-ADA KRW-XLM KRW-ETC KRW-BTC KRW-PEPE KRW-SHIB KRW-LINK KRW-PENGU KRW-NEAR KRW-ENA KRW-MERL KRW-H KRW-BABY KRW-TRUMP KRW-APT KRW-B3 KRW-SWAP KRW-GALA KRW-VVV KRW-SAND KRW-ATH KRW-NIL KRW-FIL KRW-KSM KRW-BIO KRW-HBAR KRW-TRX KRW-CYS KRW-SOON KRW-ZBT KRW-HOOK KRW-IP KRW-AGI KRW-CHIP KRW-D KRW-HEMI KRW-GWEI KRW-SEI"
+        while true; do
+          for sym in $$SYMBOLS; do
+            python -m mctrader_data.cli backfill --exchange bithumb --symbol $$sym --tf 1h --days 7 --policy skip 2>&1 || true
+            python -m mctrader_data.cli backfill --exchange bithumb --symbol $$sym --tf 1d --days 90 --policy skip 2>&1 || true
+          done
+          echo "[backfill-bithumb] cycle complete, sleeping 3600s"
+          sleep 3600
+        done
+    environment:
+      MCTRADER_DATA_ROOT: /var/lib/mctrader/data
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - mctrader_data:/var/lib/mctrader/data
+    networks:
+      - mctrader-net
+      - mctrader_net
+    labels:
+      mctrader.role: "backfill-bithumb"
+
+  backfill-upbit:
+    build: .
+    image: mctrader-data:pilot
+    container_name: mctrader-backfill-upbit
+    restart: unless-stopped
+    stop_grace_period: 10s
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        SYMBOLS="KRW-BTC KRW-ETH KRW-XRP KRW-SOL KRW-DOGE KRW-ADA KRW-TRX KRW-LINK KRW-AVAX KRW-DOT KRW-MATIC KRW-ATOM KRW-NEAR KRW-SUI KRW-HBAR USDT-BTC USDT-ETH USDT-XRP USDT-SOL USDT-DOGE"
+        while true; do
+          for sym in $$SYMBOLS; do
+            python -m mctrader_data.cli backfill --exchange upbit --symbol $$sym --tf 1h --days 7 --policy skip 2>&1 || true
+            python -m mctrader_data.cli backfill --exchange upbit --symbol $$sym --tf 1d --days 90 --policy skip 2>&1 || true
+          done
+          echo "[backfill-upbit] cycle complete, sleeping 3600s"
+          sleep 3600
+        done
+    environment:
+      MCTRADER_DATA_ROOT: /var/lib/mctrader/data
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - mctrader_data:/var/lib/mctrader/data
+    networks:
+      - mctrader-net
+      - mctrader_net
+    labels:
+      mctrader.role: "backfill-upbit"
+
 volumes:
   mctrader_data:
     name: mctrader_data

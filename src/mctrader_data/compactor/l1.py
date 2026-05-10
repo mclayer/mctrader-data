@@ -37,6 +37,13 @@ from mctrader_data.tick_storage import (
     _records_to_arrow as _tick_records_to_arrow,
     _TICK_SCHEMA,
 )
+from mctrader_data.orderbook_snapshot_storage import (
+    ORDERBOOK_SNAPSHOT_SCHEMA_VERSION,
+    OrderbookSnapshotRecord,
+    _OB_SNAPSHOT_SCHEMA,
+    _compute_payload_hash,
+    _records_to_arrow as _ob_snapshot_records_to_arrow,
+)
 import contextlib
 
 
@@ -44,8 +51,11 @@ def _schema_version(channel: str) -> str:
     """Return the schema version string for *channel* (module-level helper for L2/L3)."""
     if channel == "transaction":
         return TICK_SCHEMA_VERSION
+    if channel == "orderbooksnapshot":
+        return ORDERBOOK_SNAPSHOT_SCHEMA_VERSION
     raise NotImplementedError(
-        f"_schema_version: channel {channel!r} not supported. Only 'transaction' is implemented."
+        f"_schema_version: channel {channel!r} not supported. "
+        "Supported: 'transaction', 'orderbooksnapshot'."
     )
 
 
@@ -167,11 +177,16 @@ class L1Compactor:
         )
 
     def _schema_version_for_channel(self, channel: str) -> str:
+        return _schema_version(channel)
+
+    def _arrow_schema_for_channel(self, channel: str) -> pa.Schema:
         if channel == "transaction":
-            return TICK_SCHEMA_VERSION
+            return _TICK_SCHEMA
+        if channel == "orderbooksnapshot":
+            return _OB_SNAPSHOT_SCHEMA
         raise NotImplementedError(
-            f"L1Compactor does not yet support channel '{channel}'. "
-            "Only 'transaction' is implemented."
+            f"L1Compactor: no Arrow schema for channel '{channel}'. "
+            "Supported: 'transaction', 'orderbooksnapshot'."
         )
 
     def _read_ndjson(self, sealed: Path) -> list[dict]:
@@ -188,9 +203,61 @@ class L1Compactor:
         """Convert raw dicts from NDJSON to Arrow table using the channel's schema."""
         if channel == "transaction":
             return self._tick_dicts_to_arrow(records_raw)
+        if channel == "orderbooksnapshot":
+            return self._ob_snapshot_dicts_to_arrow(records_raw)
         raise NotImplementedError(
-            f"L1Compactor._convert_to_arrow: channel '{channel}' not supported"
+            f"L1Compactor._convert_to_arrow: channel '{channel}' not supported. "
+            "Supported: 'transaction', 'orderbooksnapshot'."
         )
+
+    def _ob_snapshot_dicts_to_arrow(self, records_raw: list[dict]) -> pa.Table:
+        """Convert orderbooksnapshot WAL records → Arrow table via per-level rows.
+
+        Each WAL record encodes one full snapshot (bids + asks as lists).
+        This method flattens them into N bid rows + N ask rows per WAL record,
+        matching the §D14 Parquet schema (OrderbookSnapshotRecord per level).
+
+        baseline_seq = int(ts_utc.timestamp() * 1_000_000) per §D14.5 (1).
+        payload_hash = SHA256(canonical body)[:16] per §D14.6.
+        """
+        ob_records: list[OrderbookSnapshotRecord] = []
+        for d in records_raw:
+            ts_utc = self._parse_ts(d["ts_utc"])
+            received_at = self._parse_ts(d["received_at"])
+            exchange = d["exchange"]
+            symbol = d["symbol"]
+            raw_json = d.get("raw_json")
+
+            baseline_seq = int(ts_utc.timestamp() * 1_000_000)
+
+            bids_pairs = [
+                (Decimal(str(lvl["price"])), Decimal(str(lvl["quantity"])))
+                for lvl in d["bids"]
+            ]
+            asks_pairs = [
+                (Decimal(str(lvl["price"])), Decimal(str(lvl["quantity"])))
+                for lvl in d["asks"]
+            ]
+            payload_hash = _compute_payload_hash(exchange, symbol, baseline_seq, bids_pairs, asks_pairs)
+
+            common: dict = dict(
+                ts_utc=ts_utc,
+                received_at=received_at,
+                exchange=exchange,
+                symbol=symbol,
+                baseline_seq=baseline_seq,
+                payload_hash=payload_hash,
+                raw_json=raw_json,
+            )
+            for level, (price, qty) in enumerate(bids_pairs):
+                ob_records.append(OrderbookSnapshotRecord(
+                    **common, side="bid", level=level, price=price, quantity=qty,
+                ))
+            for level, (price, qty) in enumerate(asks_pairs):
+                ob_records.append(OrderbookSnapshotRecord(
+                    **common, side="ask", level=level, price=price, quantity=qty,
+                ))
+        return _ob_snapshot_records_to_arrow(ob_records)
 
     def _tick_dicts_to_arrow(self, records_raw: list[dict]) -> pa.Table:
         """Convert transaction channel dicts → Arrow table via TickRecord + _records_to_arrow."""
@@ -231,7 +298,7 @@ class L1Compactor:
         self, table: pa.Table, target: Path, meta: dict
     ) -> None:
         """Write Parquet to a tmp file then atomically rename to target."""
-        schema_with_meta = _TICK_SCHEMA
+        schema_with_meta = self._arrow_schema_for_channel(meta["channel"])
         node_id = meta.get("node_id")
         if node_id is not None:
             existing_meta = dict(schema_with_meta.metadata or {})
