@@ -19,6 +19,7 @@ import contextlib
 import json
 import logging
 import os
+import time
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -131,8 +132,38 @@ class HeartbeatWriter:
                 with contextlib.suppress(OSError):
                     temp.unlink()
 
+    def cleanup_stale_heartbeats(self, ttl_seconds: float | None = None) -> None:
+        """One-shot: remove heartbeat files older than TTL. Own file is always preserved.
+
+        Called at run() startup to clear files accumulated from prior container IDs.
+        OSError on individual files → warn + continue (never blocks collector start).
+        """
+        _ttl = ttl_seconds if ttl_seconds is not None else float(
+            os.environ.get("MCTRADER_HEARTBEAT_STALE_CLEANUP_SECONDS", "300")
+        )
+        manifest_dir = self.root / "market" / "manifest"
+        if not manifest_dir.is_dir():
+            return
+        own_name = f"heartbeat-{self.node_id}.json"
+        now = time.time()
+        for hb_file in manifest_dir.glob("heartbeat-*.json"):
+            if hb_file.name == own_name:
+                continue
+            try:
+                age = now - hb_file.stat().st_mtime
+                if age > _ttl:
+                    hb_file.unlink(missing_ok=True)
+                    logger.info(
+                        "stale heartbeat removed: %s (age=%.0fs)", hb_file.name, age
+                    )
+            except OSError as exc:
+                logger.warning(
+                    "stale cleanup failed for %s: %s", hb_file.name, exc
+                )
+
     async def run(self) -> None:
         """5s loop until cancelled. Final atomic write on cancel."""
+        self.cleanup_stale_heartbeats()
         try:
             while True:
                 await self.write_once()

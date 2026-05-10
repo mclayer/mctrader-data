@@ -165,3 +165,90 @@ class TestHeartbeatSchemaMismatch:
         assert any(
             "schema_version mismatch" in rec.message for rec in caplog.records
         ), "schema mismatch warning missing"
+
+
+class TestHeartbeatStaleCleanup:
+    def _make_stale(self, path: Path, age_seconds: float) -> None:
+        import time
+        path.write_text("{}", encoding="utf-8")
+        mtime = time.time() - age_seconds
+        import os as _os
+        _os.utime(path, (mtime, mtime))
+
+    def test_stale_file_deleted(self, tmp_path: Path) -> None:
+        writer = HeartbeatWriter(root=tmp_path, node_id="NODE_A")
+        manifest_dir = tmp_path / "market" / "manifest"
+        manifest_dir.mkdir(parents=True)
+        stale = manifest_dir / "heartbeat-NODE_ZOMBIE.json"
+        self._make_stale(stale, age_seconds=400.0)
+
+        writer.cleanup_stale_heartbeats(ttl_seconds=300.0)
+
+        assert not stale.exists(), "stale file must be removed"
+
+    def test_own_file_protected(self, tmp_path: Path) -> None:
+        writer = HeartbeatWriter(root=tmp_path, node_id="NODE_A")
+        manifest_dir = tmp_path / "market" / "manifest"
+        manifest_dir.mkdir(parents=True)
+        own = manifest_dir / "heartbeat-NODE_A.json"
+        self._make_stale(own, age_seconds=400.0)
+
+        writer.cleanup_stale_heartbeats(ttl_seconds=300.0)
+
+        assert own.exists(), "own heartbeat file must never be deleted"
+
+    def test_fresh_file_not_deleted(self, tmp_path: Path) -> None:
+        writer = HeartbeatWriter(root=tmp_path, node_id="NODE_A")
+        manifest_dir = tmp_path / "market" / "manifest"
+        manifest_dir.mkdir(parents=True)
+        fresh = manifest_dir / "heartbeat-NODE_FRESH.json"
+        self._make_stale(fresh, age_seconds=10.0)
+
+        writer.cleanup_stale_heartbeats(ttl_seconds=300.0)
+
+        assert fresh.exists(), "fresh file (< TTL) must not be deleted"
+
+    def test_missing_manifest_dir_no_error(self, tmp_path: Path) -> None:
+        writer = HeartbeatWriter(root=tmp_path, node_id="NODE_A")
+        # manifest_dir does not exist — should complete silently
+        writer.cleanup_stale_heartbeats(ttl_seconds=300.0)  # no exception
+
+    def test_oserror_on_stat_is_resilient(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        writer = HeartbeatWriter(root=tmp_path, node_id="NODE_A")
+        manifest_dir = tmp_path / "market" / "manifest"
+        manifest_dir.mkdir(parents=True)
+        stale = manifest_dir / "heartbeat-NODE_ZOMBIE.json"
+        stale.write_text("{}", encoding="utf-8")
+
+        real_stat = Path.stat
+
+        def patched_stat(self: Path, *, follow_symlinks: bool = True) -> object:
+            if self.name == "heartbeat-NODE_ZOMBIE.json":
+                raise OSError(13, "Permission denied")
+            return real_stat(self, follow_symlinks=follow_symlinks)
+
+        with monkeypatch.context() as m:
+            m.setattr(Path, "stat", patched_stat)
+            with caplog.at_level(logging.WARNING, logger="mctrader_data.heartbeat"):
+                writer.cleanup_stale_heartbeats(ttl_seconds=300.0)
+            assert any("stale cleanup failed" in r.message for r in caplog.records)
+
+        assert stale.exists(), "file must remain when OSError occurs"
+
+    @pytest.mark.asyncio
+    async def test_run_calls_cleanup_at_startup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        writer = HeartbeatWriter(root=tmp_path, node_id="NODE_A", interval_seconds=10.0)
+        calls: list[str] = []
+        monkeypatch.setattr(writer, "cleanup_stale_heartbeats", lambda: calls.append("called"))
+
+        task = asyncio.create_task(writer.run())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert calls == ["called"], "run() must call cleanup_stale_heartbeats() exactly once at startup"
