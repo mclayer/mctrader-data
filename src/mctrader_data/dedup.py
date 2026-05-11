@@ -139,6 +139,29 @@ def tick_logical_key(
     )
 
 
+def tick_v1_1_logical_key(
+    row: Any,
+) -> tuple[str, str, datetime, Decimal, Decimal, str, str | None, int | None]:
+    """ADR-009 §D10.8 T2 — fallback 8-tuple (tick.v1.1 extension over §D10.7).
+
+    `(exchange, symbol, ts_utc, price, quantity, side, payload_hash, ingest_seq)`
+
+    Backward note: rows produced by the legacy v1.0 reader have
+    ``payload_hash=None`` / ``ingest_seq=None`` (per ``parse_tick_v1_row_as_v1_1``).
+    Such rows still hash to a valid 8-tuple key with the two tail slots = ``None``.
+    """
+    return (
+        row.exchange,
+        str(row.symbol),
+        row.ts_utc,
+        row.price,
+        row.quantity,
+        row.side,
+        getattr(row, "payload_hash", None),
+        getattr(row, "ingest_seq", None),
+    )
+
+
 def orderbook_logical_key(
     row: Any,
 ) -> tuple[str, str, datetime, str, str, int, Decimal, Decimal]:
@@ -413,6 +436,127 @@ def deduplicate_ticks(
 
     return DedupResult(
         emitted=sorted(by_key.values(), key=lambda r: r.ts_utc),
+        dup_skip_count=dup_skip,
+        quarantine_count=quarantine_count,
+        quarantine_records=quarantine_records,
+    )
+
+
+# ----------------------------------------------------------------------
+# T2 tick.v1.1 dedup (8-tuple, mismatch → quarantine)  ─ MCT-140 Story-6
+# ----------------------------------------------------------------------
+
+
+def deduplicate_ticks_v1_1(
+    rows: Iterable[Any],
+    *,
+    multi_node: bool,
+    sink: DedupCounterSink | None = None,
+) -> DedupResult:
+    """T2 tick.v1.1 dedup using the 8-tuple fallback logical key.
+
+    Compared to :func:`deduplicate_ticks`:
+    - logical key = 8-tuple (adds ``payload_hash`` + ``ingest_seq``).
+    - mismatch detection switches from ``raw_json`` byte-equality to a body-vs-extension
+      split: rows that agree on the 6-tuple body but disagree on ``payload_hash``
+      are treated as ACTIVE_ACTIVE_MISMATCH (quarantine), whereas rows that
+      differ on ``ingest_seq`` alone are simply distinct trades (no quarantine).
+
+    multi_node=False → pass-through, sorted by ts_utc.
+    multi_node=True → group by 8-tuple. Same 8-tuple → idempotent skip
+    (byte-identical, ``dup_skip_count += 1``). Same 6-tuple body + differing
+    ``payload_hash`` (any ``ingest_seq``) → quarantine emit + node-priority
+    tie-break for which row survives in the emitted set.
+    """
+    rows_list = list(rows)
+    if not multi_node:
+        return DedupResult(
+            emitted=sorted(rows_list, key=lambda r: r.ts_utc),
+            dup_skip_count=0,
+            quarantine_count=0,
+        )
+
+    # First pass — group by the 8-tuple to detect exact duplicates.
+    by_full_key: dict[tuple, Any] = {}
+    # Track 6-tuple body → list of (full_key, row) to detect content mismatch.
+    by_body: dict[tuple, list[tuple]] = {}
+    dup_skip = 0
+    detected_at = datetime.now()
+    quarantine_count = 0
+    quarantine_records: list[QuarantineRecord] = []
+    limiter = _BackpressureLimiter()
+
+    def _body(row: Any) -> tuple:
+        return (
+            row.exchange,
+            str(row.symbol),
+            row.ts_utc,
+            row.price,
+            row.quantity,
+            row.side,
+        )
+
+    for row in rows_list:
+        full_key = tick_v1_1_logical_key(row)
+        body = _body(row)
+        if full_key in by_full_key:
+            # byte-identical second occurrence → idempotent skip
+            dup_skip += 1
+            continue
+        # Check for body-mismatch against any previously seen row at this 6-tuple.
+        prior_rows = by_body.setdefault(body, [])
+        if prior_rows:
+            # Compare payload_hash across all priors — first mismatch triggers quarantine.
+            new_ph = getattr(row, "payload_hash", None)
+            for prior_full, prior_row in prior_rows:
+                prior_ph = prior_full[6]
+                if (
+                    new_ph is not None
+                    and prior_ph is not None
+                    and new_ph != prior_ph
+                ):
+                    qr = QuarantineRecord(
+                        reason="ACTIVE_ACTIVE_MISMATCH",
+                        tier="tick",
+                        logical_key=body,
+                        rows=[prior_row, row],
+                        detected_at=detected_at,
+                    )
+                    quarantine_count += 1
+                    emit_now, batch = limiter.admit(qr)
+                    if emit_now and batch:
+                        quarantine_records.extend(batch)
+                    # Tie-break with node priority to decide which row stays.
+                    new_pri = node_priority(getattr(row, "node_id", None))
+                    old_pri = node_priority(getattr(prior_row, "node_id", None))
+                    if new_pri < old_pri:
+                        # Replace the priors' "winner" — drop the old full_key.
+                        del by_full_key[prior_full]
+                        by_body[body] = [(full_key, row)]
+                        by_full_key[full_key] = row
+                    # Either way the loser row is not emitted; break out of priors.
+                    break
+            else:
+                # No payload_hash mismatch across priors → keep as a distinct
+                # full-key row (different ingest_seq is the typical case).
+                by_full_key[full_key] = row
+                prior_rows.append((full_key, row))
+        else:
+            by_full_key[full_key] = row
+            prior_rows.append((full_key, row))
+
+    final_batch = limiter.flush()
+    if final_batch:
+        quarantine_records.extend(final_batch)
+
+    if sink is not None:
+        if dup_skip > 0:
+            sink.increment_dup_skip(dup_skip)
+        if quarantine_count > 0:
+            sink.increment_quarantine(quarantine_count)
+
+    return DedupResult(
+        emitted=sorted(by_full_key.values(), key=lambda r: r.ts_utc),
         dup_skip_count=dup_skip,
         quarantine_count=quarantine_count,
         quarantine_records=quarantine_records,
