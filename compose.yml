@@ -99,6 +99,8 @@ services:
       MINIO_ENDPOINT: http://minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+    ports:
+      - "8080:8080"
     volumes:
       - mctrader_data:/var/lib/mctrader/data
     depends_on:
