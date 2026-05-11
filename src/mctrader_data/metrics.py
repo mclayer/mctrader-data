@@ -115,3 +115,43 @@ def observe_compactor_rss() -> None:
 
     # Last-resort sentinel so /metrics still emits a sample point.
     compactor_process_rss_bytes.set(0)
+
+
+compactor_pyarrow_total_allocated_bytes = Gauge(
+    "compactor_pyarrow_total_allocated_bytes",
+    "Bytes allocated by PyArrow default memory pool",
+)
+
+compactor_python_gc_gen_count = Gauge(
+    "compactor_python_gc_gen_count",
+    "Python GC collections count per generation",
+    ["generation"],
+)
+
+compactor_tier_pending_segments = Gauge(
+    "compactor_tier_pending_segments",
+    "Pending sealed segments awaiting compaction per tier",
+    ["tier"],
+)
+
+compactor_writer_open_count = Gauge(
+    "compactor_writer_open_count",
+    "Currently open ParquetWriter instances per tier",
+    ["tier"],
+)
+
+
+def observe_compactor_runtime() -> None:
+    """Sample pyarrow + Python gc stats. Called by metrics_server observer thread."""
+    try:
+        import pyarrow as pa
+
+        pool = pa.default_memory_pool()
+        compactor_pyarrow_total_allocated_bytes.set(pool.bytes_allocated())
+    except Exception:
+        pass
+
+    import gc
+
+    for gen, count in enumerate(gc.get_count()):
+        compactor_python_gc_gen_count.labels(generation=str(gen)).set(count)

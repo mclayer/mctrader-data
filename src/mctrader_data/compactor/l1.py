@@ -44,6 +44,7 @@ from mctrader_data.orderbook_snapshot_storage import (
     _compute_payload_hash,
     _records_to_arrow as _ob_snapshot_records_to_arrow,
 )
+from mctrader_data.metrics import compactor_writer_open_count
 import contextlib
 
 
@@ -312,10 +313,17 @@ class L1Compactor:
             # MCT-133 A1: use context manager to guarantee writer.close() on
             # exception paths (e.g. write_table raising) — prevents file handle
             # leaks under memory pressure / partition errors.
-            with pq.ParquetWriter(
-                tmp_path, schema_with_meta, compression="snappy"
-            ) as writer:
-                writer.write_table(table)
+            # MCT-134 A2 Task 7: track currently-open ParquetWriter instances per
+            # tier via compactor_writer_open_count Gauge (inc before open, dec
+            # in finally — paired across both success and exception paths).
+            compactor_writer_open_count.labels(tier="L1").inc()
+            try:
+                with pq.ParquetWriter(
+                    tmp_path, schema_with_meta, compression="snappy"
+                ) as writer:
+                    writer.write_table(table)
+            finally:
+                compactor_writer_open_count.labels(tier="L1").dec()
             os.replace(tmp_path, str(target))
         except Exception:
             with contextlib.suppress(OSError):

@@ -6,7 +6,7 @@ import threading
 
 from prometheus_client import start_http_server
 
-from mctrader_data.metrics import observe_compactor_rss
+from mctrader_data.metrics import observe_compactor_rss, observe_compactor_runtime
 
 log = logging.getLogger(__name__)
 
@@ -20,6 +20,7 @@ def _observer_loop() -> None:
     while not _observer_stop.is_set():
         try:
             observe_compactor_rss()
+            observe_compactor_runtime()
         except Exception:
             log.exception("[metrics_server] observer tick error")
         _observer_stop.wait(_OBSERVER_INTERVAL_SECONDS)
@@ -39,11 +40,12 @@ def start_metrics_server(port: int = 8080) -> None:
         return
     start_http_server(port)
     _server_started = True
-    # Prime gauge once synchronously so the first scrape after start observes a value.
+    # Prime gauges once synchronously so the first scrape after start observes values.
     try:
         observe_compactor_rss()
+        observe_compactor_runtime()
     except Exception:
-        log.exception("[metrics_server] initial observe_compactor_rss error")
+        log.exception("[metrics_server] initial observe error")
     _observer_stop.clear()
     _observer_thread = threading.Thread(
         target=_observer_loop, name="compactor-metrics-observer", daemon=True

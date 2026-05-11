@@ -12,6 +12,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from mctrader_data.metrics import compactor_tier_pending_segments
 from mctrader_data.wal.segment import scan_sealed
 from .l1 import L1Compactor
 from .l2 import L2Compactor
@@ -68,7 +69,20 @@ class CompactorRunner:
     async def _tick(self) -> None:
         now = time.time()
 
-        for sealed in scan_sealed(self._root):
+        # MCT-134 A2 Task 7: snapshot sealed-segment list once per tick so we can
+        # both publish the L1 pending-segments gauge AND drive L1 compaction
+        # without scanning twice. L2/L3 pending is approximated as elapsed/interval
+        # (precise per-(exchange,symbol,channel) accounting is deferred).
+        sealed_list = list(scan_sealed(self._root))
+        compactor_tier_pending_segments.labels(tier="L1").set(len(sealed_list))
+        compactor_tier_pending_segments.labels(tier="L2").set(
+            max(0, int((now - self._last_l2) / L2_INTERVAL_SECONDS))
+        )
+        compactor_tier_pending_segments.labels(tier="L3").set(
+            max(0, int((now - self._last_l3) / L3_INTERVAL_SECONDS))
+        )
+
+        for sealed in sealed_list:
             try:
                 p = self._l1.compact_segment(sealed)
                 log.info("[compactor] L1 compacted %s → %s", sealed.name, p.name)
