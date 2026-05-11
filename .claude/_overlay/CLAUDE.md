@@ -34,17 +34,27 @@
 
 신규 도메인 specialization agent 는 first iteration 에 hub-shared (DomainAgent / DataEngineerAgent) 만 reuse. repo-specific agent 는 후속 iteration.
 
-### plugin 버전 메모 (MCT-129, 2026-05-11)
+### plugin 버전 메모 (2026-05-11 업그레이드 반영)
 
-codeforge 5종 최신 버전 (MCT-127/MCT-128 + 2026-05-11 업그레이드 반영):
+codeforge plugin 최신 버전 (hub `mctrader-hub/.claude/_overlay/CLAUDE.md` mirror — 자세한 carrier 링크는 hub 참조):
 
 ```
-codeforge@mclayer               # 5.10.0 — ADR-014 Amendment 2: deputy mandate 소유권 annotation 갱신
-codeforge-design@mclayer        # 0.6.0 — ArchitectAgent Phase 3.5 self-lint 추가; §8.5_active spawn param; LiveOps/LiveOrdering 경계 (ADR-014 Amendment 2)
-codeforge-develop@mclayer       # 0.5.0 — maintenance scripts 추가; consumer-breaking 없음
-codeforge-test@mclayer          # 1.1.1 (REVIVED — ADR-055/CFP-367 + Amendment 2/CFP-371) — test-verdict-v2.1 (Epic-level); IntegrationTestAgent(Sonnet) active; TestAgent/StatefulTestAgent deprecated (spawn 불가)
-codeforge-review@mclayer        # 1.2.1 — review-verdict v4 canonical in plugin (CFP-137 sibling sync); v3 Archived; 4-step Orchestrator algorithm
+codeforge@mclayer               # 5.14.0 — CFP-411 Requirements lane multi-round debate / CFP-389 evidence-enforceable framework + hotfix-bypass:* label / CFP-391 debate-protocol-v1 + auto_on_divergence / CFP-387 ADR-058 is_transitional frontmatter
+codeforge-requirements@mclayer  # 0.5.0 — codex-proactive-check worker (dispatch_mode: auto_on_divergence) + semantic divergence 3 criteria
+codeforge-design@mclayer        # 0.7.0 — templates/adr.md is_transitional frontmatter + ## 해소 기준 섹션 schema
+codeforge-develop@mclayer       # 0.5.0 — maintenance scripts; consumer-breaking 없음
+codeforge-test@mclayer          # 1.1.1 (REVIVED) — test-verdict-v2.1 (Epic-level); IntegrationTestAgent active; TestAgent/StatefulTestAgent deprecated
+codeforge-review@mclayer        # 1.3.0 — review-pl-base §3.0~§3.3 debate-protocol-v1 dispatch SOP + review-verdict v4.1 (findings[].anchor_id)
+codeforge-pmo@mclayer           # 0.1.0
 ```
+
+### Adversarial Debate auto-trigger (CFP-391/411)
+
+DesignReview / Requirements lane 진입 시 divergence 감지되면 자동 multi-round debate (min 3 / max 5). divergence 미검출 시 기존 single-shot 유지 (backward-compat). Anchor 재발 시 즉시 사용자 escalation. 자세한 sequence 는 hub CLAUDE.md 참조.
+
+### 도메인 ADR 작성 schema (CFP-387/ADR-058)
+
+본 repo 또는 hub 의 `docs/adr/` 신규 작성 시 frontmatter `is_transitional` + body `## 해소 기준` 섹션 의무 (미선언 default = `true`). 측정성 3-tuple (metric / who / how) 정량 명시 의무, 모달 어휘 금지. 자세한 schema 는 hub CLAUDE.md 참조.
 
 ### Story workflow phase (MCT-129, 2026-05-11)
 
