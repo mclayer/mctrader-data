@@ -87,6 +87,8 @@ services:
     container_name: mctrader-compactor
     restart: unless-stopped
     stop_grace_period: 30s
+    mem_limit: 32g
+    memswap_limit: 32g
     command:
       - "compact"
       - "--root"
@@ -99,6 +101,12 @@ services:
       MINIO_ENDPOINT: http://minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MCTRADER_COMPACTOR_METRICS_PORT: "8080"
+      MCTRADER_COMPACTOR_GC_INTERVAL_SECONDS: "300"
+      MALLOC_TRIM_THRESHOLD_: "131072"
+      ARROW_DEFAULT_MEMORY_POOL: "system"
+    ports:
+      - "8080:8080"
     volumes:
       - mctrader_data:/var/lib/mctrader/data
     depends_on:

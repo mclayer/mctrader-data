@@ -2,6 +2,7 @@
 """L2Compactor: merge tier=L1 Parquet files for one UTC hour → tier=L2 Parquet."""
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 from datetime import datetime
@@ -11,6 +12,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from mctrader_data.compactor.l1 import _schema_version
+from mctrader_data.metrics import compactor_writer_open_count
 
 
 class L2Compactor:
@@ -54,6 +56,23 @@ class L2Compactor:
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"part-{run_id}.parquet"
         tmp = out_dir / f"part-tmp-{os.getpid()}.tmp"
-        pq.write_table(merged, str(tmp), compression="snappy")
-        os.replace(str(tmp), str(out_path))
+        # MCT-133 A1 Task 6a: use ParquetWriter as context manager so writer.close()
+        # runs even when write_table raises (e.g. under memory pressure). On any
+        # exception, clean the tmp file to prevent leftover *.tmp accumulation.
+        # MCT-134 A2 Task 7: track open ParquetWriter instances per tier
+        # (inc before open, dec in finally — paired across success + exception).
+        try:
+            compactor_writer_open_count.labels(tier="L2").inc()
+            try:
+                with pq.ParquetWriter(
+                    str(tmp), merged.schema, compression="snappy"
+                ) as writer:
+                    writer.write_table(merged)
+            finally:
+                compactor_writer_open_count.labels(tier="L2").dec()
+            os.replace(str(tmp), str(out_path))
+        except Exception:
+            with contextlib.suppress(OSError):
+                os.unlink(str(tmp))
+            raise
         return out_path
