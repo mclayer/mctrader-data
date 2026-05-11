@@ -20,6 +20,17 @@ mctrader-data backfill --exchange bithumb --symbol KRW-BTC --tf 1h --start 2026-
 mctrader-data backfill --exchange bithumb --symbol KRW-BTC --tf 1h --days 7 --dry-run
 ```
 
+### Legacy candle retirement (ADR-026 / MCT-146)
+
+Epic MCT-112 Story-12 land 후 `backfill` 명령은 **cutoff timestamp** 이후 구간을 자동 거부.
+cutoff 이후는 transaction WAL → Compactor → Parquet (Aggregation Core Lib) 가 SSOT.
+
+- **Default cutoff**: `2026-06-01T00:00:00Z` (ADR-026 §D2 placeholder, deployment runbook 이 활성 박제).
+- **Override**: 환경변수 `MCTRADER_CUTOFF_TIMESTAMP` (ISO-8601 UTC, month boundary 강제).
+- **Escape hatch**: `--allow-post-cutoff` (DR / debug 한정 — operator explicit opt-in).
+- **Row-level provenance**: `mctrader_data.provenance.assign_provenance(ts)` →
+  `"legacy_candle"` (pre-cutoff, immutable SSOT) / `"transaction_derived"` (post-cutoff).
+
 ## Storage layout (ADR-009 D2)
 
 ```
