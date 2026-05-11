@@ -75,12 +75,19 @@ class CompactorRunner:
         # (precise per-(exchange,symbol,channel) accounting is deferred).
         sealed_list = list(scan_sealed(self._root))
         compactor_tier_pending_segments.labels(tier="L1").set(len(sealed_list))
-        compactor_tier_pending_segments.labels(tier="L2").set(
-            max(0, int((now - self._last_l2) / L2_INTERVAL_SECONDS))
-        )
-        compactor_tier_pending_segments.labels(tier="L3").set(
-            max(0, int((now - self._last_l3) / L3_INTERVAL_SECONDS))
-        )
+        # _last_l2 == 0.0 means "never run yet" — pending estimate is 0 until first cycle.
+        # After first cycle, pending = elapsed / interval (capped at reasonable bound).
+        if self._last_l2 > 0:
+            pending_l2 = max(0, int((now - self._last_l2) / L2_INTERVAL_SECONDS))
+        else:
+            pending_l2 = 0
+        compactor_tier_pending_segments.labels(tier="L2").set(pending_l2)
+
+        if self._last_l3 > 0:
+            pending_l3 = max(0, int((now - self._last_l3) / L3_INTERVAL_SECONDS))
+        else:
+            pending_l3 = 0
+        compactor_tier_pending_segments.labels(tier="L3").set(pending_l3)
 
         for sealed in sealed_list:
             try:

@@ -46,6 +46,17 @@ def start_metrics_server(port: int = 8080) -> None:
         observe_compactor_runtime()
     except Exception:
         log.exception("[metrics_server] initial observe error")
+    # Prime tier labels so /metrics shows 0 instead of "no data" before first cycle.
+    try:
+        from mctrader_data.metrics import (
+            compactor_tier_pending_segments,
+            compactor_writer_open_count,
+        )
+        for tier in ("L1", "L2", "L3"):
+            compactor_writer_open_count.labels(tier=tier).set(0)
+            compactor_tier_pending_segments.labels(tier=tier).set(0)
+    except Exception:
+        log.exception("[metrics_server] tier label prime error")
     _observer_stop.clear()
     _observer_thread = threading.Thread(
         target=_observer_loop, name="compactor-metrics-observer", daemon=True
