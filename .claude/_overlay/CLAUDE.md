@@ -36,18 +36,19 @@
 
 ### plugin 버전 메모 (MCT-129, 2026-05-11)
 
-codeforge 4종 최신 버전 (MCT-127/MCT-128 반영):
+codeforge 5종 최신 버전 (MCT-127/MCT-128 + 2026-05-11 업그레이드 반영):
 
 ```
-codeforge-design@mclayer        # 0.5.0 — CFP-319: ArchitectAgent WS stream push_interval 실증 의무
-codeforge-develop@mclayer       # 0.4.0 — presets/docker-compose.test.yml (IntegrationTestAgent §8.6)
-codeforge-test@mclayer          # REVIVED (ADR-055/CFP-367) — IntegrationTestAgent(Sonnet) active; TestAgent/StatefulTestAgent deprecated (spawn 불가); test-verdict-v2
-codeforge-review@mclayer        # 1.2.0 — CFP-318: 3 ReviewPL bootstrap-labels.sh preflight; review-verdict v4
+codeforge@mclayer               # 5.10.0 — ADR-014 Amendment 2: deputy mandate 소유권 annotation 갱신
+codeforge-design@mclayer        # 0.6.0 — ArchitectAgent Phase 3.5 self-lint 추가; §8.5_active spawn param; LiveOps/LiveOrdering 경계 (ADR-014 Amendment 2)
+codeforge-develop@mclayer       # 0.5.0 — maintenance scripts 추가; consumer-breaking 없음
+codeforge-test@mclayer          # 1.1.1 (REVIVED — ADR-055/CFP-367 + Amendment 2/CFP-371) — test-verdict-v2.1 (Epic-level); IntegrationTestAgent(Sonnet) active; TestAgent/StatefulTestAgent deprecated (spawn 불가)
+codeforge-review@mclayer        # 1.2.1 — review-verdict v4 canonical in plugin (CFP-137 sibling sync); v3 Archived; 4-step Orchestrator algorithm
 ```
 
 ### Story workflow phase (MCT-129, 2026-05-11)
 
-요구사항 → 설계 → 설계-리뷰 → 구현 → 구현-리뷰 → CI 테스트 (ADR-048) → **통합테스트 (IntegrationTestAgent, ADR-055, §8.6, test-verdict-v2)** → 보안-테스트 → 완료 → PMO 회고 (의무)
+요구사항 → 설계 → 설계-리뷰 → 구현 → 구현-리뷰 → CI 테스트 (ADR-048) → **통합테스트 (IntegrationTestAgent, ADR-055, §8.6, test-verdict-v2.1, Epic-level CFP-371)** → 보안-테스트 → 완료 → PMO 회고 (의무)
 
 ### Agent model tier (ADR-042 Amendment 2, 2026-05-11)
 
