@@ -309,9 +309,13 @@ class L1Compactor:
         fd, tmp_path = tempfile.mkstemp(dir=tmp_dir, suffix=".parquet.tmp")
         try:
             os.close(fd)
-            writer = pq.ParquetWriter(tmp_path, schema_with_meta, compression="snappy")
-            writer.write_table(table)
-            writer.close()
+            # MCT-133 A1: use context manager to guarantee writer.close() on
+            # exception paths (e.g. write_table raising) — prevents file handle
+            # leaks under memory pressure / partition errors.
+            with pq.ParquetWriter(
+                tmp_path, schema_with_meta, compression="snappy"
+            ) as writer:
+                writer.write_table(table)
             os.replace(tmp_path, str(target))
         except Exception:
             with contextlib.suppress(OSError):
