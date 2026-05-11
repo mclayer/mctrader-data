@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import gc  # stdlib — Python heap GC; named collision with .gc (filesystem GC)
+            # is avoided by aliasing the filesystem helper import below.
 import logging
+import os
+import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -12,7 +16,7 @@ from mctrader_data.wal.segment import scan_sealed
 from .l1 import L1Compactor
 from .l2 import L2Compactor
 from .l3 import L3Compactor
-from .gc import run_gc
+from .gc import run_gc  # filesystem GC (24h grace deletion of .compacted sealed segments)
 
 if TYPE_CHECKING:
     from mctrader_data.compactor.minio_uploader import MinioUploader
@@ -22,6 +26,7 @@ log = logging.getLogger(__name__)
 SCAN_INTERVAL_SECONDS = 30
 L2_INTERVAL_SECONDS = 300
 L3_INTERVAL_SECONDS = 3600
+DEFAULT_GC_INTERVAL_SECONDS = 300  # MCT-133 A1 Task 6c — stdlib gc.collect cadence
 
 
 class CompactorRunner:
@@ -37,6 +42,16 @@ class CompactorRunner:
         self._minio = minio_uploader
         self._last_l2 = 0.0
         self._last_l3 = 0.0
+        self._last_gc = 0.0
+        # MCT-133 A1 Task 6c: interval-driven stdlib gc.collect() to release
+        # pyarrow Python-heap buffers between compaction passes. Knob shipped
+        # inert in Task 4 (compose.yml MCTRADER_COMPACTOR_GC_INTERVAL_SECONDS).
+        self._gc_interval_seconds = float(
+            os.environ.get(
+                "MCTRADER_COMPACTOR_GC_INTERVAL_SECONDS",
+                str(DEFAULT_GC_INTERVAL_SECONDS),
+            )
+        )
 
     async def run(self) -> None:
         log.info("[compactor] runner started root=%s", self._root)
@@ -51,7 +66,6 @@ class CompactorRunner:
             await asyncio.sleep(SCAN_INTERVAL_SECONDS)
 
     async def _tick(self) -> None:
-        import time
         now = time.time()
 
         for sealed in scan_sealed(self._root):
@@ -68,6 +82,13 @@ class CompactorRunner:
         if now - self._last_l3 >= L3_INTERVAL_SECONDS:
             self._last_l3 = now
             await asyncio.get_running_loop().run_in_executor(None, self._run_l3)
+
+        # MCT-133 A1 Task 6c: interval-driven stdlib gc.collect (Python heap)
+        # — distinct from run_gc() below which deletes filesystem .compacted markers.
+        if now - self._last_gc >= self._gc_interval_seconds:
+            self._last_gc = now
+            collected = gc.collect()
+            log.debug("[compactor] gc.collect() released %d objects", collected)
 
         run_gc(self._root)
 
