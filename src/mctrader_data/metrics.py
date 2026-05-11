@@ -41,3 +41,77 @@ def record_l3_compaction(*, exchange: str, symbol: str, channel: str) -> None:
     compactor_l3_runs_total.labels(
         exchange=exchange, symbol=symbol, channel=channel
     ).inc()
+
+
+compactor_process_rss_bytes = Gauge(
+    "compactor_process_rss_bytes",
+    "Compactor process resident set size (RSS) in bytes",
+)
+
+
+def observe_compactor_rss() -> None:
+    """Sample current RSS via /proc/self/status. Called by metrics_server observer thread.
+
+    Linux production path reads ``/proc/self/status:VmRSS``. macOS/Windows
+    development fallback uses ``resource`` (Unix) or a ``ctypes`` Win32 call.
+    psutil 도입 검토는 Task 7.
+    """
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    kb = int(line.split()[1])
+                    compactor_process_rss_bytes.set(kb * 1024)
+                    return
+    except FileNotFoundError:
+        pass
+
+    # macOS/Linux non-procfs fallback — resource.getrusage
+    try:
+        import resource  # type: ignore[import-not-found]
+
+        rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        compactor_process_rss_bytes.set(rss_kb * 1024)
+        return
+    except ImportError:
+        pass
+
+    # Windows fallback — ctypes GetProcessMemoryInfo (psapi)
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _PMC(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+            ]
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        psapi = ctypes.windll.psapi  # type: ignore[attr-defined]
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        psapi.GetProcessMemoryInfo.argtypes = [
+            wintypes.HANDLE, ctypes.POINTER(_PMC), wintypes.DWORD
+        ]
+        psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+
+        counters = _PMC()
+        counters.cb = ctypes.sizeof(_PMC)
+        if psapi.GetProcessMemoryInfo(
+            kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb
+        ):
+            compactor_process_rss_bytes.set(counters.WorkingSetSize)
+            return
+    except Exception:
+        pass
+
+    # Last-resort sentinel so /metrics still emits a sample point.
+    compactor_process_rss_bytes.set(0)

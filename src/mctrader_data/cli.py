@@ -597,12 +597,20 @@ def compact_cmd(root: str, once: bool, log_level: str) -> None:
     import asyncio
     import logging
     from pathlib import Path
+    from mctrader_data.compactor.metrics_server import start_metrics_server
     from mctrader_data.compactor.runner import CompactorRunner
 
     logging.basicConfig(
         level=getattr(logging, log_level),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+
+    # MCT-134 — bootstrap /metrics HTTP endpoint (RSS gauge for now; Task 7 will
+    # add the remaining 4 metric series). Skip in --once mode (one-shot CLI runs
+    # have no scrape window). Port via env: MCTRADER_COMPACTOR_METRICS_PORT.
+    if not once:
+        metrics_port = int(os.environ.get("MCTRADER_COMPACTOR_METRICS_PORT", "8080"))
+        start_metrics_server(port=metrics_port)
 
     async def _run() -> None:
         runner = CompactorRunner(Path(root))
