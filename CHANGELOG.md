@@ -4,6 +4,35 @@ All notable changes to mctrader-data are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [MCT-137] Aggregation Core Lib — 4 bar 알고리즘 + immutable contract metadata
+
+### Added (Epic MCT-112 Story-3, ADR-025)
+
+Pure-Python aggregation core (`mctrader_data.aggregation`) that the Hot
+(asyncio) and Cold (DuckDB) paths import directly — SSOT for the 4 information
+bar algorithms.
+
+- `TimeBarAggregator(timeframe)` — fixed wall-clock `[start, end)` window bar.
+- `VolumeBarAggregator(threshold)` — cumulative base-volume threshold bar.
+- `TickBarAggregator(threshold)` — fixed trade-count threshold bar.
+- `DollarBarAggregator(threshold)` — cumulative notional (KRW) threshold bar.
+- `ContractMetadata` — `frozen=True` dataclass + cached SHA256 contract_id
+  (16-hex prefix); version field participates in the hash for ADR-008 SemVer
+  rollouts (`info_bar.v1` → `v2` never collides).
+- `to_scaled` / `from_scaled` — KRW scaled-integer boundary helpers; reject
+  silent precision loss at the entry boundary.
+
+### Contract guarantees
+
+- Tie-breaking SSOT (`tie_breaking="current_tick"`): cumulative metric `==`
+  threshold closes the bar **on the triggering tick**.
+- Input boundary: `mctrader_market.schemas.tick.TickRowV1_1`.
+- Output boundary: `mctrader_market.protocols.information_bar.InformationBarModel`
+  (Pydantic v2 frozen).
+- Determinism: no random, no threading, no wall-clock reads. 1µs ts_close
+  advance applied only when a single-tick bar would violate ADR-009 §D15
+  `ts_close > genesis_ts` strict inequality.
+
 ## [MCT-106] Zero-loss ingestion pipeline — WAL + tiered compaction
 
 ### Breaking behavior change (Phase C, `mctrader-data collect`)
