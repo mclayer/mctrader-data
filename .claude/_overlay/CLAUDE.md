@@ -39,11 +39,11 @@
 codeforge plugin 최신 버전 (hub `mctrader-hub/.claude/_overlay/CLAUDE.md` mirror — 자세한 carrier 링크는 hub 참조):
 
 ```
-codeforge@mclayer               # 5.14.0 — CFP-411 Requirements lane multi-round debate / CFP-389 evidence-enforceable framework + hotfix-bypass:* label / CFP-391 debate-protocol-v1 + auto_on_divergence / CFP-387 ADR-058 is_transitional frontmatter
-codeforge-requirements@mclayer  # 0.5.0 — codex-proactive-check worker (dispatch_mode: auto_on_divergence) + semantic divergence 3 criteria
-codeforge-design@mclayer        # 0.7.0 — templates/adr.md is_transitional frontmatter + ## 해소 기준 섹션 schema
-codeforge-develop@mclayer       # 0.5.0 — maintenance scripts; consumer-breaking 없음
-codeforge-test@mclayer          # 1.1.1 (REVIVED) — test-verdict-v2.1 (Epic-level); IntegrationTestAgent active; TestAgent/StatefulTestAgent deprecated
+codeforge@mclayer               # 5.23.0 — CFP-423 Python script-writing convention / CFP-436 marketplace/plugin.json atomic invariant / CFP-455 evidence-check-registry v1.1 current_tier / CFP-445/449 decision-principle lint / CFP-448/490 selective Sonnet rollback + lane-evidence guard
+codeforge-requirements@mclayer  # 0.5.1 — codex-proactive-check worker + semantic divergence 3 criteria; CFP-448 ChangeImpactAgent Opus→Sonnet rollback
+codeforge-design@mclayer        # 0.8.0 — ADR template is_transitional + 해소 기준 schema; CFP-448 CodebaseMapperAgent/RefactorAgent Opus→Sonnet rollback + mandate boundary text
+codeforge-develop@mclayer       # 0.5.1 — CFP-448 DeveloperPLAgent Opus→Sonnet rollback (ADR-042 Amendment 5 §결정 1 (b))
+codeforge-test@mclayer          # 1.1.1 (REVIVED) — test-verdict-v2.2 story_keys[] + attribution_confidence; IntegrationTestAgent active; TestAgent/StatefulTestAgent deprecated
 codeforge-review@mclayer        # 1.3.0 — review-pl-base §3.0~§3.3 debate-protocol-v1 dispatch SOP + review-verdict v4.1 (findings[].anchor_id)
 codeforge-pmo@mclayer           # 0.1.0
 ```
@@ -58,11 +58,13 @@ DesignReview / Requirements lane 진입 시 divergence 감지되면 자동 multi
 
 ### Story workflow phase (MCT-129, 2026-05-11)
 
-요구사항 → 설계 → 설계-리뷰 → 구현 → 구현-리뷰 → CI 테스트 (ADR-048) → **통합테스트 (IntegrationTestAgent, ADR-055, §8.6, test-verdict-v2.1, Epic-level CFP-371)** → 보안-테스트 → 완료 → PMO 회고 (의무)
+요구사항 → 설계 → 설계-리뷰 → 구현 → 구현-리뷰 → CI 테스트 (ADR-048) → **통합테스트 (IntegrationTestAgent, ADR-055, §8.6, test-verdict-v2.2, Epic-level CFP-371/CFP-373)** → 보안-테스트 → 완료 → PMO 회고 (의무)
 
-### Agent model tier (ADR-042 Amendment 2, 2026-05-11)
+### Agent model tier (ADR-042 Amendments 2/5 — 2026-05-10/12)
 
 InfraEngineerAgent·QADeveloperAgent·DataEngineerAgent = `claude-haiku-4-5` (기계적 패턴 실행 카테고리).
+CodebaseMapperAgent·RefactorAgent·ChangeImpactAgent·DeveloperPLAgent = `claude-sonnet-4-6` selective rollback (ADR-057 Amendment 3 / ADR-042 Amendment 5, CFP-448 — 4 agent 실측 정합).
+FeasibilityAgent·ContinuityAgent = `claude-opus-4-7` 유지.
 나머지 모든 agent = Sonnet 이상.
 
 ### Plugin 업그레이드 체크리스트
