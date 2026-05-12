@@ -619,6 +619,99 @@ class TestTotalBytesIncludesQuarantinedByDefault:
         )
 
 
+class TestHardFloorUnconditionalGuard:
+    """P1-NEW-2 FIX#1(code-review): hard_floor check 가 threshold_breached 와 직교 (unconditional Stage 1).
+
+    §6.2.2 Change Plan FIX#4 박제:
+    Stage 1 (unconditional): pending + quarantined >= hard_floor → hard_floor_blocked
+      → threshold_breached 여부와 무관하게 진입 직후 첫 단계에서 발동
+    Stage 2 (conditional): threshold_breached → oldest pending → quarantined 강등
+
+    버그 시나리오: pending=5000 + quarantined=5000, max_segments=10000, hard_floor=10000
+    - threshold_breached: pending(5000) < max_segments(10000) → False → Stage 1 skip!
+    - 하지만 pending + quarantined = 10000 = hard_floor → 반드시 hard_floor_blocked 이어야 함
+    """
+
+    def test_hard_floor_unconditional_guard_quarantined_heavy(self, queue_path: Path) -> None:
+        """hard_floor unconditional check 가 quarantined-heavy state 에서도 발동.
+
+        Setup:
+        - pending = 5 / quarantined = 5 / max_segments = 10 / hard_floor = 10
+        - threshold_breached (max_segments): pending(5) < max_segments(10) → False (미발동)
+        - 하지만 pending + quarantined = 10 = hard_floor 도달
+
+        Action:
+        - 신규 segment enqueue 시도
+
+        Expect:
+        - EnqueueResult.status == "hard_floor_blocked"
+        - segment 영속화 0 (sqlite row count 변화 0)
+        - write 0 보장 (RPO=0: caller source retain 의무)
+        """
+        # max_segments=10 → pending=5 < 10 이므로 threshold_breached = False (max_segments 기준)
+        # hard_floor=10 → pending(5) + quarantined(5) = 10 = hard_floor → blocked 여야 함
+        q = RetryQueue(path=queue_path, max_segments=10, max_bytes=10 * 1024**3, hard_floor=10)
+
+        # pending 5개 enqueue
+        for i in range(5):
+            data = f"pending-{i}".encode()
+            q.enqueue(
+                key=f"pending-{i}.parquet",
+                data=data,
+                sha256=hashlib.sha256(data).hexdigest(),
+            )
+
+        assert q.depth(include_quarantined=False) == 5, "pending 5개 확인"
+
+        # 5개를 quarantined 로 직접 전환 (DB 직접 조작)
+        db_path = queue_path / "retry_queue.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "UPDATE retry_queue SET state='quarantined' WHERE id IN "
+            "(SELECT id FROM retry_queue WHERE state='pending' ORDER BY enqueue_ts LIMIT 5)"
+        )
+        conn.commit()
+        conn.close()
+
+        # 검증: pending=0, quarantined=5 → total=5 이지만 추가 pending 5개 enqueue
+        for i in range(5, 10):
+            data = f"new-pending-{i}".encode()
+            q.enqueue(
+                key=f"new-pending-{i}.parquet",
+                data=data,
+                sha256=hashlib.sha256(data).hexdigest(),
+            )
+
+        # 현재 상태: pending=5, quarantined=5, total=10 = hard_floor
+        assert q.depth(include_quarantined=True) == 10, "pending(5) + quarantined(5) = 10 확인"
+        assert q.depth(include_quarantined=False) == 5, "pending 5개 확인"
+
+        # 기록: threshold_breached = pending(5) >= max_segments(10)? → False
+        # 따라서 FIX#3 impl (conditional hard_floor) 은 Stage 1 skip → 신규 enqueue 허용 (BUG)
+        initial_total = q.depth(include_quarantined=True)
+        assert initial_total == 10
+
+        # Action: 신규 segment enqueue 시도
+        new_data = b"trigger-hard-floor"
+        result = q.enqueue(
+            key="trigger/hard-floor.parquet",
+            data=new_data,
+            sha256=hashlib.sha256(new_data).hexdigest(),
+        )
+
+        # Expect: hard_floor_blocked (unconditional Stage 1 발동)
+        assert result.status == "hard_floor_blocked", (
+            f"Expected 'hard_floor_blocked' (unconditional Stage 1). "
+            f"Got '{result.status}'. "
+            f"BUG: threshold_breached=False 이면 hard_floor check skip 되어 enqueue 허용됨."
+        )
+
+        # write 0 검증: total depth 변화 없음
+        assert q.depth(include_quarantined=True) == 10, (
+            f"hard_floor_blocked 시 write 0 의무: depth={q.depth(include_quarantined=True)}, expected 10"
+        )
+
+
 class TestSOPThresholdUsesQuarantinedTotal:
     """P1-NEW-1 FIX#3: SOP threshold check 가 pending + quarantined 합산 기준으로 트리거.
 

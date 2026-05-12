@@ -171,11 +171,20 @@ class RetryQueue:
     def enqueue(self, key: str, data: bytes | Path, sha256: str) -> EnqueueResult:
         """Append segment to backlog.
 
-        FIX#2 RPO=0 Option A semantics:
-        - threshold (max_segments OR max_bytes) 도달 시 oldest pending → quarantined 강등
-          + 신규 pending enqueue (drop 0)
-        - hard floor (pending + quarantined > hard_floor) → status='hard_floor_blocked'
-        - RPO=0 invariant: drop 0
+        §6.2.2 Stage 1+2 직교 설계 (FIX#4 박제):
+
+        Stage 1 (unconditional hard_floor guard — threshold_breached 외부, 진입 직후 첫 단계):
+            pending + quarantined >= hard_floor → hard_floor_blocked
+            write 0 + caller source retain 의무 (RPO=0 보존)
+
+        Stage 2 (conditional threshold demotion — Stage 1 통과 후):
+            threshold (max_segments OR max_bytes) 도달 시 oldest pending → quarantined 강등
+            + 신규 segment pending enqueue (drop 0)
+
+        불변식:
+        - pending + quarantined <= hard_floor (Stage 1 보장)
+        - Drop 0 (Stage 1 = write 0 / Stage 2 = state UPDATE only)
+        - RPO=0: hard_floor_blocked = caller source retain 의무
 
         Returns EnqueueResult(status='ok') on success (including threshold breach with quarantine).
         Returns EnqueueResult(status='hard_floor_blocked') on hard floor breach.
@@ -191,7 +200,22 @@ class RetryQueue:
             payload_bytes = len(data)
 
         with self._lock:
-            # threshold check (enqueue 전)
+            # Stage 1 (unconditional): hard_floor check — threshold_breached 와 무관하게 첫 단계
+            total_row = self._conn.execute(
+                "SELECT COUNT(*) FROM retry_queue WHERE state IN ('pending', 'quarantined')"
+            ).fetchone()
+            total_active = int(total_row[0]) if total_row else 0
+
+            if total_active >= self.hard_floor:
+                # hard floor 도달 → MANUAL_GATE escalate (caller 재시도 의무, write 0)
+                log.critical(
+                    "[retry_queue] HARD FLOOR BLOCKED: pending+quarantined=%d >= hard_floor=%d "
+                    "— MANUAL_GATE escalate required. key=%s",
+                    total_active, self.hard_floor, key,
+                )
+                return EnqueueResult(status="hard_floor_blocked")
+
+            # Stage 2 (conditional): threshold check (enqueue 전)
             row = self._conn.execute(
                 "SELECT COUNT(*), COALESCE(SUM(payload_bytes), 0) FROM retry_queue WHERE state='pending'"
             ).fetchone()
@@ -204,21 +228,6 @@ class RetryQueue:
             )
 
             if threshold_breached:
-                # hard floor check: pending + quarantined 합계
-                total_row = self._conn.execute(
-                    "SELECT COUNT(*) FROM retry_queue WHERE state IN ('pending', 'quarantined')"
-                ).fetchone()
-                total_active = int(total_row[0]) if total_row else 0
-
-                if total_active >= self.hard_floor:
-                    # hard floor 초과 → MANUAL_GATE escalate (caller 재시도 의무)
-                    log.critical(
-                        "[retry_queue] HARD FLOOR BLOCKED: pending+quarantined=%d >= hard_floor=%d "
-                        "— MANUAL_GATE escalate required. key=%s",
-                        total_active, self.hard_floor, key,
-                    )
-                    return EnqueueResult(status="hard_floor_blocked")
-
                 # threshold breach — oldest pending → quarantined + 신규 segment pending enqueue
                 log.warning(
                     "[retry_queue] threshold breach: segments=%d/%d bytes=%d/%d"
