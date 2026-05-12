@@ -10,11 +10,16 @@ Test Contract §8 (TestContractArchitectAgent):
 - test_endpoint_unreachable_returns_queued_no_raise: NAS unreachable 시 raise 0 (ADR-027 D5 invariant)
 - test_idempotent_skip_on_match: same key + same sha256 → skip (PutResult status="skipped_idempotent")
 - test_conflict_raise_on_mismatch: sha256 mismatch → ConditionalWriteConflict raise
+
+FIX#2 추가:
+- P1-3: threading.Lock _get_client() concurrent init guard
+- P2-2: ETag fallback false-positive — Metadata sha256 absent → overwrite (not false-skip)
 """
 from __future__ import annotations
 
 import hashlib
 import logging
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -195,3 +200,156 @@ class TestPutFailurePropagatesRetryQueue:
                 uploader.put(key="test/no-raise.bin", data=data, sha256=sha256)
             except Exception as exc:
                 pytest.fail(f"put() raised unexpectedly: {exc!r}")
+
+
+class TestThreadingLockGetClient:
+    """P1-3 FIX#2: _get_client() threading.Lock — concurrent init guard.
+
+    double-checked locking: lock 진입 후 다시 None check.
+    단일 boto3 client 인스턴스 보장 (concurrent 호출 시).
+    """
+
+    def test_get_client_returns_same_instance(self, uploader: NASUploader) -> None:
+        """_get_client() lazy init — 동일 인스턴스 반환 (non-concurrent path)."""
+        with patch("boto3.client") as mock_boto3_client:
+            mock_client = MagicMock()
+            mock_boto3_client.return_value = mock_client
+
+            c1 = uploader._get_client()
+            c2 = uploader._get_client()
+
+        assert c1 is c2, "_get_client() must return same instance (lazy init)"
+        assert mock_boto3_client.call_count == 1, "boto3.client must be called only once"
+
+    def test_get_client_concurrent_single_init(self, uploader: NASUploader) -> None:
+        """concurrent _get_client() 호출 — boto3.client 단 1회 init (race condition 없음)."""
+        init_count = []
+        original_client = None
+
+        with patch("boto3.client") as mock_boto3_client:
+            def track_init(*args, **kwargs):
+                init_count.append(1)
+                return MagicMock()
+
+            mock_boto3_client.side_effect = track_init
+
+            results = []
+            errors = []
+
+            def call_get_client():
+                try:
+                    results.append(uploader._get_client())
+                except Exception as e:
+                    errors.append(e)
+
+            threads = [threading.Thread(target=call_get_client) for _ in range(10)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+        assert not errors, f"Thread errors: {errors}"
+        # threading.Lock double-checked: boto3.client 은 1회만 호출
+        assert len(init_count) == 1, (
+            f"boto3.client called {len(init_count)} times — "
+            "threading.Lock double-checked locking 미적용 의심"
+        )
+        # 모든 thread 가 동일 인스턴스를 받음
+        assert len(set(id(r) for r in results)) == 1, (
+            "All threads must receive the same client instance"
+        )
+
+    def test_client_lock_exists(self, uploader: NASUploader) -> None:
+        """NASUploader 에 _client_lock (threading.Lock) attribute 존재 확인."""
+        assert hasattr(uploader, "_client_lock"), (
+            "NASUploader must have _client_lock attribute (threading.Lock)"
+        )
+        import threading as _threading
+        assert isinstance(uploader._client_lock, type(_threading.Lock())), (
+            "_client_lock must be a threading.Lock instance"
+        )
+
+
+class TestETagFallbackFalsePositive:
+    """P2-2 FIX#2: ETag fallback false-positive 방지.
+
+    HEAD response Metadata sha256 부재 (외부 PUT 또는 legacy 객체) 시:
+    - log warning (object_key, 'metadata sha256 absent — overwrite' 박제)
+    - skip ETag 비교 → PUT (idempotency 차단 + log 명시)
+    - 기존 self-PUT 객체 (Metadata sha256 첨부) 는 정상 ETag 비교 path 유지
+    """
+
+    def test_metadata_absent_triggers_overwrite(self, uploader: NASUploader) -> None:
+        """HEAD 200 + Metadata sha256 없음 → ETag 비교 skip → PUT (overwrite path)."""
+        data = b"external-put-object"
+        sha256 = hashlib.sha256(data).hexdigest()
+
+        with patch.object(uploader, "_get_client") as mock_client_factory:
+            client = MagicMock()
+            mock_client_factory.return_value = client
+
+            # Metadata 에 sha256 없음 (외부 PUT / legacy 객체)
+            # ETag 도 sha256 과 다른 값 (S3 multipart ETag 형태)
+            client.head_object.return_value = {
+                "ETag": '"abc123-5"',  # multipart ETag — sha256 아님
+                "Metadata": {},  # sha256 absent
+                "ContentLength": len(data),
+            }
+            client.put_object.return_value = {"ETag": f'"{sha256[:16]}"'}
+
+            result = uploader.put(key="legacy/object.bin", data=data, sha256=sha256)
+
+        # Metadata sha256 absent → ETag 비교 skip → PUT 수행
+        assert result.status == "uploaded", (
+            f"Metadata absent: PUT (overwrite) 수행 필요. got status='{result.status}'"
+        )
+        assert client.put_object.called, "Metadata absent: put_object 호출 필요"
+
+    def test_metadata_absent_logs_warning(
+        self, uploader: NASUploader, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """HEAD 200 + Metadata sha256 없음 → 'metadata sha256 absent' warning log 박제."""
+        data = b"legacy-object-data"
+        sha256 = hashlib.sha256(data).hexdigest()
+
+        with caplog.at_level(logging.WARNING, logger="mctrader_data.nas_storage.nas_uploader"):
+            with patch.object(uploader, "_get_client") as mock_client_factory:
+                client = MagicMock()
+                mock_client_factory.return_value = client
+
+                client.head_object.return_value = {
+                    "ETag": '"multipart-etag-no-sha256"',
+                    "Metadata": {},
+                    "ContentLength": len(data),
+                }
+                client.put_object.return_value = {"ETag": f'"{sha256[:16]}"'}
+
+                uploader.put(key="legacy/warn-test.bin", data=data, sha256=sha256)
+
+        full_log = " ".join(caplog.messages)
+        assert "absent" in full_log.lower() or "overwrite" in full_log.lower(), (
+            "Metadata absent 시 warning log 에 'absent' 또는 'overwrite' 포함 필요"
+        )
+
+    def test_metadata_present_uses_normal_etag_path(self, uploader: NASUploader) -> None:
+        """HEAD 200 + Metadata sha256 있음 → 정상 ETag 비교 path (기존 동작 유지)."""
+        data = b"self-put-object"
+        sha256 = hashlib.sha256(data).hexdigest()
+
+        with patch.object(uploader, "_get_client") as mock_client_factory:
+            client = MagicMock()
+            mock_client_factory.return_value = client
+
+            # Metadata sha256 = 일치 → skip (기존 동작)
+            client.head_object.return_value = {
+                "ETag": f'"{sha256}"',
+                "Metadata": {"sha256": sha256},
+                "ContentLength": len(data),
+            }
+
+            result = uploader.put(key="self-put/object.bin", data=data, sha256=sha256)
+
+        assert result.status == "skipped_idempotent", (
+            "Metadata sha256 present + match → skip (기존 동작 유지)"
+        )
+        assert not client.put_object.called

@@ -10,6 +10,9 @@ Test Contract §8 (TestContractArchitectAgent):
 
 AC-3: Prometheus metrics 4종 export + IOPS baseline naming.
 NFR-4: metric prefix freeze 의무 — Phase 2 PR merge 시점 freeze.
+
+FIX#2 추가:
+- P1-1: nas_uploader_queue_bytes Gauge — queue_bytes export + 10GB alert 정합
 """
 from __future__ import annotations
 
@@ -128,6 +131,48 @@ class TestLabelCardinality:
         exporter.emit_head(bucket="mctrader-market", latency_s=0.05)
 
 
+class TestQueueBytesGauge:
+    """P1-1 FIX#2: nas_uploader_queue_bytes Gauge — 10GB alert 정합.
+
+    §6.2.3 FIX#2: 신규 metric nas_uploader_queue_bytes (Gauge, label=queue_path).
+    Prometheus rule: nas_uploader_queue_bytes > 10737418240 → NASUploaderBacklogBytesHigh.
+    """
+
+    def test_queue_bytes_gauge_exported(
+        self, exporter: PrometheusExporter, registry: CollectorRegistry
+    ) -> None:
+        """nas_uploader_queue_bytes Gauge — set_queue_bytes() 호출 시 값 export."""
+        exporter.set_queue_bytes(queue_path="/data/retry_queue", bytes_total=1_000_000)
+
+        metric = _get_metric(registry, "nas_uploader_queue_bytes")
+        assert metric is not None, "nas_uploader_queue_bytes Gauge 미등록"
+        value = _get_gauge_value(metric, {"queue_path": "/data/retry_queue"})
+        assert value == 1_000_000.0
+
+    def test_queue_bytes_gauge_updates(
+        self, exporter: PrometheusExporter, registry: CollectorRegistry
+    ) -> None:
+        """nas_uploader_queue_bytes Gauge — 여러 번 set 시 마지막 값 반영."""
+        exporter.set_queue_bytes(queue_path="/data/retry_queue", bytes_total=5 * 1024**3)
+        exporter.set_queue_bytes(queue_path="/data/retry_queue", bytes_total=0)
+
+        metric = _get_metric(registry, "nas_uploader_queue_bytes")
+        value = _get_gauge_value(metric, {"queue_path": "/data/retry_queue"})
+        assert value == 0.0
+
+    def test_queue_bytes_label_queue_path(
+        self, exporter: PrometheusExporter, registry: CollectorRegistry
+    ) -> None:
+        """nas_uploader_queue_bytes label = queue_path (AC-4 wording 정합)."""
+        exporter.set_queue_bytes(queue_path="/nas/queue", bytes_total=10 * 1024**3)
+
+        metric = _get_metric(registry, "nas_uploader_queue_bytes")
+        assert metric is not None
+        labels_found = [s.labels for s in metric.samples if "queue_path" in s.labels]
+        assert labels_found, "queue_path label 미발견"
+        assert labels_found[0]["queue_path"] == "/nas/queue"
+
+
 class TestMetricPrefixFreeze:
     """§8.2 invariant: metric prefix freeze — nas_uploader_* namespace. NFR-4."""
 
@@ -136,6 +181,7 @@ class TestMetricPrefixFreeze:
         "nas_uploader_fail_count",
         "nas_uploader_latency_seconds",
         "nas_uploader_queue_depth",
+        "nas_uploader_queue_bytes",
     ]
 
     FORBIDDEN_PREFIX = "nas_invariant_"  # MCT-151 invariant harness prefix (disjoint 의무)
@@ -143,11 +189,12 @@ class TestMetricPrefixFreeze:
     def test_all_metrics_use_nas_uploader_prefix(
         self, registry: CollectorRegistry, exporter: PrometheusExporter
     ) -> None:
-        """모든 4종 metric 이 nas_uploader_* prefix 사용. §8.2 박제 + NFR-4."""
+        """모든 5종 metric 이 nas_uploader_* prefix 사용. §8.2 박제 + NFR-4."""
         exporter.emit_success(bucket="b", latency_s=0.1)
         exporter.emit_fail(bucket="b", reason="unknown", latency_s=0.1)
         exporter.emit_head(bucket="b", latency_s=0.05)
         exporter.set_queue_depth(queue_path="/q", depth=0)
+        exporter.set_queue_bytes(queue_path="/q", bytes_total=0)
 
         registered_names = _get_all_metric_names(registry)
 
@@ -163,6 +210,7 @@ class TestMetricPrefixFreeze:
         """nas_invariant_* prefix 사용 0 (MCT-151 namespace conflict 방지). NFR-4."""
         exporter.emit_success(bucket="b", latency_s=0.1)
         exporter.set_queue_depth(queue_path="/q", depth=0)
+        exporter.set_queue_bytes(queue_path="/q", bytes_total=0)
 
         registered_names = _get_all_metric_names(registry)
         conflicting = [n for n in registered_names if n.startswith(self.FORBIDDEN_PREFIX)]
@@ -178,6 +226,7 @@ class TestMetricPrefixFreeze:
         exporter.emit_fail(bucket="b", reason="unknown", latency_s=0.1)
         exporter.emit_head(bucket="b", latency_s=0.05)
         exporter.set_queue_depth(queue_path="/q", depth=0)
+        exporter.set_queue_bytes(queue_path="/q", bytes_total=0)
 
         registered_names = _get_all_metric_names(registry)
         nas_uploader_metrics = {n for n in registered_names if n.startswith("nas_uploader_")}

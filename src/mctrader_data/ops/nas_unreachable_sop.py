@@ -79,7 +79,10 @@ class NASUnreachableSOPRunner:
 
         self._state = SOPState.AUTO_RESUME
         self._unreachable_since: float | None = None  # monotonic timestamp
-        self._grace_extended = False  # ADR-017 7d grace 신호 emit 여부
+        self._grace_extended = False  # ADR-017 7d grace 신호 emit 여부 (idempotent guard)
+        # P2-3 FIX#2: grace_extension_id monotonic counter — idempotent emit semantics
+        # consumer (MCT-152 dual_write_window_runner) 측 dedup 의무 박제
+        self._grace_extension_id: int = 0
 
     def _ping_nas(self) -> bool:
         """NAS HEAD ping — 응답 성공 시 True, 실패 시 False."""
@@ -115,15 +118,25 @@ class NASUnreachableSOPRunner:
         return False
 
     def _emit_grace_extension(self) -> None:
-        """ADR-017 archive failure 7d grace tie-in — 신호 emit.
+        """ADR-017 archive failure 7d grace tie-in — 신호 emit (idempotent).
 
-        MCT-152 dual_write_window_runner 가 consume.
-        본 Story scope: emit only (실제 grace extension logic = MCT-152 scope).
+        P2-3 FIX#2 idempotent emit semantics:
+        - grace_extension_id monotonic counter: emit 마다 increment + signal 에 id 포함
+        - consumer (MCT-152 dual_write_window_runner) 측 id 기반 dedup 의무 박제
+        - 본 Story scope: emit 측 idempotent semantics 만 보장
+          (실제 grace extension logic = MCT-152 scope)
+
+        _grace_extended flag: run_once() 내 1-time emit guard.
+        reset 시 (NAS recovered) _grace_extended=False 로 초기화 → 다음 unreachable 시 재 emit.
+        grace_extension_id 는 단조 증가 (reset 없음 — monotonic counter).
         """
         if not self._grace_extended:
+            self._grace_extension_id += 1
             log.warning(
                 "[sop] ADR-017 archive failure 7d grace extension signal emitted"
-                " — WAL grace extended (MCT-152 dual_write_window_runner consume)"
+                " grace_extension_id=%d"
+                " — WAL grace extended (MCT-152 dual_write_window_runner consume, dedup by id)",
+                self._grace_extension_id,
             )
             self._grace_extended = True
 

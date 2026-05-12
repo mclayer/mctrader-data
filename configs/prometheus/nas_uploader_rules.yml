@@ -22,6 +22,25 @@ groups:
     rules:
       # ─── Queue Depth threshold alerts (S10 박제: 1000seg / 10GB) ───────────
 
+      # ─── Queue Bytes threshold alert (P1-1 FIX#2: 10GB threshold) ───────────
+
+      - alert: NASUploaderBacklogBytesHigh
+        expr: nas_uploader_queue_bytes > 10737418240
+        for: 5m  # EC-6: false-positive 방어 cooldown 박제
+        labels:
+          severity: warning
+          component: cold-tier
+          story: MCT-150
+        annotations:
+          summary: "NAS uploader retry queue bytes > 10GB"
+          description: |
+            Retry queue backlog has exceeded 10GB for {{ $labels.queue_path }}.
+            Current bytes: {{ $value | humanizeBytes }}.
+            ADR-027 D5 threshold (S10 10GB) — NAS unreachable SOP auto-resume mode active.
+            AC-4 wording: NASUploaderBacklogBytesHigh OR NASUploaderQueueDepthHigh.
+            Grafana dashboard: mctrader/Cold Writer Health.
+          runbook_url: "docs/runbooks/nas-minio-secret-rotation.md#step-7"
+
       - alert: NASUploaderQueueDepthHigh
         expr: nas_uploader_queue_depth > 1000
         for: 5m  # EC-6: false-positive 방어 cooldown 박제
