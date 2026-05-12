@@ -258,7 +258,7 @@ class RetryQueue:
                 # ThrottlingException → exponential backoff
                 is_throttle = (
                     isinstance(exc, ClientError)
-                    and exc.response.get("Error", {}).get("Code") in ("SlowDown", "ThrottlingException")
+                    and exc.response.get("Error", {}).get("Code") in ("SlowDown", "ThrottlingException")  # type: ignore[union-attr]
                 )
                 if is_throttle:
                     sleep_time = min(backoff, 60.0)
