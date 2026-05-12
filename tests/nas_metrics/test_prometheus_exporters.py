@@ -248,9 +248,8 @@ def _get_metric(registry: CollectorRegistry, name: str):
 
 def _get_counter_value(metric, labels: dict) -> float:
     for sample in metric.samples:
-        if all(sample.labels.get(k) == v for k, v in labels.items()):
-            if sample.name.endswith("_total"):
-                return sample.value
+        if all(sample.labels.get(k) == v for k, v in labels.items()) and sample.name.endswith("_total"):
+            return sample.value
     for sample in metric.samples:
         if all(sample.labels.get(k) == v for k, v in labels.items()):
             return sample.value

@@ -28,7 +28,6 @@ import pytest
 from mctrader_data.nas_storage.nas_uploader import (
     ConditionalWriteConflict,
     NASUploader,
-    PutResult,
 )
 from mctrader_data.nas_storage.retry_queue import RetryQueue
 
@@ -136,18 +135,20 @@ class TestLogRedactsCredentials:
         data = b"payload"
         sha256 = hashlib.sha256(data).hexdigest()
 
-        with caplog.at_level(logging.DEBUG, logger="mctrader_data.nas_storage.nas_uploader"):
-            with patch.object(uploader, "_get_client") as mock_client_factory:
-                client = MagicMock()
-                mock_client_factory.return_value = client
+        with (
+            caplog.at_level(logging.DEBUG, logger="mctrader_data.nas_storage.nas_uploader"),
+            patch.object(uploader, "_get_client") as mock_client_factory,
+        ):
+            client = MagicMock()
+            mock_client_factory.return_value = client
 
-                from botocore.exceptions import ClientError
-                client.head_object.side_effect = ClientError(
-                    {"Error": {"Code": "404", "Message": "Not Found"}}, "HeadObject"
-                )
-                client.put_object.return_value = {"ETag": f'"{sha256[:16]}"'}
+            from botocore.exceptions import ClientError
+            client.head_object.side_effect = ClientError(
+                {"Error": {"Code": "404", "Message": "Not Found"}}, "HeadObject"
+            )
+            client.put_object.return_value = {"ETag": f'"{sha256[:16]}"'}
 
-                uploader.put(key="test/cred-test.bin", data=data, sha256=sha256)
+            uploader.put(key="test/cred-test.bin", data=data, sha256=sha256)
 
         full_log = "\n".join(caplog.messages)
         assert access_key not in full_log, "access_key must not appear in logs"
@@ -224,7 +225,6 @@ class TestThreadingLockGetClient:
     def test_get_client_concurrent_single_init(self, uploader: NASUploader) -> None:
         """concurrent _get_client() 호출 — boto3.client 단 1회 init (race condition 없음)."""
         init_count = []
-        original_client = None
 
         with patch("boto3.client") as mock_boto3_client:
             def track_init(*args, **kwargs):
@@ -255,7 +255,7 @@ class TestThreadingLockGetClient:
             "threading.Lock double-checked locking 미적용 의심"
         )
         # 모든 thread 가 동일 인스턴스를 받음
-        assert len(set(id(r) for r in results)) == 1, (
+        assert len({id(r) for r in results}) == 1, (
             "All threads must receive the same client instance"
         )
 
@@ -312,19 +312,21 @@ class TestETagFallbackFalsePositive:
         data = b"legacy-object-data"
         sha256 = hashlib.sha256(data).hexdigest()
 
-        with caplog.at_level(logging.WARNING, logger="mctrader_data.nas_storage.nas_uploader"):
-            with patch.object(uploader, "_get_client") as mock_client_factory:
-                client = MagicMock()
-                mock_client_factory.return_value = client
+        with (
+            caplog.at_level(logging.WARNING, logger="mctrader_data.nas_storage.nas_uploader"),
+            patch.object(uploader, "_get_client") as mock_client_factory,
+        ):
+            client = MagicMock()
+            mock_client_factory.return_value = client
 
-                client.head_object.return_value = {
-                    "ETag": '"multipart-etag-no-sha256"',
-                    "Metadata": {},
-                    "ContentLength": len(data),
-                }
-                client.put_object.return_value = {"ETag": f'"{sha256[:16]}"'}
+            client.head_object.return_value = {
+                "ETag": '"multipart-etag-no-sha256"',
+                "Metadata": {},
+                "ContentLength": len(data),
+            }
+            client.put_object.return_value = {"ETag": f'"{sha256[:16]}"'}
 
-                uploader.put(key="legacy/warn-test.bin", data=data, sha256=sha256)
+            uploader.put(key="legacy/warn-test.bin", data=data, sha256=sha256)
 
         full_log = " ".join(caplog.messages)
         assert "absent" in full_log.lower() or "overwrite" in full_log.lower(), (

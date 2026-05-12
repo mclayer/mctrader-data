@@ -389,7 +389,7 @@ class TestDrainContextAwarePut:
 
     def test_drain_suppress_enqueue_retain_on_queued(self, queue_path: Path) -> None:
         """drain → put(suppress_enqueue=True) → status='queued' → retain (drop 0)."""
-        from mctrader_data.nas_storage.nas_uploader import NASUploader, PutResult
+        from mctrader_data.nas_storage.nas_uploader import NASUploader
 
         q = RetryQueue(path=queue_path)
         data = b"drain-context-aware-payload"
@@ -406,11 +406,12 @@ class TestDrainContextAwarePut:
             retry_queue=None,  # drain 내부에서 suppress_enqueue=True 로 호출하므로 queue 없어도 됨
         )
 
+        from botocore.exceptions import EndpointConnectionError
+
         with patch.object(uploader, "_get_client") as mock_client_factory:
-            from botocore.exceptions import EndpointConnectionError as _ECE
             client = MagicMock()
             mock_client_factory.return_value = client
-            client.head_object.side_effect = _ECE(endpoint_url="http://nas.local:9000")
+            client.head_object.side_effect = EndpointConnectionError(endpoint_url="http://nas.local:9000")
 
             stats = q.drain(uploader)
 
@@ -446,11 +447,12 @@ class TestDrainContextAwarePut:
         assert q.depth() == 5
 
         # boto3 client mock: EndpointConnectionError (NAS unreachable chaos)
+        from botocore.exceptions import EndpointConnectionError
+
         with patch.object(uploader, "_get_client") as mock_client_factory:
-            from botocore.exceptions import EndpointConnectionError as _ECE
             client = MagicMock()
             mock_client_factory.return_value = client
-            client.head_object.side_effect = _ECE(endpoint_url="http://nas.chaos.local:9000")
+            client.head_object.side_effect = EndpointConnectionError(endpoint_url="http://nas.chaos.local:9000")
 
             stats = q.drain(uploader)
 

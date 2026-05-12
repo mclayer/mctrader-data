@@ -8,6 +8,7 @@ NAS_MINIO_* env vars 미설정 시 SKIP (CI 환경 정합).
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -19,7 +20,7 @@ import pytest
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-from mctrader_data.nas_storage.nas_uploader import NASUploader, PutResult
+from mctrader_data.nas_storage.nas_uploader import NASUploader
 from mctrader_data.nas_storage.retry_queue import RetryQueue
 
 NAS_MINIO_ENDPOINT = os.environ.get("NAS_MINIO_ENDPOINT")
@@ -144,10 +145,8 @@ class TestConditionalWriteSmoke:
                 }
                 fallback_confirmed = True
 
-        try:
+        with contextlib.suppress(Exception):
             s3_client.delete_object(Bucket=NAS_MINIO_BUCKET, Key=key)
-        except Exception:
-            pass
 
         _write_evidence({
             "test": "test_minio_release_2025_04_08_conditional_put_supported",
@@ -178,10 +177,10 @@ class TestConditionalWriteSmoke:
         sha256 = hashlib.sha256(data).hexdigest()
         key = f"smoke/latency/{size_label}/test-{int(time.time())}.bin"
 
-        N = 5
+        num_samples = 5
         durations_ms: list[float] = []
 
-        for i in range(N):
+        for i in range(num_samples):
             t0 = time.perf_counter()
             result = nas_uploader.put(key=f"{key}-{i}", data=data, sha256=sha256)
             elapsed_ms = (time.perf_counter() - t0) * 1000
@@ -195,7 +194,7 @@ class TestConditionalWriteSmoke:
         _write_evidence({
             "test": "test_latency_within_baseline",
             "size": size_label,
-            "N": N,
+            "N": num_samples,
             "durations_ms": durations_ms,
             "p99_ms": p99,
             "gate_low_ms": low,

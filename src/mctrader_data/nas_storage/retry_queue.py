@@ -8,7 +8,8 @@ Design decisions (§6.2.2 Change Plan 박제, FIX#2 Option A 갱신):
 - sqlite-WAL mode + atomic transaction (FIX#1 F5 채택: RPO=0 정합, JSON-lines partial write risk 거부)
 - SQL state enum 4종: pending / in_flight / quarantined / succeeded (FIX#2 확장)
 - enqueue contract (FIX#2 RPO=0 Option A):
-  - threshold (max_segments OR max_bytes) 도달 시 oldest pending → quarantined 강등 + 신규 segment pending enqueue (drop 0)
+  - threshold (max_segments OR max_bytes) 도달 시 oldest pending → quarantined 강등
+    + 신규 segment pending enqueue (drop 0)
   - hard floor: pending + quarantined 합 > hard_floor → 신규 enqueue 시 MANUAL_GATE escalate
     (return EnqueueResult(status='hard_floor_blocked')) — collector callee 측 재시도 의무
 - RPO=0 invariant: enqueue 절대 drop 0 (assert)
@@ -158,8 +159,9 @@ class RetryQueue:
         """Append segment to backlog.
 
         FIX#2 RPO=0 Option A semantics:
-        - threshold (max_segments OR max_bytes) 도달 시 oldest pending → quarantined 강등 + 신규 pending enqueue (drop 0)
-        - hard floor (pending + quarantined > hard_floor) → status='hard_floor_blocked' (MANUAL_GATE escalate)
+        - threshold (max_segments OR max_bytes) 도달 시 oldest pending → quarantined 강등
+          + 신규 pending enqueue (drop 0)
+        - hard floor (pending + quarantined > hard_floor) → status='hard_floor_blocked'
         - RPO=0 invariant: drop 0
 
         Returns EnqueueResult(status='ok') on success (including threshold breach with quarantine).
@@ -206,7 +208,8 @@ class RetryQueue:
 
                 # threshold breach — oldest pending → quarantined + 신규 segment pending enqueue
                 log.warning(
-                    "[retry_queue] threshold breach: segments=%d/%d bytes=%d/%d — quarantining oldest (RPO=0 preserved)",
+                    "[retry_queue] threshold breach: segments=%d/%d bytes=%d/%d"
+                    " — quarantining oldest (RPO=0 preserved)",
                     current_count, self.max_segments, current_bytes, self.max_bytes,
                 )
                 self._quarantine_oldest_locked()
@@ -347,7 +350,7 @@ class RetryQueue:
                 "SELECT id, key, sha256, payload_file FROM retry_queue WHERE state='quarantined' ORDER BY enqueue_ts"
             ).fetchall()
 
-        quarantine_backoff_schedule = [60.0, 300.0, 1800.0, 7200.0]
+        # quarantined drain (longer backoff: 1m/5m/30m/2h — future use in retry scheduler)
         for item_id, key, sha256, payload_file in quarantined_rows:
             payload_path = self._payload_dir / payload_file
             if not payload_path.exists():
