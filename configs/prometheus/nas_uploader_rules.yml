@@ -1,0 +1,139 @@
+# nas_uploader_rules.yml — Prometheus alerting rules for NAS MinIO cold tier uploader.
+#
+# Story: MCT-150 (Stage 2 — uploader hardening)
+# Issue: mclayer/mctrader-hub#253
+# ADR: ADR-027 D5 (NAS unreachable failure mode) / S10 (1000seg/10GB threshold)
+#
+# Metrics consumed (nas_uploader_* prefix — NFR-4 freeze, MCT-151 nas_invariant_* disjoint):
+#   - nas_uploader_success_count (Counter)
+#   - nas_uploader_fail_count (Counter, labels: bucket, reason)
+#   - nas_uploader_latency_seconds (Histogram)
+#   - nas_uploader_queue_depth (Gauge)
+#
+# IOPS baseline (node_exporter):
+#   - node_disk_io_time_seconds_total
+#   - node_disk_read_bytes_total
+#   - node_disk_write_bytes_total
+#   (cAdvisor) container_fs_io_time_seconds_total
+
+groups:
+  - name: nas_uploader
+    interval: 30s  # §6.2.4 ping_interval_seconds 정합
+    rules:
+      # ─── Queue Depth threshold alerts (S10 박제: 1000seg / 10GB) ───────────
+
+      # ─── Queue Bytes threshold alert (P1-1 FIX#2: 10GB threshold) ───────────
+
+      - alert: NASUploaderBacklogBytesHigh
+        expr: nas_uploader_queue_bytes > 10737418240
+        for: 5m  # EC-6: false-positive 방어 cooldown 박제
+        labels:
+          severity: warning
+          component: cold-tier
+          story: MCT-150
+        annotations:
+          summary: "NAS uploader retry queue bytes > 10GB"
+          description: |
+            Retry queue backlog has exceeded 10GB for {{ $labels.queue_path }}.
+            Current bytes: {{ $value | humanizeBytes }}.
+            ADR-027 D5 threshold (S10 10GB) — NAS unreachable SOP auto-resume mode active.
+            AC-4 wording: NASUploaderBacklogBytesHigh OR NASUploaderQueueDepthHigh.
+            Grafana dashboard: mctrader/Cold Writer Health.
+          runbook_url: "docs/runbooks/nas-minio-secret-rotation.md#step-7"
+
+      - alert: NASUploaderQueueDepthHigh
+        expr: nas_uploader_queue_depth > 1000
+        for: 5m  # EC-6: false-positive 방어 cooldown 박제
+        labels:
+          severity: warning
+          component: cold-tier
+          story: MCT-150
+        annotations:
+          summary: "NAS uploader retry queue depth > 1000 segments"
+          description: |
+            Retry queue backlog has exceeded 1000 segments for {{ $labels.queue_path }}.
+            Current depth: {{ $value }} segments.
+            ADR-027 D5 threshold — NAS unreachable SOP auto-resume mode active.
+            Grafana dashboard: mctrader/Cold Writer Health.
+          runbook_url: "docs/runbooks/nas-minio-secret-rotation.md#step-7"
+
+      - alert: NASUploaderQueueDepthCritical
+        expr: nas_uploader_queue_depth > 5000
+        for: 5m
+        labels:
+          severity: critical
+          component: cold-tier
+          story: MCT-150
+        annotations:
+          summary: "NAS uploader retry queue depth > 5000 segments — THRESHOLD_BREACHED"
+          description: |
+            Retry queue backlog has exceeded 5000 segments for {{ $labels.queue_path }}.
+            Current depth: {{ $value }} segments.
+            S10 SOP state: THRESHOLD_BREACHED — check NAS reachability.
+            ADR-027 D5: WAL/L1/hot path 무영향 확인 (cold tier isolation).
+          runbook_url: "docs/runbooks/nas-minio-secret-rotation.md#step-7"
+
+      # ─── Failure rate alert ────────────────────────────────────────────────
+
+      - alert: NASUploaderFailRateHigh
+        # fail rate > 1/min (§1 §4.2 design intent)
+        expr: rate(nas_uploader_fail_count_total[5m]) * 60 > 1
+        for: 5m  # EC-6: false-positive cooldown
+        labels:
+          severity: warning
+          component: cold-tier
+          story: MCT-150
+        annotations:
+          summary: "NAS uploader fail rate > 1/min"
+          description: |
+            NAS uploader failure rate is {{ $value | humanize }}/min for bucket {{ $labels.bucket }}.
+            Reason: {{ $labels.reason }}.
+            Check NAS MinIO endpoint reachability (http://NAS_HOST:9000/minio/health/live).
+
+      - alert: NASUploaderEndpointUnreachable
+        expr: rate(nas_uploader_fail_count_total{reason="endpoint_unreachable"}[5m]) * 60 > 0
+        for: 2m
+        labels:
+          severity: critical
+          component: cold-tier
+          story: MCT-150
+        annotations:
+          summary: "NAS MinIO endpoint unreachable — retry queue draining"
+          description: |
+            NAS MinIO endpoint is unreachable (reason=endpoint_unreachable).
+            Retry queue accumulating — ADR-027 D5 SOP activated.
+            SOP state machine: AUTO_RESUME → THRESHOLD_BREACHED (if > 1000 seg) → MANUAL_GATE (if > 24h).
+            ADR-017 archive failure 7d grace extension signal emitted.
+          runbook_url: "docs/runbooks/nas-minio-secret-rotation.md#step-7"
+
+      # ─── Latency alert ────────────────────────────────────────────────────
+
+      - alert: NASUploaderLatencyHigh
+        # p99 > 3s (MCT-148 T2 50MB p99 baseline 상한 기준)
+        expr: histogram_quantile(0.99, rate(nas_uploader_latency_seconds_bucket{operation="put"}[10m])) > 3.0
+        for: 10m
+        labels:
+          severity: warning
+          component: cold-tier
+          story: MCT-150
+        annotations:
+          summary: "NAS uploader PUT p99 latency > 3s"
+          description: |
+            NAS uploader PUT p99 latency is {{ $value | humanizeDuration }} for bucket {{ $labels.bucket }}.
+            MCT-148 T2 baseline: 50MB p99=2870ms. Gate upper bound: 3301ms.
+            Check NAS storage I/O — possible disk congestion.
+
+      # ─── IOPS baseline (node_exporter — S11 pre-baseline) ─────────────────
+      # Recording rules: MCT-152 dual-write during delta 계산 base.
+
+      - record: nas_uploader:node_disk_write_bytes:rate5m
+        expr: rate(node_disk_write_bytes_total[5m])
+        labels:
+          story: MCT-150
+          phase: pre_dualwrite
+
+      - record: nas_uploader:node_disk_io_time:rate5m
+        expr: rate(node_disk_io_time_seconds_total[5m])
+        labels:
+          story: MCT-150
+          phase: pre_dualwrite
