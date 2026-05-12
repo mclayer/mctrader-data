@@ -26,3 +26,6 @@ data/parquet/
 
 # local env files (credentials)
 .env
+
+# spike evidence packs / scratch (MCT-148)
+.tmp/
