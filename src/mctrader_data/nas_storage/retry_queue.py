@@ -143,16 +143,29 @@ class RetryQueue:
         conn.commit()
         return conn
 
-    def _total_bytes(self) -> int:
-        """현재 pending payload bytes 합계 (P1-1 exporter 정기 호출용)."""
-        with self._lock:
-            return self._total_bytes_locked()
+    def _total_bytes(self, include_quarantined: bool = True) -> int:
+        """현재 payload bytes 합계 (P1-NEW-1 FIX#3 갱신).
 
-    def _total_bytes_locked(self) -> int:
-        """lock 이미 보유 시 pending payload bytes 합계."""
-        row = self._conn.execute(
-            "SELECT COALESCE(SUM(payload_bytes), 0) FROM retry_queue WHERE state='pending'"
-        ).fetchone()
+        Args:
+            include_quarantined: True (default) = pending + quarantined bytes 합산
+                                 (actual disk pressure 반영 — quarantined 는 여전히 disk 점유)
+                                 False = pending only (기존 fresh retry candidates 전용)
+        """
+        with self._lock:
+            return self._total_bytes_locked(include_quarantined=include_quarantined)
+
+    def _total_bytes_locked(self, include_quarantined: bool = True) -> int:
+        """lock 이미 보유 시 payload bytes 합계 (P1-NEW-1 FIX#3 갱신).
+
+        Args:
+            include_quarantined: True (default) = state IN ('pending', 'quarantined')
+                                 False = state='pending' only
+        """
+        if include_quarantined:
+            sql = "SELECT COALESCE(SUM(payload_bytes), 0) FROM retry_queue WHERE state IN ('pending', 'quarantined')"
+        else:
+            sql = "SELECT COALESCE(SUM(payload_bytes), 0) FROM retry_queue WHERE state = 'pending'"
+        row = self._conn.execute(sql).fetchone()
         return int(row[0]) if row else 0
 
     def enqueue(self, key: str, data: bytes | Path, sha256: str) -> EnqueueResult:
@@ -243,14 +256,15 @@ class RetryQueue:
                     payload_path.unlink(missing_ok=True)
                 raise
 
+            # P1-NEW-1 FIX#3: depth = pending + quarantined total (actual disk pressure)
             depth = self._conn.execute(
-                "SELECT COUNT(*) FROM retry_queue WHERE state='pending'"
+                "SELECT COUNT(*) FROM retry_queue WHERE state IN ('pending', 'quarantined')"
             ).fetchone()[0]
 
         if self._metrics:
             self._metrics.set_queue_depth(queue_path=str(self.path), depth=depth)
-            # P1-1: queue_bytes Gauge update
-            total_bytes = self._total_bytes()
+            # P1-1 + P1-NEW-1: queue_bytes Gauge update (include_quarantined=True default)
+            total_bytes = self._total_bytes(include_quarantined=True)
             self._metrics.set_queue_bytes(queue_path=str(self.path), bytes_total=total_bytes)
 
         log.info("[retry_queue] enqueued key=%s id=%s bytes=%d", key, item_id, payload_bytes)
@@ -397,12 +411,26 @@ class RetryQueue:
             log.info("[retry_queue] resume_on_startup: %d pending segments found", count)
         return count
 
-    def depth(self) -> int:
-        """Current backlog segment count (pending only)."""
+    def depth(self, include_quarantined: bool = True) -> int:
+        """Current backlog segment count (P1-NEW-1 FIX#3 갱신).
+
+        Backlog depth — drain 대상 total (default = pending + quarantined).
+
+        Args:
+            include_quarantined: True (default) = state IN ('pending', 'quarantined')
+                                 (drain 대상 total — actual disk pressure 반영)
+                                 False = state='pending' only
+                                 (backward compat — fresh retry candidates only)
+        """
         with self._lock:
-            row = self._conn.execute(
-                "SELECT COUNT(*) FROM retry_queue WHERE state='pending'"
-            ).fetchone()
+            if include_quarantined:
+                row = self._conn.execute(
+                    "SELECT COUNT(*) FROM retry_queue WHERE state IN ('pending', 'quarantined')"
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    "SELECT COUNT(*) FROM retry_queue WHERE state = 'pending'"
+                ).fetchone()
             return int(row[0]) if row else 0
 
     def close(self) -> None:

@@ -14,6 +14,10 @@ Test Contract §8 (TestContractArchitectAgent):
 FIX#2 추가:
 - P1-3: threading.Lock _get_client() concurrent init guard
 - P2-2: ETag fallback false-positive — Metadata sha256 absent → overwrite (not false-skip)
+
+FIX#3 추가 (P0-NEW-1):
+- test_put_propagates_hard_floor_blocked: retry queue 가 hard_floor 도달 시 put() 가
+  PutResult(status="hard_floor_blocked") 반환 + caller contract 검증
 """
 from __future__ import annotations
 
@@ -28,8 +32,9 @@ import pytest
 from mctrader_data.nas_storage.nas_uploader import (
     ConditionalWriteConflict,
     NASUploader,
+    PutResult,
 )
-from mctrader_data.nas_storage.retry_queue import RetryQueue
+from mctrader_data.nas_storage.retry_queue import EnqueueResult, RetryQueue
 
 
 @pytest.fixture
@@ -355,3 +360,110 @@ class TestETagFallbackFalsePositive:
             "Metadata sha256 present + match → skip (기존 동작 유지)"
         )
         assert not client.put_object.called
+
+
+class TestPutPropagatesHardFloorBlocked:
+    """P0-NEW-1 FIX#3: retry queue hard_floor 도달 시 put() 가 PutResult(status="hard_floor_blocked") 반환.
+
+    §6.2.1 Change Plan FIX#3 박제:
+    - enqueue() 가 EnqueueResult(status='hard_floor_blocked') 반환 시
+      put() 가 PutResult(status='hard_floor_blocked') 로 propagate
+    - caller 가 'queued' 와 'hard_floor_blocked' 를 구분할 수 있어야 함 (MANUAL_GATE escalate 의무)
+    - PutResult.status Literal 5종:
+      "uploaded"|"skipped_idempotent"|"queued"|"hard_floor_blocked"|"skipped_etag_overwrite"
+    """
+
+    def test_put_propagates_hard_floor_blocked_on_endpoint_error(
+        self, uploader: NASUploader, retry_queue: RetryQueue
+    ) -> None:
+        """EndpointConnectionError + enqueue 반환 hard_floor_blocked → put() 반환 hard_floor_blocked."""
+        data = b"hard-floor-trigger-payload"
+        sha256 = hashlib.sha256(data).hexdigest()
+
+        # retry_queue.enqueue 를 hard_floor_blocked 반환하도록 mock
+        with (
+            patch.object(uploader, "_get_client") as mock_client_factory,
+            patch.object(uploader._retry_queue, "enqueue") as mock_enqueue,
+        ):
+            client = MagicMock()
+            mock_client_factory.return_value = client
+
+            from botocore.exceptions import EndpointConnectionError
+            client.head_object.side_effect = EndpointConnectionError(
+                endpoint_url="http://nas.local:9000"
+            )
+
+            # enqueue 가 hard_floor_blocked 반환
+            mock_enqueue.return_value = EnqueueResult(status="hard_floor_blocked")
+
+            result = uploader.put(key="test/hard-floor.bin", data=data, sha256=sha256)
+
+        assert result.status == "hard_floor_blocked", (
+            f"hard_floor_blocked propagation 실패: got '{result.status}'. "
+            "retry queue hard_floor 도달 시 put() 가 'hard_floor_blocked' 반환 필요"
+        )
+
+    def test_put_propagates_hard_floor_blocked_on_client_error(
+        self, uploader: NASUploader, retry_queue: RetryQueue
+    ) -> None:
+        """ClientError + enqueue 반환 hard_floor_blocked → put() 반환 hard_floor_blocked."""
+        data = b"client-error-hard-floor-payload"
+        sha256 = hashlib.sha256(data).hexdigest()
+
+        with (
+            patch.object(uploader, "_get_client") as mock_client_factory,
+            patch.object(uploader._retry_queue, "enqueue") as mock_enqueue,
+        ):
+            client = MagicMock()
+            mock_client_factory.return_value = client
+
+            from botocore.exceptions import ClientError
+            client.head_object.side_effect = ClientError(
+                {"Error": {"Code": "503", "Message": "Service Unavailable"}}, "HeadObject"
+            )
+
+            mock_enqueue.return_value = EnqueueResult(status="hard_floor_blocked")
+
+            result = uploader.put(key="test/client-hard-floor.bin", data=data, sha256=sha256)
+
+        assert result.status == "hard_floor_blocked", (
+            f"ClientError path hard_floor_blocked propagation 실패: got '{result.status}'"
+        )
+
+    def test_put_returns_queued_when_enqueue_ok(
+        self, uploader: NASUploader, retry_queue: RetryQueue
+    ) -> None:
+        """enqueue 가 'ok' 반환 시 put() 는 'queued' 반환 (기존 동작 유지)."""
+        data = b"normal-enqueue-payload"
+        sha256 = hashlib.sha256(data).hexdigest()
+
+        with (
+            patch.object(uploader, "_get_client") as mock_client_factory,
+            patch.object(uploader._retry_queue, "enqueue") as mock_enqueue,
+        ):
+            client = MagicMock()
+            mock_client_factory.return_value = client
+
+            from botocore.exceptions import EndpointConnectionError
+            client.head_object.side_effect = EndpointConnectionError(
+                endpoint_url="http://nas.local:9000"
+            )
+
+            mock_enqueue.return_value = EnqueueResult(status="ok", item_id="test-id")
+
+            result = uploader.put(key="test/normal-queue.bin", data=data, sha256=sha256)
+
+        assert result.status == "queued", (
+            f"enqueue 'ok' 시 put() 반환값 'queued' 기대, got '{result.status}'"
+        )
+
+    def test_put_result_status_literal_includes_hard_floor_blocked(self) -> None:
+        """PutResult.status Literal 에 'hard_floor_blocked' 포함 확인 (타입 계약 검증)."""
+        # PutResult 직접 생성 — Literal type 5종 모두 허용 확인
+        result = PutResult(status="hard_floor_blocked")
+        assert result.status == "hard_floor_blocked"
+
+        # 기존 4종도 여전히 유효
+        for status in ("uploaded", "skipped_idempotent", "queued", "skipped_etag_overwrite"):
+            r = PutResult(status=status)  # type: ignore[arg-type]
+            assert r.status == status

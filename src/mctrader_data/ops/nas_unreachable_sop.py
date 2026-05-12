@@ -100,18 +100,24 @@ class NASUnreachableSOPRunner:
             return False
 
     def _check_threshold_breached(self) -> bool:
-        """retry queue 가 threshold 초과 여부 확인 (§6.2.4, EC-3)."""
-        depth = self._retry_queue.depth()
+        """retry queue 가 threshold 초과 여부 확인 (§6.2.4, EC-3, P1-NEW-1 FIX#3 갱신).
+
+        P1-NEW-1 FIX#3: depth(include_quarantined=True) + _total_bytes(include_quarantined=True)
+        사용 — quarantined segments 는 여전히 disk 점유 중이므로 actual disk pressure 반영.
+        기존 pending-only 기준은 false negative 발생 위험 (quarantined 증가 무시).
+        """
+        # P1-NEW-1 FIX#3: pending + quarantined total (actual drain target)
+        depth = self._retry_queue.depth(include_quarantined=True)
         if depth >= self.threshold_segments:
             log.warning(
-                "[sop] threshold breached: segments=%d/%d",
+                "[sop] threshold breached: segments=%d/%d (pending+quarantined total)",
                 depth, self.threshold_segments,
             )
             return True
-        total_bytes = self._retry_queue._total_bytes()
+        total_bytes = self._retry_queue._total_bytes(include_quarantined=True)
         if total_bytes >= self.threshold_bytes:
             log.warning(
-                "[sop] threshold breached: bytes=%d/%d",
+                "[sop] threshold breached: bytes=%d/%d (pending+quarantined total)",
                 total_bytes, self.threshold_bytes,
             )
             return True

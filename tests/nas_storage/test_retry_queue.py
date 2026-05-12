@@ -15,6 +15,13 @@ FIX#2 추가 (8 finding):
 - P0-1: hard floor (pending+quarantined > 10000) → MANUAL_GATE escalate
 - P0-2: drain context-aware put suppress_enqueue=True → status='queued' → retain
 - P1-2: drain chaos — 실 NASUploader + boto3 EndpointConnectionError mock
+
+FIX#3 추가 (P1-NEW-1):
+- test_depth_includes_quarantined_by_default: pending 5 + quarantined 3 → depth() = 8 (default)
+  / depth(include_quarantined=False) = 5
+- test_total_bytes_includes_quarantined_by_default: 동일 패턴 (bytes 합산)
+- test_sop_threshold_uses_pending_plus_quarantined_total: SOP MANUAL_GATE escalation
+  이 quarantined 포함 backlog 기준으로 트리거
 """
 from __future__ import annotations
 
@@ -151,6 +158,10 @@ class TestBoundedBacklogQuarantine:
 
         FIX#2 semantics: threshold breach → status='ok' (quarantine + pending).
         'threshold_breached' (drop) 는 RPO=0 위반으로 폐기.
+
+        FIX#3 P1-NEW-1: depth() default = pending + quarantined total.
+        oldest 1개 quarantined + 기존 2개 pending + 신규 1개 = 4 total.
+        pending only = depth(include_quarantined=False) = 3.
         """
         q = RetryQueue(path=queue_path, max_segments=3, max_bytes=10 * 1024**3)
         for i in range(3):
@@ -163,7 +174,10 @@ class TestBoundedBacklogQuarantine:
         )
         # FIX#2: 신규 segment 는 pending enqueue (drop 0)
         assert result.status == "ok", f"Expected 'ok' (RPO=0 quarantine+pending), got '{result.status}'"
-        assert q.depth() == 3  # oldest quarantined (1개) + 기존 2개 pending + 신규 1개 = 3 pending
+        # FIX#3: depth() = pending(3) + quarantined(1) = 4 total
+        assert q.depth() == 4  # oldest quarantined(1) + 기존 pending(2) + 신규 pending(1) = 4
+        # pending only = 3
+        assert q.depth(include_quarantined=False) == 3
 
     def test_threshold_bytes_breach_quarantine_and_enqueue(self, queue_path: Path) -> None:
         """max_bytes 도달 시 oldest quarantine + 신규 pending enqueue (RPO=0 FIX#2 Option A)."""
@@ -289,8 +303,11 @@ class TestEnqueueDropZeroInvariant:
             f"Expected 'ok' (pending enqueue), got '{result.status}'. "
             "drop 발생 = RPO=0 위반"
         )
-        # 신규 depth: oldest 1개 quarantine → pending = 2 + 신규 1 = 3
-        assert q.depth() == 3
+        # FIX#3 P1-NEW-1: depth() = pending + quarantined total
+        # oldest 1개 quarantine → quarantined(1) + pending(2) + 신규(1) = 4 total
+        assert q.depth() == 4
+        # pending only = 3 (quarantined 제외)
+        assert q.depth(include_quarantined=False) == 3
 
         # quarantine row 존재 확인 (direct DB query)
         db_path = queue_path / "retry_queue.db"
@@ -462,3 +479,241 @@ class TestDrainContextAwarePut:
         )
         assert stats.failed == 5
         assert stats.drained == 0
+
+
+class TestDepthIncludesQuarantinedByDefault:
+    """P1-NEW-1 FIX#3: depth() default include_quarantined=True.
+
+    §6.2.2 Change Plan FIX#3 박제:
+    - depth(include_quarantined=True) (default) = pending + quarantined (drain 대상 total)
+    - depth(include_quarantined=False) = pending only (기존 fresh retry candidates)
+    - 기존 caller 영향 분석: SOP threshold / Prometheus exporter / resume_on_startup 모두
+      'quarantined 포함 total' 이 더 정확한 disk pressure 지표
+    """
+
+    def test_depth_includes_quarantined_by_default(self, queue_path: Path) -> None:
+        """pending 5 + quarantined 3 + succeeded 2 → depth() = 8 (default include_quarantined=True)."""
+        q = RetryQueue(path=queue_path, max_segments=5, max_bytes=10 * 1024**3, hard_floor=100)
+
+        # pending 5개 enqueue
+        for i in range(5):
+            data = f"pending-{i}".encode()
+            q.enqueue(key=f"pending-{i}.parquet", data=data, sha256=hashlib.sha256(data).hexdigest())
+
+        assert q.depth() == 5  # 현재 5 pending
+
+        # 3개를 quarantined 로 강제 전환 (DB 직접 조작)
+        db_path = queue_path / "retry_queue.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "UPDATE retry_queue SET state='quarantined' WHERE id IN "
+            "(SELECT id FROM retry_queue WHERE state='pending' ORDER BY enqueue_ts LIMIT 3)"
+        )
+        conn.commit()
+        conn.close()
+
+        # depth(include_quarantined=True) default:
+        # 5 enqueued → 3 quarantined → 2 pending + 3 quarantined = 5 total
+        assert q.depth(include_quarantined=True) == 5, (
+            "depth(include_quarantined=True): pending(2) + quarantined(3) = 5"
+        )
+        # depth(include_quarantined=False) = pending only = 2
+        assert q.depth(include_quarantined=False) == 2, (
+            "depth(include_quarantined=False): pending only = 2"
+        )
+
+    def test_depth_default_equals_include_quarantined_true(self, queue_path: Path) -> None:
+        """depth() (no args) == depth(include_quarantined=True) (기본값 검증)."""
+        q = RetryQueue(path=queue_path, max_segments=10, max_bytes=10 * 1024**3)
+
+        for i in range(4):
+            data = f"item-{i}".encode()
+            q.enqueue(key=f"item-{i}.parquet", data=data, sha256=hashlib.sha256(data).hexdigest())
+
+        # 2개를 quarantined 로 전환
+        db_path = queue_path / "retry_queue.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "UPDATE retry_queue SET state='quarantined' WHERE id IN "
+            "(SELECT id FROM retry_queue WHERE state='pending' ORDER BY enqueue_ts LIMIT 2)"
+        )
+        conn.commit()
+        conn.close()
+
+        assert q.depth() == q.depth(include_quarantined=True), (
+            "depth() (no args) must equal depth(include_quarantined=True)"
+        )
+
+    def test_depth_all_pending_same_result_both_modes(self, queue_path: Path) -> None:
+        """quarantined 없을 때 depth() == depth(False) == pending count."""
+        q = RetryQueue(path=queue_path)
+
+        for i in range(3):
+            data = f"p-{i}".encode()
+            q.enqueue(key=f"p-{i}.parquet", data=data, sha256=hashlib.sha256(data).hexdigest())
+
+        # quarantined 없음 → 두 모드 동일
+        assert q.depth(include_quarantined=True) == 3
+        assert q.depth(include_quarantined=False) == 3
+
+
+class TestTotalBytesIncludesQuarantinedByDefault:
+    """P1-NEW-1 FIX#3: _total_bytes_locked() default include_quarantined=True.
+
+    §6.2.2 Change Plan FIX#3 박제:
+    - _total_bytes_locked(include_quarantined=True) (default) = pending + quarantined bytes 합산
+    - _total_bytes_locked(include_quarantined=False) = pending only
+    - 10GB threshold 비교: actual disk pressure 반영 (quarantined segments 는 여전히 disk 점유)
+    """
+
+    def test_total_bytes_includes_quarantined_by_default(self, queue_path: Path) -> None:
+        """pending 30B + quarantined 20B → _total_bytes() = 50B (default) / 30B (False)."""
+        q = RetryQueue(path=queue_path, max_segments=10, max_bytes=10 * 1024**3)
+
+        # pending 3개 (각 10B = 30B total)
+        for i in range(3):
+            data = b"x" * 10
+            q.enqueue(key=f"pending-{i}.parquet", data=data, sha256=hashlib.sha256(data).hexdigest())
+
+        # 2개를 quarantined 로 전환 (각 10B = 20B quarantined)
+        db_path = queue_path / "retry_queue.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "UPDATE retry_queue SET state='quarantined' WHERE id IN "
+            "(SELECT id FROM retry_queue WHERE state='pending' ORDER BY enqueue_ts LIMIT 2)"
+        )
+        conn.commit()
+        conn.close()
+
+        # include_quarantined=True (default): pending(10B) + quarantined(20B) = 30B
+        total_with_quarantined = q._total_bytes(include_quarantined=True)
+        assert total_with_quarantined == 30, (
+            f"include_quarantined=True: expected 30B, got {total_with_quarantined}"
+        )
+
+        # include_quarantined=False: pending only = 10B
+        total_pending_only = q._total_bytes(include_quarantined=False)
+        assert total_pending_only == 10, (
+            f"include_quarantined=False: expected 10B, got {total_pending_only}"
+        )
+
+    def test_total_bytes_default_equals_include_quarantined_true(self, queue_path: Path) -> None:
+        """_total_bytes() (no args) == _total_bytes(include_quarantined=True)."""
+        q = RetryQueue(path=queue_path, max_segments=10, max_bytes=10 * 1024**3)
+
+        for i in range(4):
+            data = b"y" * 15
+            q.enqueue(key=f"b-{i}.parquet", data=data, sha256=hashlib.sha256(data).hexdigest())
+
+        db_path = queue_path / "retry_queue.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "UPDATE retry_queue SET state='quarantined' WHERE id IN "
+            "(SELECT id FROM retry_queue WHERE state='pending' ORDER BY enqueue_ts LIMIT 1)"
+        )
+        conn.commit()
+        conn.close()
+
+        assert q._total_bytes() == q._total_bytes(include_quarantined=True), (
+            "_total_bytes() default must equal _total_bytes(include_quarantined=True)"
+        )
+
+
+class TestSOPThresholdUsesQuarantinedTotal:
+    """P1-NEW-1 FIX#3: SOP threshold check 가 pending + quarantined 합산 기준으로 트리거.
+
+    §6.2.4 Change Plan FIX#3 박제:
+    - NASUnreachableSOPRunner._check_threshold_breached() 가 depth(include_quarantined=True)
+      + _total_bytes(include_quarantined=True) 를 사용
+    - quarantined segments 가 disk 점유 중이므로 THRESHOLD_BREACHED / MANUAL_GATE
+      escalation 이 actual disk pressure 를 반영해야 함
+    """
+
+    def test_sop_threshold_uses_pending_plus_quarantined_total(
+        self, queue_path: Path
+    ) -> None:
+        """quarantined + pending 합산이 threshold_segments 에 도달 시 SOP THRESHOLD_BREACHED."""
+        from unittest.mock import MagicMock
+        from mctrader_data.ops.nas_unreachable_sop import NASUnreachableSOPRunner
+
+        q = RetryQueue(path=queue_path, max_segments=5, max_bytes=10 * 1024**3, hard_floor=100)
+
+        # pending 5개 enqueue
+        for i in range(5):
+            data = f"sop-item-{i}".encode()
+            q.enqueue(key=f"sop-{i}.parquet", data=data, sha256=hashlib.sha256(data).hexdigest())
+
+        # 3개를 quarantined 로 전환 → pending=2, quarantined=3 → total=5
+        db_path = queue_path / "retry_queue.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "UPDATE retry_queue SET state='quarantined' WHERE id IN "
+            "(SELECT id FROM retry_queue WHERE state='pending' ORDER BY enqueue_ts LIMIT 3)"
+        )
+        conn.commit()
+        conn.close()
+
+        mock_uploader = MagicMock()
+        mock_metrics = MagicMock()
+
+        # threshold_segments=4 → pending(2) + quarantined(3) = 5 >= 4 → BREACHED
+        sop = NASUnreachableSOPRunner(
+            uploader=mock_uploader,
+            retry_queue=q,
+            metrics=mock_metrics,
+            threshold_segments=4,
+            threshold_bytes=10 * 1024**3,
+        )
+
+        breached = sop._check_threshold_breached()
+        assert breached is True, (
+            "SOP threshold 는 pending + quarantined 합산 기준이어야 함 "
+            "(quarantined=3 + pending=2 = 5 >= threshold=4)"
+        )
+
+    def test_sop_threshold_not_breached_with_pending_only_below_threshold(
+        self, queue_path: Path
+    ) -> None:
+        """pending only 가 threshold 미만이나 pending+quarantined 합이 threshold 초과 시 BREACHED.
+
+        (이전 depth() = pending only 기준이면 false negative 발생했던 케이스)
+        """
+        from unittest.mock import MagicMock
+        from mctrader_data.ops.nas_unreachable_sop import NASUnreachableSOPRunner
+
+        q = RetryQueue(path=queue_path, max_segments=10, max_bytes=10 * 1024**3, hard_floor=100)
+
+        # pending 10개 enqueue
+        for i in range(10):
+            data = f"item-{i}".encode()
+            q.enqueue(key=f"item-{i}.parquet", data=data, sha256=hashlib.sha256(data).hexdigest())
+
+        # 8개를 quarantined 로 전환 → pending=2, quarantined=8 → total=10
+        db_path = queue_path / "retry_queue.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "UPDATE retry_queue SET state='quarantined' WHERE id IN "
+            "(SELECT id FROM retry_queue WHERE state='pending' ORDER BY enqueue_ts LIMIT 8)"
+        )
+        conn.commit()
+        conn.close()
+
+        mock_uploader = MagicMock()
+        mock_metrics = MagicMock()
+
+        # threshold_segments=5
+        # - 기존 depth() (pending only=2): 미초과 → false negative
+        # - FIX#3 depth(include_quarantined=True) (total=10): 초과 → BREACHED
+        sop = NASUnreachableSOPRunner(
+            uploader=mock_uploader,
+            retry_queue=q,
+            metrics=mock_metrics,
+            threshold_segments=5,
+            threshold_bytes=10 * 1024**3,
+        )
+
+        breached = sop._check_threshold_breached()
+        assert breached is True, (
+            "SOP threshold: pending(2) + quarantined(8) = 10 >= 5 → BREACHED 여야 함. "
+            "pending-only depth(2) 기준이면 false negative 발생 (이전 버그)"
+        )

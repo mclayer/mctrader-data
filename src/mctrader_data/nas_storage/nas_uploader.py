@@ -4,20 +4,24 @@ Story: MCT-150 (Stage 2 — uploader hardening)
 Issue: mclayer/mctrader-hub#253
 ADR: ADR-027 D5 (NAS unreachable failure mode) / D2 (HTTP + 4중 mitigation)
 
-Design decisions (§6.2.1 Change Plan 박제, FIX#2 갱신):
+Design decisions (§6.2.1 Change Plan 박제, FIX#3 갱신):
 - HEAD-then-PUT idempotency (S4):
   - HEAD 200 + Metadata sha256 present + match → SKIP (idempotent, status='skipped_idempotent')
   - HEAD 200 + Metadata sha256 absent (외부 PUT / legacy 객체) → log warning + PUT overwrite (P2-2 FIX#2)
   - HEAD 200 + sha256 mismatch → ConditionalWriteConflict raise (silent overwrite 0)
   - HEAD 404 → PUT (신규 object, status='uploaded')
   - NAS unreachable (EndpointConnectionError) → suppress_enqueue 분기:
-    - suppress_enqueue=False (기본값): retry_queue.enqueue() → status='queued' (raise 0)
+    - suppress_enqueue=False (기본값): retry_queue.enqueue() → EnqueueResult 분기:
+      - enqueued ('ok') → status='queued' (raise 0)
+      - hard_floor_blocked → status='hard_floor_blocked' (raise 0, caller MANUAL_GATE 의무)
     - suppress_enqueue=True (drain 호출 시): EndpointConnectionError raise (drain 측 catch 후 retain)
 - boto3 client (S3 API): endpoint = NAS_MINIO_ENDPOINT, creds = NAS_MINIO_ACCESS_KEY/SECRET_KEY
 - Env namespace: NAS_MINIO_* (기존 MINIO_ENDPOINT hot path 침범 0, EC-1 박제)
 - credential masking obligation: log 에 access_key / secret_key 평문 노출 0 (FIX#1 F7)
 - ADR-027 D5 invariant: put() 가 NAS unreachable 시 (suppress_enqueue=False) 절대 raise 0 → hot path 무영향
 - threading.Lock _get_client(): double-checked locking — concurrent init 시 단 1회 boto3.client() 호출 (P1-3 FIX#2)
+- PutResult.status 5종 (FIX#3 P0-NEW-1):
+  "uploaded" | "skipped_idempotent" | "queued" | "hard_floor_blocked" | "skipped_etag_overwrite"
 
 SecurityArch (§6.3):
 - log 출력 시 endpoint URL masking: host:port 만 포함 (auth 정보 embedded URL 금지)
@@ -50,9 +54,18 @@ class ConditionalWriteConflict(Exception):
 
 @dataclass(frozen=True)
 class PutResult:
-    """put() 반환값."""
+    """put() 반환값.
 
-    status: Literal["uploaded", "skipped_idempotent", "queued"]
+    status 5종 (FIX#3 P0-NEW-1):
+    - "uploaded": PUT 성공 (신규 object 업로드)
+    - "skipped_idempotent": HEAD 200 + sha256 match → skip (동일 내용)
+    - "queued": NAS unreachable → retry_queue.enqueue() 성공 (ADR-027 D5 invariant)
+    - "hard_floor_blocked": retry queue hard floor 도달 → MANUAL_GATE escalate 의무
+      (caller 가 'queued' 와 구분, SOP runner 에 escalation signal 전달)
+    - "skipped_etag_overwrite": Metadata sha256 absent (legacy 객체) 경우 overwrite 후 반환
+    """
+
+    status: Literal["uploaded", "skipped_idempotent", "queued", "hard_floor_blocked", "skipped_etag_overwrite"]
     object_etag: str = ""
     latency_ms: float = 0.0
 
@@ -169,13 +182,39 @@ class NASUploader:
             # log masking: endpoint host:port 만 (auth 정보 0)
             safe_endpoint = _mask_endpoint(self._endpoint)
             log.warning("[nas_uploader] endpoint unreachable endpoint=%s key=%s", safe_endpoint, key)
-            if self._retry_queue is not None:
-                self._retry_queue.enqueue(key=key, data=raw_data, sha256=sha256)
             if self._metrics:
                 latency_s = time.perf_counter() - t_start
                 self._metrics.emit_fail(
                     bucket=self.bucket, reason="endpoint_unreachable", latency_s=latency_s
                 )
+            if self._retry_queue is not None:
+                # FIX#3 P0-NEW-1: EnqueueResult.status propagation
+                enq_result = self._retry_queue.enqueue(key=key, data=raw_data, sha256=sha256)
+                if enq_result.status == "hard_floor_blocked":
+                    log.critical(
+                        "[nas_uploader] hard_floor_blocked — retry queue at hard floor "
+                        "endpoint=%s key=%s MANUAL_GATE escalation required",
+                        safe_endpoint, key,
+                    )
+                    return PutResult(
+                        status="hard_floor_blocked",
+                        latency_ms=(time.perf_counter() - t_start) * 1000,
+                    )
+                elif enq_result.status == "ok":
+                    return PutResult(
+                        status="queued",
+                        latency_ms=(time.perf_counter() - t_start) * 1000,
+                    )
+                else:
+                    # unexpected enqueue status — log + fallback to queued
+                    log.error(
+                        "[nas_uploader] unexpected enqueue status=%s key=%s — treating as queued",
+                        enq_result.status, key,
+                    )
+                    return PutResult(
+                        status="queued",
+                        latency_ms=(time.perf_counter() - t_start) * 1000,
+                    )
             return PutResult(
                 status="queued",
                 latency_ms=(time.perf_counter() - t_start) * 1000,
@@ -193,11 +232,36 @@ class NASUploader:
                 "[nas_uploader] client error endpoint=%s key=%s code=%s",
                 safe_endpoint, key, code,
             )
-            if not suppress_enqueue and self._retry_queue is not None:
-                self._retry_queue.enqueue(key=key, data=raw_data, sha256=sha256)
             if self._metrics:
                 latency_s = time.perf_counter() - t_start
                 self._metrics.emit_fail(bucket=self.bucket, reason=reason, latency_s=latency_s)
+            if not suppress_enqueue and self._retry_queue is not None:
+                # FIX#3 P0-NEW-1: EnqueueResult.status propagation
+                enq_result = self._retry_queue.enqueue(key=key, data=raw_data, sha256=sha256)
+                if enq_result.status == "hard_floor_blocked":
+                    log.critical(
+                        "[nas_uploader] hard_floor_blocked — retry queue at hard floor "
+                        "endpoint=%s key=%s code=%s MANUAL_GATE escalation required",
+                        safe_endpoint, key, code,
+                    )
+                    return PutResult(
+                        status="hard_floor_blocked",
+                        latency_ms=(time.perf_counter() - t_start) * 1000,
+                    )
+                elif enq_result.status == "ok":
+                    return PutResult(
+                        status="queued",
+                        latency_ms=(time.perf_counter() - t_start) * 1000,
+                    )
+                else:
+                    log.error(
+                        "[nas_uploader] unexpected enqueue status=%s key=%s code=%s — treating as queued",
+                        enq_result.status, key, code,
+                    )
+                    return PutResult(
+                        status="queued",
+                        latency_ms=(time.perf_counter() - t_start) * 1000,
+                    )
             return PutResult(
                 status="queued",
                 latency_ms=(time.perf_counter() - t_start) * 1000,
