@@ -209,7 +209,7 @@ class CompactorRunner:
         sha256 = hashlib.sha256(payload).hexdigest()
 
         try:
-            result = self._dual_writer.write(
+            result = self._dual_writer.write(  # type: ignore[union-attr]
                 local_path=parquet_path,
                 nas_key=nas_key,
                 data=payload,

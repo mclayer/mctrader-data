@@ -38,7 +38,7 @@ def get_ws_stream(
             raise ValueError(
                 "at least one of transactions/orderbook/orderbook_snapshot must be included"
             )
-        return BithumbWebSocketStream(symbol=symbol, channels=channels, **kwargs)
+        return BithumbWebSocketStream(symbol=symbol, channels=channels, **kwargs)  # type: ignore[arg-type]
 
     if exchange == "upbit":
         from mctrader_market_upbit.ws_client import UpbitWebSocketStream
@@ -53,6 +53,6 @@ def get_ws_stream(
             raise ValueError(
                 "at least one of transactions/orderbook/orderbook_snapshot must be included"
             )
-        return UpbitWebSocketStream(symbol=symbol, channels=channels, **kwargs)
+        return UpbitWebSocketStream(symbol=symbol, channels=channels, **kwargs)  # type: ignore[arg-type]
 
     raise ValueError(f"unknown exchange: {exchange!r}")

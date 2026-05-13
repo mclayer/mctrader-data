@@ -266,6 +266,7 @@ def make_orchestrator(
 
     from typing import Literal, cast
     tier_lit = cast(Literal["L2", "L3"], tier)
+    channel_lit = cast(Literal["orderbooksnapshot", "transaction"], channel)
 
     return BackfillOrchestrator(
         nas_uploader=mock_uploader,
@@ -282,7 +283,7 @@ def make_orchestrator(
         chunk_timeout_s=10.0,
         tier=tier_lit,
         partition_normalization=True,
-        channel=channel,  # MCT-159 channel parametrize
+        channel=channel_lit,  # MCT-159 channel parametrize
     )
 
 
@@ -315,8 +316,12 @@ def test_backfill_result_status_checkpoint_resumable():
 
 def test_chunk_result_status_all_5_valid():
     """§6.8 ChunkResult 5 enum — 모두 유효."""
+    from typing import Literal, cast
     chunk_id = "a" * 16
-    statuses = [
+    statuses: list[Literal[
+        "chunk_verified", "chunk_skipped_resumed", "chunk_quarantined",
+        "chunk_blocked", "chunk_sop_skipped"
+    ]] = [
         "chunk_verified",
         "chunk_skipped_resumed",
         "chunk_quarantined",
@@ -326,7 +331,10 @@ def test_chunk_result_status_all_5_valid():
     for s in statuses:
         r = ChunkResult(
             chunk_id=chunk_id,
-            status=s,
+            status=cast(Literal[
+                "chunk_verified", "chunk_skipped_resumed", "chunk_quarantined",
+                "chunk_blocked", "chunk_sop_skipped"
+            ], s),
             put_result=None,
             invariant_result=None,
         )

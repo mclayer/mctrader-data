@@ -245,7 +245,7 @@ class TestRunDriftDetected:
             )
             harness = MagicMock(spec=InvariantHarness)
             harness.verify.return_value = InvariantResult(
-                status=fail_status,
+                status=fail_status,  # type: ignore[arg-type]
                 per_invariant_results={},
                 local_partition=Path("/data/local/v1/binance/BTC/2024-01-01"),
                 nas_partition="v1/binance/BTC/2024-01-01",
@@ -907,7 +907,7 @@ class TestWordingSSoT:
         # Try creating one of each
         for status in expected_statuses:
             result = DualWriteWindowResult(
-                status=status,
+                status=status,  # type: ignore[arg-type]
                 barrier_result=None,
             )
             assert result.status == status, f"status {status!r} mismatch"

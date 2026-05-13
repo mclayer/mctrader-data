@@ -103,8 +103,8 @@ class CollectorDaemon:
             include_orderbook_snapshot=self._include_orderbook_snapshot,
         )
         try:
-            async with stream:
-                async for event in stream.messages():
+            async with stream:  # type: ignore[attr-defined]
+                async for event in stream.messages():  # type: ignore[attr-defined]
                     if self._cancel_event.is_set():
                         break
                     self._emit_to_wal(event)

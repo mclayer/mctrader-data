@@ -93,7 +93,7 @@ def observe_compactor_rss() -> None:
     try:
         import resource  # type: ignore[import-not-found]
 
-        rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss  # type: ignore[attr-defined]
         compactor_process_rss_bytes.set(rss_kb * 1024)
         return
     except ImportError:

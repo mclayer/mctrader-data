@@ -75,10 +75,9 @@ ADR009_SCHEMA = pa.schema([
 
 def _make_parquet_bytes(schema: pa.Schema | None = None, n_rows: int = 3) -> bytes:
     """Create minimal valid parquet bytes with given schema."""
-    if schema is None:
-        schema = ADR009_SCHEMA
+    resolved: pa.Schema = schema if schema is not None else ADR009_SCHEMA
     arrays = []
-    for field in schema:
+    for field in resolved:
         if pa.types.is_string(field.type) or pa.types.is_large_string(field.type):
             arrays.append(pa.array(["v"] * n_rows, type=field.type))
         elif pa.types.is_int64(field.type):
@@ -87,7 +86,7 @@ def _make_parquet_bytes(schema: pa.Schema | None = None, n_rows: int = 3) -> byt
             arrays.append(pa.array([Decimal("1.0")] * n_rows, type=field.type))
         else:
             arrays.append(pa.array([None] * n_rows, type=field.type))
-    table = pa.table(dict(zip(schema.names, arrays, strict=False)), schema=schema)
+    table = pa.table(dict(zip(resolved.names, arrays, strict=False)), schema=resolved)
     buf = io.BytesIO()
     pq.write_table(table, buf)
     return buf.getvalue()

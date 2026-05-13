@@ -192,7 +192,7 @@ def backfill(
     provider = get_candle_provider(exchange)
     for _attempt in range(1, _API_MAX_RETRIES + 1):
         try:
-            candles = provider.get_candles(symbol=sym, timeframe=tf, start=start_utc, end=end_utc)
+            candles = provider.get_candles(symbol=sym, timeframe=tf, start=start_utc, end=end_utc)  # type: ignore[union-attr]
             last_exc = None
             break
         except Exception as exc:
