@@ -97,7 +97,8 @@ def _make_test_candle(**kwargs):
         "value": None,
     }
     defaults.update(kwargs)
-    return CandleModel(**defaults)
+    # model_construct bypasses pydantic validators — needed for intentionally invalid data
+    return CandleModel.model_construct(**defaults)
 
 
 def test_check_gap_returns_gap_reason() -> None:

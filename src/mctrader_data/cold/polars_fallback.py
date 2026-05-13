@@ -63,7 +63,7 @@ class PolarsResampler:
 
     def __init__(self, root: Path) -> None:
         try:
-            import polars  # noqa: F401
+            import polars  # noqa: F401  # type: ignore[import-untyped]
         except ImportError as err:
             raise ImportError(
                 "PolarsResampler requires polars. Install with `pip install polars` "
@@ -135,7 +135,7 @@ class PolarsResampler:
         *,
         exchange: str | None,
     ) -> Iterator[TickRowV1_1]:
-        import polars as pl
+        import polars as pl  # type: ignore[import-untyped]
 
         root_dir = self._tick_root()
         if not root_dir.exists():

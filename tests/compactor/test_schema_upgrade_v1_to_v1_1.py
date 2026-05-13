@@ -15,7 +15,6 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-import pytest
 
 from mctrader_data.compactor.schema_upgrade import (
     TICK_V1_1_SCHEMA,

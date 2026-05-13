@@ -1,8 +1,6 @@
-import threading
 import time
 import urllib.request
 
-import pytest
 
 from mctrader_data.metrics import (
     ingester_events_total,

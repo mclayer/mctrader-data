@@ -46,7 +46,7 @@ def _candle(
         close=close,
         volume=volume,
         value=open_ * volume,
-        source=source,
+        source=source,  # type: ignore[arg-type]
     )
 
 

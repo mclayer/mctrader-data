@@ -241,15 +241,15 @@ class L1Compactor:
             ]
             payload_hash = _compute_payload_hash(exchange, symbol, baseline_seq, bids_pairs, asks_pairs)
 
-            common: dict = dict(
-                ts_utc=ts_utc,
-                received_at=received_at,
-                exchange=exchange,
-                symbol=symbol,
-                baseline_seq=baseline_seq,
-                payload_hash=payload_hash,
-                raw_json=raw_json,
-            )
+            common: dict = {
+                "ts_utc": ts_utc,
+                "received_at": received_at,
+                "exchange": exchange,
+                "symbol": symbol,
+                "baseline_seq": baseline_seq,
+                "payload_hash": payload_hash,
+                "raw_json": raw_json,
+            }
             for level, (price, qty) in enumerate(bids_pairs):
                 ob_records.append(OrderbookSnapshotRecord(
                     **common, side="bid", level=level, price=price, quantity=qty,

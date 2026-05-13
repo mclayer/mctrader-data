@@ -364,6 +364,7 @@ class BackfillOrchestrator:
         chunk_timeout_s: float = 30.0,
         tier: Literal["L2", "L3"] = "L2",
         partition_normalization: bool = True,
+        channel: Literal["orderbooksnapshot", "transaction"] = "orderbooksnapshot",  # MCT-159
     ) -> None:
         self._uploader = nas_uploader
         self._harness = invariant_harness
@@ -379,6 +380,7 @@ class BackfillOrchestrator:
         self._chunk_timeout_s = chunk_timeout_s
         self._tier = tier
         self._partition_normalization = partition_normalization
+        self._channel = channel  # MCT-159: channel parametrize
         self._shutdown_requested = False
 
     def run(self) -> BackfillResult:
@@ -577,7 +579,8 @@ class BackfillOrchestrator:
         """Phase B step 4-5 — local file system traversal + closed-day filter (S1).
 
         Algorithm:
-        1. glob: MCTRADER_DATA_ROOT/market/orderbooksnapshot/tier=L2/**/*.parquet
+        1. glob: MCTRADER_DATA_ROOT/market/orderbooksnapshot/schema_version=*/tier=L2/**/*.parquet
+           (ADR-027 D1 Hive layout: schema_version/exchange/node/tier/date)
         2. for each path:
            a. parse date= component — UTC midnight 이전 (date < today) verify
            b. closed-day pass → include (당일 partition 제외)
@@ -589,18 +592,27 @@ class BackfillOrchestrator:
         EC-2 (mixed legacy/non-legacy partition): partition 별 별도 분석 (per-chunk 처리).
         """
         today = date.today()
-        tier_root = (
-            self._local_root
-            / "market"
-            / "orderbooksnapshot"
-            / f"tier={self._tier}"
-        )
+        # Pre-flight hot-fix 2026-05-13: schema_version=* layer 추가 (ADR-027 D1 Hive layout 정합)
+        # MCT-159 amendment: channel parametrize (orderbooksnapshot + transaction)
+        channel_root = self._local_root / "market" / self._channel
 
-        if not tier_root.exists():
-            log.warning("[backfill] tier root not found: %s", tier_root)
+        if not channel_root.exists():
+            log.warning("[backfill] channel root not found: %s", channel_root)
             return []
 
-        parquet_files = sorted(tier_root.rglob("*.parquet"))
+        # Find all tier={tier} directories under any schema_version=*
+        tier_dirs = list(channel_root.glob(f"schema_version=*/tier={self._tier}"))
+        if not tier_dirs:
+            log.warning(
+                "[backfill] no tier=%s dirs found under %s/schema_version=*/",
+                self._tier, channel_root,
+            )
+            return []
+
+        parquet_files: list[Path] = []
+        for td in tier_dirs:
+            parquet_files.extend(td.rglob("*.parquet"))
+        parquet_files.sort()
         closed_day_files: list[Path] = []
 
         for pf in parquet_files:
@@ -648,10 +660,11 @@ class BackfillOrchestrator:
         EC-2 (mixed legacy/non-legacy): partition 별 is_legacy_node 개별 판단
         """
         parts = source_path.parts
-        # ADR-009 §D2.1 Hive layout: .../tier=L2/exchange=X/symbol=S/date=D/[node=N/]file.parquet
+        # ADR-009 §D2.1 Hive layout: .../tier=L2/exchange=X/symbol=S/date=D/[hour=HH/][node=N/]file.parquet
         exchange = _extract_hive_value(parts, "exchange")
         symbol = _extract_hive_value(parts, "symbol")
         date_str = _extract_hive_value(parts, "date")
+        hour = _extract_hive_value(parts, "hour")  # MCT-159: hour 축 추가
         node = _extract_hive_value(parts, "node")
 
         if symbol is None:
@@ -661,6 +674,9 @@ class BackfillOrchestrator:
 
         is_legacy_node = node is None
 
+        # MCT-159: hour=HH segment (있으면 박제, 없으면 "" — legacy backward-compat R5)
+        hour_segment = f"/hour={hour}" if hour is not None else ""
+
         if is_legacy_node:
             # S6: legacy partition → node=DEFAULT 명시 삽입
             nas_partition_prefix = (
@@ -668,6 +684,7 @@ class BackfillOrchestrator:
                 f"/exchange={exchange or 'UNKNOWN'}"
                 f"/symbol={symbol}"
                 f"/date={date_str}"
+                f"{hour_segment}"
                 f"/node=DEFAULT"
             )
             if self._metrics is not None:
@@ -679,6 +696,7 @@ class BackfillOrchestrator:
                 f"/exchange={exchange or 'UNKNOWN'}"
                 f"/symbol={symbol}"
                 f"/date={date_str}"
+                f"{hour_segment}"
                 f"/node={node}"
             )
 

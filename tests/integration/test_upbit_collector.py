@@ -4,8 +4,8 @@
 CollectorDaemon -> WalIngester 파이프라인만 검증.
 """
 import asyncio
+import contextlib
 from datetime import datetime, timezone
-from decimal import Decimal
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -62,10 +62,8 @@ async def test_upbit_collector_writes_to_wal(tmp_root: Path) -> None:
             task = asyncio.create_task(daemon.run())
             await asyncio.sleep(0.1)
             task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await task
-            except asyncio.CancelledError:
-                pass
 
         await run_and_stop()
 

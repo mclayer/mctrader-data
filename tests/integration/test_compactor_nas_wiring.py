@@ -28,15 +28,13 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import subprocess
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, Mock, patch
-from datetime import datetime, timezone
+from unittest.mock import patch
 
 import pytest
 
-from mctrader_data.nas_storage.dual_writer import DualWriter, DualWriteResult
+from mctrader_data.nas_storage.dual_writer import DualWriter
 from mctrader_data.nas_storage.nas_uploader import NASUploader, PutResult
 from mctrader_data.nas_storage.retry_queue import RetryQueue
 
@@ -110,14 +108,23 @@ class TestL2CommittedPartition:
         sample_ohlcv_payload: bytes,
         sample_ohlcv_sha256: str,
     ) -> None:
-        """L2 compaction tick → DualWriter.write committed → bucket prefix `tier=L2/.../hour=HH/node=MERGED/part-*.parquet` 출현.
+        """L2 compaction tick → DualWriter.write committed.
 
+        bucket prefix `tier=L2/.../hour=HH/node=MERGED/part-*.parquet` 출현.
         Mock NASUploader.put() → PutResult(status='uploaded')
         → DualWriteResult(status='committed').
         """
         # RED: fail expected — DualWriter.write not yet wired to CompactorRunner
-        local_path = tmp_path / "local_root" / "schema_version=v1" / "exchange=KRX" / "symbol=005930" / "channel=upbit" / "tier=L2" / "date=2026-05-13" / "hour=14" / "node=MERGED" / "part-00000.parquet"
-        nas_key = "schema_version=v1/exchange=KRX/symbol=005930/channel=upbit/tier=L2/date=2026-05-13/hour=14/node=MERGED/part-00000.parquet"
+        local_path = (
+            tmp_path / "local_root" / "schema_version=v1"
+            / "exchange=KRX" / "symbol=005930" / "channel=upbit"
+            / "tier=L2" / "date=2026-05-13" / "hour=14" / "node=MERGED"
+            / "part-00000.parquet"
+        )
+        nas_key = (
+            "schema_version=v1/exchange=KRX/symbol=005930/channel=upbit"
+            "/tier=L2/date=2026-05-13/hour=14/node=MERGED/part-00000.parquet"
+        )
 
         with patch.object(dual_writer._uploader, "put") as mock_put:
             mock_put.return_value = PutResult(
@@ -155,14 +162,22 @@ class TestL3CommittedPartition:
         sample_ohlcv_payload: bytes,
         sample_ohlcv_sha256: str,
     ) -> None:
-        """L3 compaction tick → DualWriter.write committed → bucket prefix `tier=L3/.../date=D/node=MERGED/file.parquet` 출현 (hour 없음).
+        """L3 compaction tick → DualWriter.write committed (hour 없음).
 
+        bucket prefix `tier=L3/.../date=D/node=MERGED/file.parquet` 출현.
         Mock NASUploader.put() → PutResult(status='uploaded')
         → DualWriteResult(status='committed').
         """
         # RED: fail expected
-        local_path = tmp_path / "local_root" / "schema_version=v1" / "exchange=KRX" / "symbol=005930" / "channel=upbit" / "tier=L3" / "date=2026-05-13" / "node=MERGED" / "file.parquet"
-        nas_key = "schema_version=v1/exchange=KRX/symbol=005930/channel=upbit/tier=L3/date=2026-05-13/node=MERGED/file.parquet"
+        local_path = (
+            tmp_path / "local_root" / "schema_version=v1"
+            / "exchange=KRX" / "symbol=005930" / "channel=upbit"
+            / "tier=L3" / "date=2026-05-13" / "node=MERGED" / "file.parquet"
+        )
+        nas_key = (
+            "schema_version=v1/exchange=KRX/symbol=005930/channel=upbit"
+            "/tier=L3/date=2026-05-13/node=MERGED/file.parquet"
+        )
 
         with patch.object(dual_writer._uploader, "put") as mock_put:
             mock_put.return_value = PutResult(
@@ -196,14 +211,23 @@ class TestNASUnreachableLocalOnly:
         sample_ohlcv_payload: bytes,
         sample_ohlcv_sha256: str,
     ) -> None:
-        """NAS endpoint unreachable (mock return queued) → DualWriter.write local_only → retry_queue.size() > 0.
+        """NAS endpoint unreachable (mock return queued) → DualWriter.write local_only.
 
+        retry_queue.size() > 0.
         Mock NASUploader.put() → PutResult(status='queued')
         → DualWriteResult(status='local_only').
         """
         # RED: fail expected
-        local_path = tmp_path / "local_root" / "schema_version=v1" / "exchange=KRX" / "symbol=005930" / "channel=upbit" / "tier=L2" / "date=2026-05-13" / "hour=14" / "node=MERGED" / "part-00000.parquet"
-        nas_key = "schema_version=v1/exchange=KRX/symbol=005930/channel=upbit/tier=L2/date=2026-05-13/hour=14/node=MERGED/part-00000.parquet"
+        local_path = (
+            tmp_path / "local_root" / "schema_version=v1"
+            / "exchange=KRX" / "symbol=005930" / "channel=upbit"
+            / "tier=L2" / "date=2026-05-13" / "hour=14" / "node=MERGED"
+            / "part-00000.parquet"
+        )
+        nas_key = (
+            "schema_version=v1/exchange=KRX/symbol=005930/channel=upbit"
+            "/tier=L2/date=2026-05-13/hour=14/node=MERGED/part-00000.parquet"
+        )
 
         with patch.object(dual_writer._uploader, "put") as mock_put:
             mock_put.return_value = PutResult(
@@ -235,14 +259,23 @@ class TestHardFloorBlockedSOP:
         sample_ohlcv_payload: bytes,
         sample_ohlcv_sha256: str,
     ) -> None:
-        """retry_queue hard floor (1000seg/10GB) exceeded → DualWriter.write hard_floor_blocked → local tmp rollback + status=hard_floor_blocked.
+        """retry_queue hard floor (1000seg/10GB) exceeded → DualWriter.write hard_floor_blocked.
 
+        local tmp rollback + status=hard_floor_blocked.
         Mock NASUploader.put() → PutResult(status='hard_floor_blocked')
         → DualWriteResult(status='hard_floor_blocked').
         """
         # RED: fail expected
-        local_path = tmp_path / "local_root" / "schema_version=v1" / "exchange=KRX" / "symbol=005930" / "channel=upbit" / "tier=L2" / "date=2026-05-13" / "hour=14" / "node=MERGED" / "part-00000.parquet"
-        nas_key = "schema_version=v1/exchange=KRX/symbol=005930/channel=upbit/tier=L2/date=2026-05-13/hour=14/node=MERGED/part-00000.parquet"
+        local_path = (
+            tmp_path / "local_root" / "schema_version=v1"
+            / "exchange=KRX" / "symbol=005930" / "channel=upbit"
+            / "tier=L2" / "date=2026-05-13" / "hour=14" / "node=MERGED"
+            / "part-00000.parquet"
+        )
+        nas_key = (
+            "schema_version=v1/exchange=KRX/symbol=005930/channel=upbit"
+            "/tier=L2/date=2026-05-13/hour=14/node=MERGED/part-00000.parquet"
+        )
 
         with patch.object(dual_writer._uploader, "put") as mock_put:
             mock_put.return_value = PutResult(
@@ -285,7 +318,7 @@ class TestL1NoNASUpload:
             in_run_l1 = False
             l1_lines = []
 
-            for i, line in enumerate(lines):
+            for _, line in enumerate(lines):
                 if "def _run_l1(" in line or "def compact_segment(" in line:
                     in_run_l1 = True
                 elif in_run_l1 and line.startswith("    def "):
@@ -385,8 +418,16 @@ class TestL2CompactionLatencyBaseline:
         Verify total elapsed < 3000ms.
         """
         # RED: fail expected — latency baseline not yet verified
-        local_path = tmp_path / "local_root" / "schema_version=v1" / "exchange=KRX" / "symbol=005930" / "channel=upbit" / "tier=L2" / "date=2026-05-13" / "hour=14" / "node=MERGED" / "part-00000.parquet"
-        nas_key = "schema_version=v1/exchange=KRX/symbol=005930/channel=upbit/tier=L2/date=2026-05-13/hour=14/node=MERGED/part-00000.parquet"
+        local_path = (
+            tmp_path / "local_root" / "schema_version=v1"
+            / "exchange=KRX" / "symbol=005930" / "channel=upbit"
+            / "tier=L2" / "date=2026-05-13" / "hour=14" / "node=MERGED"
+            / "part-00000.parquet"
+        )
+        nas_key = (
+            "schema_version=v1/exchange=KRX/symbol=005930/channel=upbit"
+            "/tier=L2/date=2026-05-13/hour=14/node=MERGED/part-00000.parquet"
+        )
 
         # Simulate NAS latency (mock as 50ms for unit test, real perf uses pytest-benchmark)
         mock_nas_latency_ms = 50.0

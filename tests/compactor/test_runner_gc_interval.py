@@ -9,7 +9,6 @@ heap, mitigating compactor memory growth under sustained L1→L2→L3 work.
 from __future__ import annotations
 
 import asyncio
-import time
 from pathlib import Path
 from unittest.mock import patch
 

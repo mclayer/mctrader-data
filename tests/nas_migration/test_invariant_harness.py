@@ -29,21 +29,16 @@ from __future__ import annotations
 
 import hashlib
 import io
-import json
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-import pytest
 
 from mctrader_data.nas_storage.nas_uploader import NASUploader
 from mctrader_data.nas_migration.invariant_harness import (
     InvariantHarness,
-    InvariantResult,
-    PerInvariantResult,
 )
 
 
@@ -80,10 +75,9 @@ ADR009_SCHEMA = pa.schema([
 
 def _make_parquet_bytes(schema: pa.Schema | None = None, n_rows: int = 3) -> bytes:
     """Create minimal valid parquet bytes with given schema."""
-    if schema is None:
-        schema = ADR009_SCHEMA
+    resolved: pa.Schema = schema if schema is not None else ADR009_SCHEMA
     arrays = []
-    for field in schema:
+    for field in resolved:
         if pa.types.is_string(field.type) or pa.types.is_large_string(field.type):
             arrays.append(pa.array(["v"] * n_rows, type=field.type))
         elif pa.types.is_int64(field.type):
@@ -92,7 +86,7 @@ def _make_parquet_bytes(schema: pa.Schema | None = None, n_rows: int = 3) -> byt
             arrays.append(pa.array([Decimal("1.0")] * n_rows, type=field.type))
         else:
             arrays.append(pa.array([None] * n_rows, type=field.type))
-    table = pa.table(dict(zip(schema.names, arrays)), schema=schema)
+    table = pa.table(dict(zip(resolved.names, arrays, strict=False)), schema=resolved)
     buf = io.BytesIO()
     pq.write_table(table, buf)
     return buf.getvalue()
@@ -147,12 +141,15 @@ class TestInvariantHarnessAllPass:
         §6.2.3: all PASS → InvariantResult(status="all_pass", per_invariant_results=...)
         """
         local_root = tmp_path / "local"
-        partition_path = local_root / "schema_version=v1" / "exchange=KRX" / "symbol=005930" / "date=20260513" / "node=node1" / "tier=L2"
+        partition_path = (
+            local_root / "schema_version=v1" / "exchange=KRX"
+            / "symbol=005930" / "date=20260513" / "node=node1" / "tier=L2"
+        )
         partition_path.mkdir(parents=True)
 
         # Write local parquet
         data = _write_parquet(partition_path / "seg_001.parquet")
-        sha = _sha256(data)
+        _sha256(data)  # sha computed but only stored in nas_objects via data
 
         nas_key = "schema_version=v1/exchange=KRX/symbol=005930/date=20260513/node=node1/tier=L2/seg_001.parquet"
         nas_objects = {nas_key: data}
@@ -181,7 +178,7 @@ class TestInvariantHarnessAllPass:
         partition_path = local_root / "schema_version=v1" / "seg"
         partition_path.mkdir(parents=True)
 
-        local_data = _write_parquet(partition_path / "seg.parquet")
+        _write_parquet(partition_path / "seg.parquet")
         nas_data = b"COMPLETELY DIFFERENT CONTENT"  # sha256 mismatch
 
         nas_objects = {
@@ -438,7 +435,7 @@ class TestInvariantHarnessDtype:
         part.mkdir(parents=True)
 
         # local: correct Decimal(38,9)
-        local_data = _write_parquet(part / "f.parquet")  # ADR009_SCHEMA
+        _write_parquet(part / "f.parquet")  # ADR009_SCHEMA
 
         # NAS: wrong Decimal precision (38,8 instead of 38,9)
         schema_wrong_prec = pa.schema([

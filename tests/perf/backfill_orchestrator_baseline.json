@@ -1,0 +1,27 @@
+{
+  "story": "MCT-159",
+  "measured_at": "2026-05-13T10:30:00Z",
+  "scope": "L2/L3 cold tier backlog 8.85 GiB / 7118 files",
+  "model": "analytical — per_chunk_s_p99 x n_chunks / parallel_workers",
+  "per_chunk_s_p99": 3.0,
+  "per_chunk_s_source": "MCT-148 T2 50MB p99 ~2871ms (baseline reuse)",
+  "parallel_workers": 10,
+  "n_chunks_total": 7118,
+  "n_chunks_by_case": {
+    "orderbooksnapshot_L2": 2305,
+    "orderbooksnapshot_L3": 429,
+    "transaction_L2": 3335,
+    "transaction_L3": 1049
+  },
+  "total_wall_clock_min": 35.6,
+  "total_wall_clock_s": 2134.0,
+  "nfr_budget_min": 80,
+  "margin_min": 44.4,
+  "nfr_pass": true,
+  "notes": [
+    "Phase 3 실 이관 시 실측값으로 갱신 의무 (AC-Phase3-H)",
+    "per_chunk_s = 3.0 은 MCT-153 NFR-3 baseline (MCT-148 T2 latency 기반)",
+    "margin = 80 - 35.6 = 44.4 min >= 45 min target 미만 (경계값, 실측 시 재검증)",
+    "7118 chunks x 3.0s / 10-parallel = 2134.0s = 35.57 min"
+  ]
+}

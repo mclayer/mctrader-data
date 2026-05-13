@@ -23,13 +23,12 @@ MCT-150 lesson 4 invariants 적용:
 from __future__ import annotations
 
 import hashlib
-import io
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock
 
 import pytest
 
-from mctrader_data.nas_storage.dual_writer import DualWriteResult, DualWriter
+from mctrader_data.nas_storage.dual_writer import DualWriter
 from mctrader_data.nas_storage.nas_uploader import NASUploader, PutResult
 
 
@@ -40,7 +39,7 @@ def _sha256(data: bytes) -> str:
 
 
 def _make_put_result(status: str, etag: str = "abc123") -> PutResult:
-    return PutResult(status=status, object_etag=etag, latency_ms=1.0)
+    return PutResult(status=status, object_etag=etag, latency_ms=1.0)  # type: ignore[arg-type]
 
 
 def _make_uploader(put_status: str, etag: str = "abc123") -> NASUploader:
@@ -226,7 +225,7 @@ class TestDualWriterPutResultPropagation:
         result2 = writer2.write(local_path=local_path2, nas_key="idem_key", data=payload, sha256=payload_sha256)
         assert result2.status == "committed"
         # NAS put called once per writer
-        uploader2.put.assert_called_once()
+        uploader2.put.assert_called_once()  # type: ignore[attr-defined]
 
 
 # ─── §6.9 #1: sha256 unconditional verify ────────────────────────────────────
@@ -256,7 +255,7 @@ class TestDualWriterSha256Verify:
             )
 
         # NAS PUT must NOT have been called (unconditional, before NAS)
-        uploader.put.assert_not_called()
+        uploader.put.assert_not_called()  # type: ignore[attr-defined]
 
     def test_sha256_correct_proceeds_to_nas_put(
         self, local_root: Path, payload: bytes, payload_sha256: str
@@ -274,7 +273,7 @@ class TestDualWriterSha256Verify:
         )
 
         assert result.status == "committed"
-        uploader.put.assert_called_once()
+        uploader.put.assert_called_once()  # type: ignore[attr-defined]
 
 
 # ─── §6.8: wording SSOT ──────────────────────────────────────────────────────
@@ -353,7 +352,7 @@ class TestChaosNasUnreachableL1InFlight:
         # Mix of status to simulate chaos: 3 queued + 1 hard_floor + 1 uploaded
         statuses = ["queued", "queued", "hard_floor_blocked", "queued", "uploaded"]
 
-        for (key, data), put_status in zip(segments, statuses):
+        for (key, data), put_status in zip(segments, statuses, strict=False):
             sha = hashlib.sha256(data).hexdigest()
             uploader = _make_uploader(put_status)
             writer = DualWriter(nas_uploader=uploader, local_root=local_root)

@@ -13,7 +13,6 @@ import os
 import time
 from pathlib import Path
 
-import pytest
 
 from mctrader_data.compactor.gc_daemon import (
     ARCHIVE_FAILED_GRACE_SECONDS,

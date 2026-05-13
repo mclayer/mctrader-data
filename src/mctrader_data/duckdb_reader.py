@@ -3,7 +3,7 @@ from __future__ import annotations
 import contextlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Generator
+from collections.abc import Generator
 from urllib.parse import urlparse
 
 

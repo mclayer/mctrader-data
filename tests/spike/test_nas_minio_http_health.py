@@ -9,7 +9,7 @@ from tests.spike.conftest import NAS_MINIO_ENDPOINT, skip_if_no_nas
 
 @skip_if_no_nas
 def test_http_health_live_returns_200():
-    health_url = NAS_MINIO_ENDPOINT.rstrip("/") + "/minio/health/live"
+    health_url = NAS_MINIO_ENDPOINT.rstrip("/") + "/minio/health/live"  # type: ignore[union-attr]
     req = urllib.request.Request(health_url)
     with urllib.request.urlopen(req, timeout=5) as resp:
         assert resp.status == 200, f"expected 200, got {resp.status}"
@@ -17,7 +17,7 @@ def test_http_health_live_returns_200():
 
 @skip_if_no_nas
 def test_http_health_ready_returns_200():
-    ready_url = NAS_MINIO_ENDPOINT.rstrip("/") + "/minio/health/ready"
+    ready_url = NAS_MINIO_ENDPOINT.rstrip("/") + "/minio/health/ready"  # type: ignore[union-attr]
     req = urllib.request.Request(ready_url)
     with urllib.request.urlopen(req, timeout=5) as resp:
         assert resp.status == 200, f"expected 200, got {resp.status}"

@@ -99,9 +99,8 @@ def test_l1_cleans_tmp_on_exception(tmp_path: Path) -> None:
 
     with patch(
         "mctrader_data.compactor.l1.pq.ParquetWriter", return_value=fake_writer
-    ):
-        with pytest.raises(RuntimeError, match="boom"):
-            compactor.compact_segment(sealed)
+    ), pytest.raises(RuntimeError, match="boom"):
+        compactor.compact_segment(sealed)
 
     # Find any leftover .parquet.tmp anywhere under market/ tree
     market_root = tmp_path / "market"

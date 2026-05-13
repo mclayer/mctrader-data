@@ -118,7 +118,7 @@ def test_collect_heartbeat_interval_default_help() -> None:
 def test_backfill_quarantine_dir_json_created() -> None:
     """backfill with --policy quarantine creates a .json file under quarantine/ for bad candles."""
     # A candle with high < low triggers VALUE_OUT_OF_RANGE → QUARANTINE under quarantine policy.
-    bad_candle = CandleModel(
+    bad_candle = CandleModel.model_construct(  # bypass validation — intentional bad data
         ts_utc=datetime(2026, 5, 1, 0, 0, 0, tzinfo=timezone.utc),
         exchange="test",
         symbol=Symbol(base="BTC", quote="KRW"),
