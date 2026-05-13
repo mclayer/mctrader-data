@@ -414,3 +414,151 @@ class PrometheusExporter:
         """
         self._ensure_dual_write_window_metrics()
         self._dww_sop_trigger_count.labels(sop_state=sop_state).inc()
+
+    # ─── MCT-153 신규 method (nas_backfill_* prefix — NFR-4 prefix-disjoint) ──
+
+    def _ensure_backfill_metrics(self) -> None:
+        """Lazy-initialize nas_backfill_* metrics (NFR-4 prefix-disjoint 의무).
+
+        MCT-150 nas_uploader_* + MCT-151 nas_invariant_* + MCT-152 nas_dual_write_window_*
+        prefix 와 collision 0 보장.
+        emit_backfill_* method 최초 호출 시 1회 초기화.
+
+        Metrics (§6.4 chief decision 박제, variant 금지):
+        - nas_backfill_chunks_total (Counter)
+        - nas_backfill_chunks_completed_total (Counter, labels: status [5 enum])
+        - nas_backfill_put_latency_seconds (Histogram, buckets [0.5,1.0,2.0,5.0,10.0,30.0])
+        - nas_backfill_legacy_node_default_count (Counter)
+        - nas_backfill_quarantine_count (Counter, labels: fail_invariant [7 enum])
+        - nas_backfill_resumable_count (Counter)
+        """
+        if hasattr(self, "_backfill_initialized"):
+            return
+
+        _reg = self.__dict__.get("_registry_ref", REGISTRY)
+
+        self._bf_chunks_total = Counter(
+            "nas_backfill_chunks_total",
+            "Total chunks discovered by BackfillOrchestrator partition discovery (MCT-153 §6.2.1)",
+            registry=_reg,
+        )
+
+        self._bf_chunks_completed = Counter(
+            "nas_backfill_chunks_completed_total",
+            "BackfillOrchestrator per-chunk processing result count (MCT-153 §6.2.1)",
+            ["status"],
+            registry=_reg,
+        )
+
+        self._bf_put_latency = Histogram(
+            "nas_backfill_put_latency_seconds",
+            "NASUploader.put() latency per chunk during backfill (MCT-153 AC-2)",
+            [],
+            buckets=(0.5, 1.0, 2.0, 5.0, 10.0, 30.0),
+            registry=_reg,
+        )
+
+        self._bf_legacy_node_default = Counter(
+            "nas_backfill_legacy_node_default_count",
+            "Partition count where node= prefix was absent and node=DEFAULT was inserted (MCT-153 S6, AC-3)",
+            registry=_reg,
+        )
+
+        self._bf_quarantine = Counter(
+            "nas_backfill_quarantine_count",
+            "Chunks quarantined after 3 invariant verify retries (MCT-153 AC-4)",
+            ["fail_invariant"],
+            registry=_reg,
+        )
+
+        self._bf_resumable = Counter(
+            "nas_backfill_resumable_count",
+            "Chunks in pending/in_flight/sop_skipped state at BackfillOrchestrator.run() exit (MCT-153 AC-5)",
+            registry=_reg,
+        )
+
+        self._backfill_initialized = True
+
+    def emit_backfill_chunks_total(self, count: int) -> None:
+        """Partition discovery 결과 총 chunk 수 emit — Counter.
+
+        Metrics (nas_backfill_* prefix — NFR-4 freeze):
+        - nas_backfill_chunks_total (Counter)
+
+        Phase B (partition discovery) 완료 시점 1회 호출.
+        §6.8 Wording SSOT: BackfillOrchestrator Phase B exit 시점 박제.
+        """
+        self._ensure_backfill_metrics()
+        self._bf_chunks_total.inc(count)
+
+    def emit_backfill_chunks_completed(self, status: str) -> None:
+        """Per-chunk processing result emit — Counter with status label.
+
+        Metrics (nas_backfill_* prefix — NFR-4 freeze):
+        - nas_backfill_chunks_completed_total (Counter, labels: status)
+
+        §6.8 Wording SSOT: status ∈ {
+            "chunk_verified", "chunk_skipped_resumed", "chunk_quarantined",
+            "chunk_blocked", "chunk_sop_skipped"
+        } (ChunkResult.status 5 enum).
+        variant 사용 금지.
+        Per-chunk Phase D 완료 시점 1회 호출.
+        """
+        self._ensure_backfill_metrics()
+        self._bf_chunks_completed.labels(status=status).inc()
+
+    def emit_backfill_put_latency(self, latency_s: float) -> None:
+        """NASUploader.put() per-chunk latency emit — Histogram.
+
+        Metrics (nas_backfill_* prefix — NFR-4 freeze):
+        - nas_backfill_put_latency_seconds (Histogram, buckets [0.5,1.0,2.0,5.0,10.0,30.0])
+
+        §6.2.1 Metric emission 박제.
+        NFR-3 cross-reference: MCT-148 T2 baseline 50MB p99=2870.65ms (2.87s).
+        per-chunk PUT 완료 시점 호출 (PutResult.latency_ms 로 환산).
+        """
+        self._ensure_backfill_metrics()
+        self._bf_put_latency.observe(latency_s)
+
+    def emit_backfill_legacy_node_default(self) -> None:
+        """Legacy node= 부재 partition 의 node=DEFAULT 삽입 event emit — Counter.
+
+        Metrics (nas_backfill_* prefix — NFR-4 freeze):
+        - nas_backfill_legacy_node_default_count (Counter)
+
+        S6 박제 enforcement marker.
+        ADR-009 §D2.1: node= 부재 legacy partition → NAS PUT 시 node=DEFAULT 명시 삽입.
+        _build_chunk_spec() 에서 is_legacy_node=True 검출 시 호출.
+        """
+        self._ensure_backfill_metrics()
+        self._bf_legacy_node_default.inc()
+
+    def emit_backfill_quarantine(self, fail_invariant: str) -> None:
+        """Chunk quarantine event emit — Counter with fail_invariant label.
+
+        Metrics (nas_backfill_* prefix — NFR-4 freeze):
+        - nas_backfill_quarantine_count (Counter, labels: fail_invariant)
+
+        §6.8 Wording SSOT: fail_invariant ∈ {
+            "sha256_fail", "object_count_fail", "row_count_fail",
+            "column_count_fail", "column_order_fail", "dtype_fail", "schema_version_fail"
+        } (InvariantResult.status 7종 fail enum — MCT-151 §6.8 SSOT).
+        variant 사용 금지.
+        quarantine 결정 시점 (3 retry 소진 후) 호출.
+        Alert consume: NASInvariantSchemaDriftDetected (MCT-151 land nas_invariant_rules.yml).
+        """
+        self._ensure_backfill_metrics()
+        self._bf_quarantine.labels(fail_invariant=fail_invariant).inc()
+
+    def emit_backfill_resumable(self, count: int) -> None:
+        """Phase E exit 시점 pending+in_flight+sop_skipped chunk 수 emit — Counter.
+
+        Metrics (nas_backfill_* prefix — NFR-4 freeze):
+        - nas_backfill_resumable_count (Counter)
+
+        AC-5 chaos test resumability evidence marker.
+        BackfillOrchestrator.run() Phase E exit 시점 1회 호출.
+        count > 0 이면 BackfillResult.status="checkpoint_resumable" 확인 의무.
+        """
+        self._ensure_backfill_metrics()
+        self._bf_resumable.inc(count)
