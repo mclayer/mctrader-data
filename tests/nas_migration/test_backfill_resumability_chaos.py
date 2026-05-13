@@ -109,18 +109,25 @@ def make_parquet(path: Path, rows: int = 2) -> bytes:
 
 
 def make_10_partitions(local_root: Path) -> list[Path]:
-    """10 closed-day partition 생성 (chaos test testbed — 2025-01-01 ~ 2025-01-10)."""
+    """10 closed-day partition 생성 (chaos test testbed — 2025-01-01 ~ 2025-01-10).
+
+    MCT-159 갱신: schema_version=* + hour + node=MERGED 신규 schema 경로 사용.
+    """
     partitions = []
     for i in range(10):
         date = f"2025-01-{i+1:02d}"
+        # MCT-159: 신규 schema 경로 (schema_version=* + hour + node=MERGED)
         p_dir = (
             local_root
             / "market"
             / "orderbooksnapshot"
+            / "schema_version=orderbook_snapshot.v1"
             / "tier=L2"
             / "exchange=BITHUMB"
             / "symbol=BTC_KRW"
             / f"date={date}"
+            / "hour=10"
+            / "node=MERGED"
         )
         p_dir.mkdir(parents=True, exist_ok=True)
         pf = p_dir / "data.parquet"

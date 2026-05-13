@@ -114,39 +114,42 @@ def make_parquet(path: Path, rows: int = 3) -> bytes:
 
 def make_partition_dir(
     root: Path,
-    symbol: str = "BTC_KRW",
-    date: str = "2025-01-01",
-    node: str | None = None,
-    exchange: str = "BITHUMB",
+    *,
+    channel: str = "orderbooksnapshot",
+    schema_version: str = "orderbook_snapshot.v1",
     tier: str = "L2",
+    exchange: str = "BITHUMB",
+    symbol: str = "BTC_KRW",
+    date_str: str = "2025-01-01",
+    hour: str | None = None,  # MCT-159: hour key 처리
+    node: str | None = "MERGED",  # MCT-159: 신규 schema default node=MERGED
 ) -> Path:
-    """test용 local partition 디렉토리 생성 (ADR-009 §D2.1 layout 정합).
+    """test용 local partition 디렉토리 생성 (신규 schema — MCT-159).
 
-    node=None → legacy (node= prefix 부재)
-    node="MAIN" → non-legacy
+    MCT-159 갱신: schema_version=* + hour + node 지원.
+    - schema_version=<v> 레이어 추가 (hot-fix 2026-05-13 정합)
+    - hour=<HH> 선택적 추가 (신규 schema 의무, legacy backward-compat)
+    - node=<N> 선택적 추가 (MERGED = 신규 schema 기본)
+    - node=None → legacy path (node= prefix 부재)
+
+    NOTE: 기존 signature 와 하위 호환 불가 (positional arg 제거) — 기존 호출부 갱신 필요.
     """
+    parts: list[Path | str] = [
+        root, "market", channel,
+        f"schema_version={schema_version}",
+        f"tier={tier}",
+        f"exchange={exchange}",
+        f"symbol={symbol}",
+        f"date={date_str}",
+    ]
+    if hour is not None:
+        parts.append(f"hour={hour}")
     if node is not None:
-        partition_dir = (
-            root
-            / "market"
-            / "orderbooksnapshot"
-            / f"tier={tier}"
-            / f"exchange={exchange}"
-            / f"symbol={symbol}"
-            / f"date={date}"
-            / f"node={node}"
-        )
-    else:
-        # legacy: node= prefix 부재
-        partition_dir = (
-            root
-            / "market"
-            / "orderbooksnapshot"
-            / f"tier={tier}"
-            / f"exchange={exchange}"
-            / f"symbol={symbol}"
-            / f"date={date}"
-        )
+        parts.append(f"node={node}")
+
+    partition_dir = Path(*[str(p) for p in parts[:2]])
+    for p in parts[2:]:
+        partition_dir = partition_dir / str(p)
     partition_dir.mkdir(parents=True, exist_ok=True)
     return partition_dir
 
@@ -466,7 +469,7 @@ def test_orchestrator_run_all_verified(
     """AC-2 + AC-4: mock all pass → BackfillResult.status='all_chunks_verified'."""
     # 2 closed-day partitions
     for date in ["2025-01-01", "2025-01-02"]:
-        p_dir = make_partition_dir(local_root, date=date)
+        p_dir = make_partition_dir(local_root, date_str=date)
         make_parquet(p_dir / "data.parquet")
 
     mock_uploader.put.return_value = PutResult(status="uploaded", latency_ms=100.0)
@@ -487,7 +490,7 @@ def test_orchestrator_run_invariant_fail_quarantined(
     orchestrator, local_root, mock_uploader, mock_harness, mock_sop
 ):
     """AC-4: invariant sha256_fail × 3 retry → chunk_invariant_failed + quarantined_chunks > 0."""
-    p_dir = make_partition_dir(local_root, date="2025-01-01")
+    p_dir = make_partition_dir(local_root, date_str="2025-01-01")
     make_parquet(p_dir / "data.parquet")
 
     mock_uploader.put.return_value = PutResult(status="uploaded", latency_ms=100.0)
@@ -508,7 +511,7 @@ def test_orchestrator_run_hard_floor_blocked(
     orchestrator, local_root, mock_uploader, mock_harness, mock_sop
 ):
     """EC-1: NASUploader 가 hard_floor_blocked → BackfillResult.status='chunk_blocked'."""
-    p_dir = make_partition_dir(local_root, date="2025-01-01")
+    p_dir = make_partition_dir(local_root, date_str="2025-01-01")
     make_parquet(p_dir / "data.parquet")
 
     mock_uploader.put.return_value = PutResult(status="hard_floor_blocked", latency_ms=10.0)
@@ -526,7 +529,7 @@ def test_orchestrator_run_sop_manual_gate(
     orchestrator, local_root, mock_uploader, mock_harness, mock_sop
 ):
     """EC-1: Phase A SOPRunner.is_manual_gate()=True → checkpoint_resumable 즉시 반환."""
-    p_dir = make_partition_dir(local_root, date="2025-01-01")
+    p_dir = make_partition_dir(local_root, date_str="2025-01-01")
     make_parquet(p_dir / "data.parquet")
 
     mock_sop.is_manual_gate.return_value = True  # Phase A guard 트리거
@@ -552,7 +555,7 @@ def test_orchestrator_skip_verified_chunk_on_resume(
 ):
     """AC-5 resumability: 이미 verified chunk 는 재실행 시 skip (put() 호출 0)."""
     # 파티션 생성
-    p_dir = make_partition_dir(local_root, date="2025-01-01")
+    p_dir = make_partition_dir(local_root, date_str="2025-01-01")
     make_parquet(p_dir / "data.parquet")
 
     mock_uploader.put.return_value = PutResult(status="uploaded", latency_ms=100.0)
@@ -606,10 +609,10 @@ def test_closed_day_filter_excludes_today(
     past_str = "2025-01-01"
 
     # 당일 + 과거 두 파티션 생성
-    p_past = make_partition_dir(local_root, date=past_str)
+    p_past = make_partition_dir(local_root, date_str=past_str)
     make_parquet(p_past / "data.parquet")
 
-    p_today = make_partition_dir(local_root, date=today_str)
+    p_today = make_partition_dir(local_root, date_str=today_str)
     make_parquet(p_today / "data.parquet")
 
     mock_uploader.put.return_value = PutResult(status="uploaded", latency_ms=100.0)
