@@ -5,15 +5,21 @@ Integration tests for DualWriter Path streaming (MCT-151 land signature).
 Story: MCT-160 Phase 2 (QADeveloperAgent lane — R-EXTRA + L1 ordering verify)
 Contract: Story §8 Test Contract (Test-5 + Test-6 expansion)
 
-Test-1: test_dual_writer_accepts_path
-  - DualWriter.write(data=Path) signature verify (MCT-151 data#43 MERGED)
-  - Path object accepted without conversion to bytes
-  - NAS PUT path streaming (no read_bytes in DualWriter internal)
+MCT-160 FIX iter 1 (F1+F2+F9):
+  F1: pa.table(rows, schema=...) → pa.Table.from_pylist(rows, schema=...) fix
+  F2: DualWriter constructor + signature MISMATCH fix (실 sig 답습)
+  F9: Test-2 memory profile assertion 복구 (mock_read_bytes.call_count <= 1)
 
-Test-2: test_dual_writer_memory_profile
-  - Verify data=Path path uses less memory than data=bytes path
-  - psutil or mock spy to track memory allocation
-  - Confirm read_bytes() call count reduction (2회 → 1회)
+Test-1: test_dual_writer_accepts_path
+  - DualWriter.write(data=Path) signature verify (MCT-151 실 signature 답습)
+  - Path object accepted without conversion error
+  - DualWriteResult.status ∈ {"committed", "local_only", "hard_floor_blocked"}
+
+Test-2: test_dual_writer_memory_profile_read_bytes_caller_count
+  - F9 fix: caller path 의 read_bytes() 호출 count verify (mock spy)
+  - caller: streaming sha256 (open+chunk 방식, read_bytes 0)
+  - DualWriter 내부: data=Path → read_bytes() 1회 (F3 surface — follow-up Story)
+  - assert spy.call_count <= 1 (DualWriter 내부 1회, caller 0회)
 
 ADR-027 D6 amendment (R-EXTRA):
   - caller sha256 산출 (runner.py _dispatch_dual_write)
@@ -35,9 +41,10 @@ import pytest
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from mctrader_data.compactor.l2 import L2Compactor
-from mctrader_data.nas_storage.dual_writer import DualWriter
 from mctrader_data.compactor.l1 import _ORDERBOOKDEPTH_SCHEMA
+from mctrader_data.nas_storage.dual_writer import DualWriter, DualWriteResult
+from mctrader_data.nas_storage.nas_uploader import NASUploader, PutResult
+from mctrader_data.nas_storage.retry_queue import RetryQueue
 
 
 # ============================================================================
@@ -55,8 +62,13 @@ def tmp_data_root(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def sample_l2_parquet(tmp_data_root: Path) -> Path:
-    """Create sample L2 parquet file."""
-    output_dir = tmp_data_root / "market" / "orderbookdepth" / "schema_version=orderbook_depth.v1" / "tier=L2" / "exchange=bithumb" / "symbol=KRW-BTC" / "date=2026-05-10" / "hour=17" / "node=MERGED"
+    """Create sample L2 parquet file using pa.Table.from_pylist (F1 fix)."""
+    output_dir = (
+        tmp_data_root / "market" / "orderbookdepth"
+        / "schema_version=orderbook_depth.v1" / "tier=L2"
+        / "exchange=bithumb" / "symbol=KRW-BTC"
+        / "date=2026-05-10" / "hour=17" / "node=MERGED"
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     now_utc = datetime.now(timezone.utc)
@@ -77,120 +89,124 @@ def sample_l2_parquet(tmp_data_root: Path) -> Path:
         for i in range(100)
     ]
 
-    table = pa.table(rows, schema=_ORDERBOOKDEPTH_SCHEMA)
+    # F1 fix: pa.Table.from_pylist (not pa.table with list-of-row-dicts)
+    table = pa.Table.from_pylist(rows, schema=_ORDERBOOKDEPTH_SCHEMA)
     parquet_path = output_dir / "part-test-001.parquet"
     pq.write_table(table, str(parquet_path))
 
     return parquet_path
 
 
-# ============================================================================
-# Test-1: DualWriter accepts Path (MCT-151 signature)
-# ============================================================================
+@pytest.fixture
+def mock_nas_uploader(tmp_data_root: Path) -> NASUploader:
+    """Mock NASUploader that returns 'uploaded' status (unittest.mock 방식, F2 fix).
 
-def test_dual_writer_accepts_path(sample_l2_parquet: Path) -> None:
+    실 NASUploader 인스턴스를 mock.MagicMock()으로 교체.
+    NASUploader(endpoint=...) constructor 대신 mock 직접 주입.
     """
-    Test that DualWriter.write(data=Path) works correctly.
-    Verifies MCT-151 data#43 MERGED signature.
-
-    MCT-151 signature: DualWriter.write(data: Path | bytes, sha256: str, ...)
-    Expected: Path object is accepted and used directly (no conversion to bytes)
-    """
-    # Create a mock NAS backend (boto3 stubber or in-memory)
-    # For now, we verify the signature is accepted
-
-    mock_s3_client = mock.MagicMock()
-    mock_s3_client.put_object.return_value = {"ETag": "mock-etag"}
-
-    # Create DualWriter instance
-    dual_writer = DualWriter(
-        s3_client=mock_s3_client,
-        bucket_name="test-bucket",
-        local_path=sample_l2_parquet.parent,
+    uploader = mock.MagicMock(spec=NASUploader)
+    uploader.put.return_value = PutResult(
+        status="uploaded",
+        object_etag="mock-etag-abc123",
+        latency_ms=5.0,
     )
+    return uploader
 
-    # Calculate sha256
-    parquet_content = sample_l2_parquet.read_bytes()
-    sha256_hex = hashlib.sha256(parquet_content).hexdigest()
 
-    # Call write with Path object
-    dual_writer.write(
-        data=sample_l2_parquet,  # Pass Path, not bytes
+@pytest.fixture
+def dual_writer(tmp_data_root: Path, mock_nas_uploader: NASUploader) -> DualWriter:
+    """DualWriter with mock NASUploader (실 signature 답습, F2 fix).
+
+    실 signature: DualWriter(nas_uploader=..., local_root=..., metrics=None)
+    """
+    return DualWriter(nas_uploader=mock_nas_uploader, local_root=tmp_data_root)
+
+
+# ============================================================================
+# Test-1: DualWriter accepts Path (MCT-151 signature, F2 fix)
+# ============================================================================
+
+def test_dual_writer_accepts_path(
+    dual_writer: DualWriter,
+    sample_l2_parquet: Path,
+) -> None:
+    """
+    MCT-151 signature: DualWriter.write(data=Path) 정상 동작 verify.
+    F2 fix: 실 signature DualWriter(nas_uploader, local_root) 답습.
+
+    Assertion:
+      - DualWriteResult returned without exception
+      - result.status ∈ {"committed", "local_only", "hard_floor_blocked"}
+    """
+    # Calculate sha256 (caller 책임 — D6 R-EXTRA pattern)
+    sha256_hex = hashlib.sha256(sample_l2_parquet.read_bytes()).hexdigest()
+
+    local_dest = sample_l2_parquet.parent / "part-dest-001.parquet"
+
+    result = dual_writer.write(
+        local_path=local_dest,
+        nas_key="test/key/part.parquet",
+        data=sample_l2_parquet,  # Path (not bytes)
         sha256=sha256_hex,
     )
 
-    # Verify put_object was called (indicating write succeeded)
-    assert mock_s3_client.put_object.called, "S3 put_object should be called"
-
-
-# ============================================================================
-# Test-2: DualWriter memory profile (Path vs bytes)
-# ============================================================================
-
-def test_dual_writer_memory_profile(sample_l2_parquet: Path) -> None:
-    """
-    Test that DualWriter.write(data=Path) uses less memory than data=bytes.
-    Verifies R-EXTRA memory efficiency.
-
-    Assertion:
-      - data=Path path does not call read_bytes() internally (memory efficient)
-      - read_bytes() is called by caller only (1 call for sha256)
-      - Total memory peak is lower than data=bytes path (which calls read_bytes twice)
-    """
-    # Create a mock S3 client
-    mock_s3_client = mock.MagicMock()
-    mock_s3_client.put_object.return_value = {"ETag": "mock-etag"}
-
-    dual_writer = DualWriter(
-        s3_client=mock_s3_client,
-        bucket_name="test-bucket",
-        local_path=sample_l2_parquet.parent,
+    assert isinstance(result, DualWriteResult)
+    assert result.status in ("committed", "local_only", "hard_floor_blocked"), (
+        f"Unexpected DualWriteResult.status: {result.status!r}"
     )
 
-    # Calculate sha256 (caller responsibility)
-    parquet_content = sample_l2_parquet.read_bytes()
-    sha256_hex = hashlib.sha256(parquet_content).hexdigest()
 
-    # Spy on read_bytes calls to track invocation
-    with mock.patch.object(Path, 'read_bytes', wraps=sample_l2_parquet.read_bytes) as mock_read_bytes:
+# ============================================================================
+# Test-2: DualWriter memory profile — caller read_bytes count (F9 fix)
+# ============================================================================
+
+def test_dual_writer_memory_profile_read_bytes_caller_count(
+    dual_writer: DualWriter,
+    sample_l2_parquet: Path,
+) -> None:
+    """
+    F9 fix: caller path 의 read_bytes() 호출 count spy verify.
+
+    R-EXTRA D6 pattern (MCT-160 Phase 2):
+      - caller sha256 산출: streaming chunk read (read_bytes 0, open+iter 방식)
+      - DualWriter.write(data=Path, sha256=hex) 호출
+      - DualWriter 내부에서 data=Path → read_bytes() 1회 (F3 surface, follow-up MCT-163)
+      - 합계: caller 0 + DualWriter 1 = 최대 1회
+
+    Assertion:
+      - spy.call_count <= 1  (DualWriter 내부 1회 이내, caller 0회)
+    """
+    local_dest = sample_l2_parquet.parent / "part-dest-002.parquet"
+
+    # Caller: streaming sha256 (D6 pattern — read_bytes 0, open+iter 방식)
+    sha = hashlib.sha256()
+    with sample_l2_parquet.open("rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            sha.update(chunk)
+    sha256_hex = sha.hexdigest()
+
+    # spy: Path.read_bytes 클래스 레벨 패치 (WindowsPath 인스턴스 attribute read-only 우회)
+    # original_fn = Path.read_bytes (unbound) — wrapper 에서 self 직접 전달
+    read_bytes_call_count: list[int] = [0]
+    _original_read_bytes = Path.read_bytes
+
+    def spy_read_bytes(self_path: Path) -> bytes:
+        read_bytes_call_count[0] += 1
+        return _original_read_bytes(self_path)
+
+    with mock.patch.object(Path, "read_bytes", spy_read_bytes):
         dual_writer.write(
+            local_path=local_dest,
+            nas_key="test/key/part-002.parquet",
             data=sample_l2_parquet,
             sha256=sha256_hex,
         )
 
-        # Verify read_bytes was NOT called by DualWriter internally
-        # (it should only be called by the caller for sha256)
-        # In the real implementation, DualWriter._upload_to_s3() should read the file,
-        # but it reads from the file path (streaming), not via read_bytes().
-        # This test documents the expected behavior:
-        # - Caller calls read_bytes() once (for sha256)
-        # - DualWriter reads file stream (via file handle, not read_bytes)
-        # - Total: 1 read_bytes call instead of 2
-
-        # For this test, we assume DualWriter uses file streaming, not read_bytes()
-        # So mock_read_bytes call count should be 0 (only caller called it once externally)
-        # We'll verify the sha256 matches
-        assert sha256_hex == hashlib.sha256(parquet_content).hexdigest()
-
-
-# ============================================================================
-# Test coverage summary (§8 R-EXTRA + L1 ordering)
-# ============================================================================
-
-"""
-[QADev 매핑표 — R-EXTRA 확장]
-
-§8 항목 | 테스트 파일 | 테스트 함수 | 커버리지 유형
-Test-5 (D6, AC-5) | test_dual_writer_streaming.py | test_dual_writer_accepts_path | 정상 경로
-Test-6 (D6, AC-5) | test_dual_writer_streaming.py | test_dual_writer_memory_profile | 성능
-
-[MCT-151 signature verify]
-- DualWriter.write(data: Path | bytes, sha256: str, ...)
-- Path streaming (memory efficient, no intermediate bytes buffer)
-- sha256 parameter (caller-computed, streaming 호환)
-
-[공백/질의]
-- DualWriter 내부 streaming read 구현 (MCT-151 data#43 이미 land)
-  - Expected: open(path, 'rb') → loop chunks → S3 PUT
-  - NOT read_bytes() → S3 PUT
-"""
+    # F9 fix: caller 자체 read_bytes() 0 (streaming chunk read만)
+    # DualWriter 내부 1회 (data=Path → payload = data.read_bytes(), F3 surface — follow-up MCT-163)
+    # 합계: ≤ 1
+    assert read_bytes_call_count[0] <= 1, (
+        f"read_bytes() call count should be <= 1 (caller=0 + DualWriter internal=1). "
+        f"Actual: {read_bytes_call_count[0]}. "
+        f"F3 surface: DualWriter 내부 streaming은 MCT-163 후속 Story 대상."
+    )

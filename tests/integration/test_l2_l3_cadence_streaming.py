@@ -498,11 +498,11 @@ def test_post_write_monotonic_verify_quarantine(tmp_data_root: Path, sample_non_
     # Quarantine directory should exist at:
     #   /tmp/.../data/quarantine/l2/non_monotonic_ts/market/orderbookdepth/...
 
-    # Check for quarantine directory (if Phase 2 impl complete)
-    quarantine_root = root / "quarantine" / "l2" / "non_monotonic_ts"
-    # In full Phase 2, this should exist:
-    # assert quarantine_root.exists(), "Quarantine directory should be created"
-    # assert list(quarantine_root.rglob("part-*.parquet")), "Quarantined parquet should exist"
+    # F8 fix: quarantine assertion 복구 (MCT-160 CodeReviewPL P2 finding)
+    # L2 quarantine layout: <root>/market/<channel>/quarantine/<date>/<reason>/part-*.parquet
+    quarantine_root = root / "market" / channel / "quarantine"
+    assert quarantine_root.exists(), "Quarantine directory should be created on monotonic violation"
+    assert list(quarantine_root.rglob("part-*.parquet")), "Quarantined parquet file should exist"
 
 
 # ============================================================================
@@ -646,28 +646,59 @@ def test_l1_nullability_3_schema() -> None:
 # Test-7: L1 malformed frame quarantine (D7, AC-6, Edge Case)
 # ============================================================================
 
-def test_l1_malformed_frame_value_error() -> None:
+def test_l1_malformed_frame_value_error(tmp_data_root: Path) -> None:
     """
-    Test that malformed orderbookdepth frames (missing required fields like side/price/quantity)
-    raise ValueError with informative message.
+    F4 fix: malformed orderbookdepth frame → ValueError raise + Counter +1.
 
     D7 verify: malformed frame ValueError + Counter +1
-    AC-6: edge case handling (MCT-162 CodeReviewPL P1 finding)
+    AC-6: edge case handling (MCT-160 CodeReviewPL P1 finding)
 
-    Edge case: orderbookdepth "changes" level with None side or price
-    Expected: ValueError raise with "malformed orderbookdepth frame at index=..."
+    Edge case: orderbookdepth "changes" level with None side
+    Expected: ValueError raise with "malformed orderbookdepth frame at index=0"
     """
-    # This test verifies that the l1.py orderbookdepth converter will raise ValueError
-    # for malformed frames. The actual converter function (e.g., _orderbookdepth_dicts_to_arrow)
-    # is in l1.py and should validate side, price, quantity are not None.
+    # Reset Prometheus counter registry to avoid carryover from other tests
+    # Use a fresh L1Compactor instance with _current_meta pre-set
+    from mctrader_data.nas_metrics.prometheus_exporters import compactor_malformed_frame_total
 
-    # For now, we document the expected behavior:
-    # If _orderbookdepth_dicts_to_arrow([{side: None, price: "1000", quantity: "0.5"}])
-    # is called, expect ValueError with "malformed orderbookdepth frame at index=0"
+    root = tmp_data_root
+    compactor = L1Compactor(root=root)
+    # _orderbookdepth_dicts_to_arrow reads self._current_meta — inject directly
+    compactor._current_meta = {
+        "node_id": "node-test",
+        "collector_run_id": "run-test",
+        "exchange": "bithumb",
+        "symbol": "KRW-BTC",
+        "channel": "orderbookdepth",
+    }
 
-    # This is a placeholder for Phase 2 impl validation.
-    # The actual test will be enabled when l1.py malformed frame handler is implemented.
-    pass
+    malformed_records = [
+        {
+            "ts_utc": "2026-05-13T00:00:00+00:00",
+            "received_at": "2026-05-13T00:00:00+00:00",
+            "exchange": "bithumb",
+            "symbol": "KRW-BTC",
+            "changes": [{"side": None, "price": "100", "quantity": "1"}],  # malformed: side=None
+            "raw_json": "{}",
+            "channel": "orderbookdepth",
+        }
+    ]
+
+    # Capture counter value before
+    before_val = compactor_malformed_frame_total.labels(
+        channel="orderbookdepth", exchange="bithumb"
+    )._value.get()
+
+    with pytest.raises(ValueError, match="malformed orderbookdepth frame"):
+        compactor._orderbookdepth_dicts_to_arrow(malformed_records)
+
+    # Counter +1 verify
+    after_val = compactor_malformed_frame_total.labels(
+        channel="orderbookdepth", exchange="bithumb"
+    )._value.get()
+    assert after_val == before_val + 1, (
+        f"compactor_malformed_frame_total should have incremented by 1: "
+        f"before={before_val}, after={after_val}"
+    )
 
 
 # ============================================================================

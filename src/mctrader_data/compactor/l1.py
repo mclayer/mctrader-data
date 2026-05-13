@@ -324,15 +324,32 @@ class L1Compactor:
         for ingest_seq, frame in enumerate(records_raw):
             ts_utc = self._parse_ts(frame["ts_utc"])
             received_at = self._parse_ts(frame["received_at"])
-            for change in frame["changes"]:
+            for change_idx, change in enumerate(frame["changes"]):
+                # MCT-160 F4 fix: AC-6/D7 malformed frame validation
+                side = change.get("side")
+                price = change.get("price")
+                quantity = change.get("quantity")
+                if side is None or price is None or quantity is None:
+                    from mctrader_data.nas_metrics.prometheus_exporters import (
+                        compactor_malformed_frame_total,
+                    )
+                    compactor_malformed_frame_total.labels(
+                        channel="orderbookdepth",
+                        exchange=frame.get("exchange", "unknown"),
+                    ).inc()
+                    raise ValueError(
+                        f"malformed orderbookdepth frame at index={ingest_seq} "
+                        f"change={change_idx}: "
+                        f"side={side!r}, price={price!r}, quantity={quantity!r}"
+                    )
                 flat_rows.append({
                     "ts_utc": ts_utc,
                     "received_at": received_at,
                     "exchange": frame["exchange"],
                     "symbol": frame["symbol"],
-                    "side": change["side"],
-                    "price": Decimal(str(change["price"])),
-                    "quantity": Decimal(str(change["quantity"])),
+                    "side": side,
+                    "price": Decimal(str(price)),
+                    "quantity": Decimal(str(quantity)),
                     "raw_json": frame.get("raw_json"),
                     "node_id": node_id,
                     "collector_run_id": collector_run_id,

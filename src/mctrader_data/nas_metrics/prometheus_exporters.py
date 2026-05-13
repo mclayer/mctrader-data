@@ -64,6 +64,14 @@ compactor_quarantine_total = Counter(
     ["tier", "reason"],  # tier ∈ {L2, L3}, reason ∈ {monotonic_violation}
 )
 
+# MCT-160 F4 fix: AC-6/D7 malformed orderbookdepth frame validation Counter
+# channel ∈ {orderbookdepth, ...}, exchange ∈ {bithumb, ...}
+compactor_malformed_frame_total = Counter(
+    "mctrader_compactor_malformed_frame_total",
+    "L1Compactor malformed frame encountered (MCT-160 AC-6)",
+    ["channel", "exchange"],
+)
+
 if TYPE_CHECKING:
     pass
 

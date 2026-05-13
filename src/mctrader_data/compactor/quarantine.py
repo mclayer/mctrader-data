@@ -50,8 +50,26 @@ def quarantine_l2(tmp_path: Path, *, channel: str, date_utc: date, reason: str) 
     # tmp_path depth: node=MERGED(0)/hour(1)/date(2)/symbol(3)/exchange(4)/
     #                 tier=L2(5)/schema_version(6)/channel(7)/market(8)/root(9)
     local_root = tmp_path.parents[9]
+
+    # MCT-160 F5 fix: path traversal containment — tmp_path must be under local_root
+    try:
+        tmp_path.resolve().relative_to(local_root.resolve())
+    except ValueError as e:
+        raise ValueError(
+            f"tmp_path {tmp_path!r} is not under local_root {local_root!r}: path traversal blocked"
+        ) from e
+
     quarantine_dir = local_root / "market" / channel / "quarantine" / str(date_utc) / reason
     quarantine_dir.mkdir(parents=True, exist_ok=True)
+
+    # MCT-160 F5 fix: quarantine_dir containment verify
+    try:
+        quarantine_dir.resolve().relative_to(local_root.resolve())
+    except ValueError as e:
+        raise ValueError(
+            f"quarantine_dir {quarantine_dir!r} is not under local_root {local_root!r}: path traversal blocked"
+        ) from e
+
     quarantine_path = quarantine_dir / f"part-{tmp_path.stem}.parquet"
     tmp_path.rename(quarantine_path)
     return quarantine_path
@@ -65,8 +83,26 @@ def quarantine_l3(tmp_path: Path, *, channel: str, date_utc: date, reason: str) 
     # tmp_path depth: node=MERGED(0)/date(1)/symbol(2)/exchange(3)/
     #                 tier=L3(4)/schema_version(5)/channel(6)/market(7)/root(8)
     local_root = tmp_path.parents[8]
+
+    # MCT-160 F5 fix: path traversal containment — tmp_path must be under local_root
+    try:
+        tmp_path.resolve().relative_to(local_root.resolve())
+    except ValueError as e:
+        raise ValueError(
+            f"tmp_path {tmp_path!r} is not under local_root {local_root!r}: path traversal blocked"
+        ) from e
+
     quarantine_dir = local_root / "market" / channel / "quarantine" / str(date_utc) / reason
     quarantine_dir.mkdir(parents=True, exist_ok=True)
+
+    # MCT-160 F5 fix: quarantine_dir containment verify
+    try:
+        quarantine_dir.resolve().relative_to(local_root.resolve())
+    except ValueError as e:
+        raise ValueError(
+            f"quarantine_dir {quarantine_dir!r} is not under local_root {local_root!r}: path traversal blocked"
+        ) from e
+
     quarantine_path = quarantine_dir / f"part-{tmp_path.stem}.parquet"
     tmp_path.rename(quarantine_path)
     return quarantine_path
