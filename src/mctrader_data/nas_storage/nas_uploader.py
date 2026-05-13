@@ -361,6 +361,51 @@ class NASUploader:
 
         return PutResult(status="uploaded", object_etag=etag)
 
+    def _list_objects(self, prefix: str) -> list[str]:
+        """List object keys in bucket with given prefix.
+
+        MCT-151: InvariantHarness 가 object_count + sha256 + schema verify 시 사용.
+        Returns list of full object keys matching prefix.
+
+        ADR-027 D6: per-partition object listing (prefix = Hive partition prefix).
+        SecurityArch: log 에 endpoint URL masking (host:port 만).
+        """
+        client = self._get_client()
+        paginator = client.get_paginator("list_objects_v2")
+        keys: list[str] = []
+        try:
+            for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+                for obj in page.get("Contents", []):
+                    keys.append(obj["Key"])
+        except Exception as e:
+            log.warning(
+                "[nas_uploader] _list_objects failed: bucket=%s prefix=%s err=%s",
+                self.bucket, prefix, type(e).__name__,
+            )
+            raise
+        return sorted(keys)
+
+    def _download(self, key: str) -> bytes:
+        """Download object bytes from NAS bucket.
+
+        MCT-151: InvariantHarness 가 sha256 + row_count + schema verify 시 사용.
+        per-segment streaming (GET body) — NFR-2 latency budget 정합.
+
+        SecurityArch: endpoint URL masking in log (host:port 만).
+        """
+        client = self._get_client()
+        try:
+            response = client.get_object(Bucket=self.bucket, Key=key)
+            body: bytes = response["Body"].read()
+            log.debug("[nas_uploader] _download key=%s bytes=%d", key, len(body))
+            return body
+        except ClientError as e:
+            log.warning(
+                "[nas_uploader] _download failed: bucket=%s key=%s err=%s",
+                self.bucket, key, e.response.get("Error", {}).get("Code", "unknown"),
+            )
+            raise
+
 
 def _mask_endpoint(endpoint: str) -> str:
     """endpoint URL 에서 인증 정보 제거 — host:port 만 반환.

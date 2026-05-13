@@ -1,0 +1,91 @@
+# nas_invariant_rules.yml — Prometheus alert rules for MCT-151 invariant metrics
+#
+# Story: MCT-151 (Stage 2 — dual-write atomic primitives + 7종 invariant harness)
+# Issue: mclayer/mctrader-hub#257
+#
+# §6.2.4 박제 (ArchitectPL chief author):
+# 4 alert rules — NASInvariantVerifyFailHigh / NASInvariantSchemaDriftDetected /
+# NASInvariantCompactionBarrierDrainTimeout / NASInvariantDualWriteHardFloorBlocked
+#
+# Metric prefix: nas_invariant_* (MCT-150 nas_uploader_* prefix-disjoint, NFR-4 freeze 의무)
+# AC-5: 모든 metric prefix == nas_invariant_* (MCT-150 nas_uploader_* prefix-disjoint)
+#
+# ADR-027 D6 amendment trigger (S5 7종 invariant, mandatory: true, trigger_story: MCT-151):
+# NASInvariantVerifyFailHigh = D6 "1종이라도 FAIL 시 cutover 차단" 의 Prometheus enforcement.
+# NASInvariantSchemaDriftDetected = S5 신규 4종 (column_count/column_order/dtype/schema_version).
+#
+# S2 박제 (CompactionBarrier): NASInvariantCompactionBarrierDrainTimeout → dual-write toggle 차단.
+# S8 박제 (RPO=0): NASInvariantDualWriteHardFloorBlocked → caller source retain 의무 surface.
+
+groups:
+  - name: nas_invariant_thresholds
+    rules:
+      # ─── 7종 invariant FAIL alert ─────────────────────────────────────────
+      # D6 본문 "1종이라도 FAIL 시 cutover 차단" 정합 (ADR-027 D6 → S5 amendment trigger)
+      - alert: NASInvariantVerifyFailHigh
+        expr: increase(nas_invariant_status_count{status!="all_pass"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          component: nas_invariant
+          story: MCT-151
+        annotations:
+          summary: "NAS invariant verify FAIL (1종 이상 invariant 위반, S5 박제)"
+          description: >
+            NAS invariant harness 가 7종 중 1종 이상 FAIL 검출 (status={{ $labels.status }}).
+            ADR-027 D6 amendment (S5 7종 invariant) 의 cutover 차단 trigger.
+            즉시 cutover 차단 의무 + per_invariant_results diagnostic dump + alert escalation.
+            대응: nas_invariant_harness.verify() 상세 로그 확인 + mismatch_files 검토.
+
+      # ─── Schema drift 검출 (S5 신규 4종 — reader-breaking drift) ─────────
+      # column_count / column_order / dtype / schema_version FAIL → reader 분기 파괴 risk
+      - alert: NASInvariantSchemaDriftDetected
+        expr: increase(nas_invariant_schema_drift_count[10m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          component: nas_invariant
+          story: MCT-151
+        annotations:
+          summary: "NAS invariant schema drift 검출 (S5 reader-breaking drift, ADR-009 §D2.1 위반)"
+          description: >
+            NAS schema drift 검출 (drift_type={{ $labels.drift_type }}, partition={{ $labels.partition }}).
+            S5 박제 4종 (column_count/column_order/dtype/schema_version) 중 1종 이상 FAIL.
+            ADR-009 §D2.1 16-col schema invariant 위반 — reader endpoint flip 차단 의무.
+            대응: InvariantHarness.per_invariant_results 확인 + ADR-009 §D2 column 순서 검증.
+
+      # ─── CompactionBarrier drain timeout (S2 박제 — silent local-only land 차단) ──
+      # drain timeout → dual-write toggle 활성화 차단 의무
+      - alert: NASInvariantCompactionBarrierDrainTimeout
+        expr: increase(nas_invariant_compaction_barrier_status_count{status="drain_timeout"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          component: nas_invariant
+          story: MCT-151
+        annotations:
+          summary: "L1 compaction drain timeout (24h 도달) — dual-write toggle 활성화 차단 의무 (S2 박제)"
+          description: >
+            CompactionBarrier.drain_and_block() 가 24h timeout 도달.
+            in_flight_remaining > 0 (L1 compaction task 미완료).
+            S2 박제: dual-write toggle 활성화 차단 의무 + alert + manual gate 진입.
+            대응: compaction_state.json in_flight_count 확인 + L1 compactor 상태 점검.
+            CompactionBarrier.release() 호출 후 SOPRunner MANUAL_GATE 진입.
+
+      # ─── DualWriter hard_floor_blocked (S8 RPO=0 위반 surface) ──────────
+      # hard_floor_blocked → caller source retain 의무 (RPO=0 보존, S8 user_confirmed)
+      - alert: NASInvariantDualWriteHardFloorBlocked
+        expr: increase(nas_invariant_dual_write_status_count{status="hard_floor_blocked"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          component: nas_invariant
+          story: MCT-151
+        annotations:
+          summary: "DualWriter hard_floor_blocked — caller source retain 의무, S8 RPO=0 위반 surface"
+          description: >
+            DualWriter.write() 가 hard_floor_blocked return (retry_queue Stage 1 unconditional guard).
+            양쪽 영속화 0 (NAS PUT 0 + local tmp rollback). caller source retain 의무 (RPO=0, S8 user_confirmed).
+            MCT-150 §6.7 caller contract: status="hard_floor_blocked" → source retain 의무.
+            대응: retry_queue 상태 확인 + NASUnreachableSOPRunner MANUAL_GATE escalation.
+            SOP reset (retry_queue drain + hard_floor 해소) 후 DualWriter 재시도.
