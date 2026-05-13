@@ -33,7 +33,6 @@ RPO=0 + drop 0 + chunk-boundary idempotency + 중복 PUT 0
 from __future__ import annotations
 
 import io
-import time
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -41,13 +40,10 @@ from unittest.mock import MagicMock, patch
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from botocore.exceptions import EndpointConnectionError
 
 from mctrader_data.nas_migration.backfill_orchestrator import (
     BackfillCheckpoint,
     BackfillOrchestrator,
-    BackfillResult,
-    ChunkSpec,
 )
 from mctrader_data.nas_storage.nas_uploader import PutResult
 from mctrader_data.nas_migration.invariant_harness import InvariantResult

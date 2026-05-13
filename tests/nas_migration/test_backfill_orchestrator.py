@@ -22,8 +22,10 @@ Test Contract §8.1 (TestContractArchitectAgent — MCT-153):
 - test_checkpoint_list_all_returns_all: Phase E exit input
 
 §6.8 Wording SSOT (박제 — variant 사용 금지):
-- BackfillResult.status: "all_chunks_verified" / "chunk_invariant_failed" / "chunk_blocked" / "checkpoint_resumable"
-- ChunkResult.status: "chunk_verified" / "chunk_skipped_resumed" / "chunk_quarantined" / "chunk_blocked" / "chunk_sop_skipped"
+- BackfillResult.status: "all_chunks_verified" / "chunk_invariant_failed" /
+  "chunk_blocked" / "checkpoint_resumable"
+- ChunkResult.status: "chunk_verified" / "chunk_skipped_resumed" /
+  "chunk_quarantined" / "chunk_blocked" / "chunk_sop_skipped"
 - BackfillCheckpoint status: "pending" / "in_flight" / "verified" / "quarantined" / "blocked"
 
 §6.9 placement:
@@ -40,7 +42,7 @@ import hashlib
 import io
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -337,7 +339,11 @@ def test_chunk_result_status_all_5_valid():
 def test_chunk_spec_is_legacy_node_true(tmp_path):
     """S6 박제: node= prefix 부재 partition → is_legacy_node=True (AC-3)."""
     # legacy: node= 없는 path
-    source_path = tmp_path / "market" / "orderbooksnapshot" / "tier=L2" / "exchange=BITHUMB" / "symbol=BTC_KRW" / "date=2025-01-01" / "data.parquet"
+    source_path = (
+        tmp_path / "market" / "orderbooksnapshot"
+        / "tier=L2" / "exchange=BITHUMB" / "symbol=BTC_KRW"
+        / "date=2025-01-01" / "data.parquet"
+    )
     source_path.parent.mkdir(parents=True, exist_ok=True)
     make_parquet(source_path)
 
@@ -355,7 +361,11 @@ def test_chunk_spec_is_legacy_node_true(tmp_path):
 
 def test_chunk_spec_is_legacy_node_false(tmp_path):
     """S6 박제: node= prefix 존재 → is_legacy_node=False."""
-    source_path = tmp_path / "market" / "orderbooksnapshot" / "tier=L2" / "exchange=BITHUMB" / "symbol=BTC_KRW" / "date=2025-01-01" / "node=MAIN" / "data.parquet"
+    source_path = (
+        tmp_path / "market" / "orderbooksnapshot"
+        / "tier=L2" / "exchange=BITHUMB" / "symbol=BTC_KRW"
+        / "date=2025-01-01" / "node=MAIN" / "data.parquet"
+    )
     source_path.parent.mkdir(parents=True, exist_ok=True)
     make_parquet(source_path)
 
@@ -841,7 +851,6 @@ def test_ac1_new_schema_path_100_percent(tmp_path, mock_uploader, mock_harness, 
     mock_sop.is_manual_gate.return_value = False
 
     from mctrader_data.nas_migration.backfill_orchestrator import BackfillOrchestrator
-    from typing import cast, Literal
     orch = BackfillOrchestrator(
         nas_uploader=mock_uploader,
         invariant_harness=mock_harness,
