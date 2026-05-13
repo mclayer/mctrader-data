@@ -369,12 +369,18 @@ def _build_orchestrator(
         metrics=metrics,
     )
 
-    # InvariantHarness
+    # InvariantHarness — MCT-159 FIX Iter 2: channel-aware caller wiring
+    # expected_schema_version = ADR009_CHANNEL_SCHEMA_MATRIX keys (valid set)
+    # expected_column_count = None → schema_version prefix 추출 → matrix lookup mode (ADR-009 §D2.6)
+    from mctrader_data.nas_migration.invariant_harness import ADR009_CHANNEL_SCHEMA_MATRIX
+    valid_schema_versions = tuple(ADR009_CHANNEL_SCHEMA_MATRIX.keys())
     harness = InvariantHarness(
         nas_uploader=uploader,
         local_root=local_root,
         metrics=metrics,
         partition_normalization=True,  # EC-4: legacy node= fallback
+        expected_schema_version=valid_schema_versions,  # MCT-159 FIX Iter 2: channel-aware valid set
+        expected_column_count=None,  # MCT-159 FIX Iter 2: matrix lookup mode (ADR-009 §D2.6)
     )
 
     return BackfillOrchestrator(
