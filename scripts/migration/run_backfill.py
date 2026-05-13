@@ -69,7 +69,14 @@ _STATUS_TO_EXIT = {
     default="L2",
     type=click.Choice(["L2", "L3"]),
     show_default=True,
-    help="Cold tier to backfill (본 Story = L2 only, §5.4 Non-goal).",
+    help="Cold tier to backfill.",
+)
+@click.option(
+    "--channel",
+    default="orderbooksnapshot",
+    type=click.Choice(["orderbooksnapshot", "transaction"]),
+    show_default=True,
+    help="MCT-159: channel parametrize. default orderbooksnapshot (MCT-153 backward-compat).",
 )
 @click.option(
     "--dry-run",
@@ -122,6 +129,7 @@ _STATUS_TO_EXIT = {
 )
 def main(
     tier: str,
+    channel: str,
     mode: str | None,
     resume_from: Path | None,
     max_workers: int,
@@ -130,10 +138,11 @@ def main(
     nas_partition_root: str,
     verbose: bool,
 ) -> None:
-    """Historic cold L2 76GB 영구 이관 CLI (MCT-153, ADR-027 D4 step 2).
+    """L2/L3 cold tier backlog 이관 CLI (MCT-159, ADR-027 D4 amendment).
 
     --dry-run: 실 PUT 없이 partition discovery + chunk 분절 + 추정 시간만 출력.
     --execute: 실 PUT + per-chunk 7종 invariant verify + checkpoint 박제.
+    양 channel × 양 tier 4 case 지원 (orderbooksnapshot/transaction × L2/L3).
     """
     _setup_logging(verbose)
 
@@ -152,14 +161,15 @@ def main(
     checkpoint_path = resume_from or (local_root / ".tmp" / "backfill_checkpoint.sqlite")
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # evidence pack path 결정 (§6.6 decision: .tmp/evidence-pack-MCT-153.md)
+    # evidence pack path 결정 (MCT-159: evidence-pack-MCT-159.md)
     if evidence_pack is None:
-        evidence_pack = local_root / ".tmp" / "evidence-pack-MCT-153.md"
+        evidence_pack = local_root / ".tmp" / "evidence-pack-MCT-159.md"
     evidence_pack.parent.mkdir(parents=True, exist_ok=True)
 
     if mode == "dry-run":
         _run_dry(
             tier=tier,
+            channel=channel,  # MCT-159: channel parametrize
             local_root=local_root,
             nas_partition_root=nas_partition_root,
         )
@@ -167,9 +177,11 @@ def main(
 
     # ── execute mode: DI + run ────────────────────────────────────────────────
     tier_literal = cast(Literal["L2", "L3"], tier)
+    channel_literal = cast(Literal["orderbooksnapshot", "transaction"], channel)
     try:
         orchestrator = _build_orchestrator(
             tier=tier_literal,
+            channel=channel_literal,  # MCT-159
             local_root=local_root,
             nas_partition_root=nas_partition_root,
             checkpoint_path=checkpoint_path,
@@ -189,7 +201,7 @@ def main(
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
-    click.echo(f"[run_backfill] starting backfill tier={tier} max_workers={max_workers}")
+    click.echo(f"[run_backfill] starting backfill channel={channel} tier={tier} max_workers={max_workers}  # MCT-159")
     click.echo(f"  checkpoint: {checkpoint_path}")
     click.echo(f"  evidence:   {evidence_pack}")
     click.echo(f"  local_root: {local_root}")
@@ -212,7 +224,7 @@ def main(
     click.echo(f"  run_duration_s:   {result.run_duration_s:.1f}s")
 
     if result.status == "all_chunks_verified":
-        click.echo("\n✓ 76GB cold L2 backfill complete — MCT-154 cutover 진입 가능")
+        click.echo(f"\n✓ cold tier backfill complete (MCT-159) channel={channel} tier={tier} — 7종 invariant ALL PASS")
     elif result.status == "chunk_invariant_failed":
         click.echo(
             "\n✗ invariant FAIL detected — operator root cause 분석 후 재실행 필요",
@@ -237,22 +249,32 @@ def main(
 
 def _run_dry(
     tier: str,
+    channel: str,
     local_root: Path,
     nas_partition_root: str,
 ) -> None:
-    """dry-run: partition discovery + chunk 분절 + 추정 시간 출력 (실 PUT 0)."""
+    """dry-run: partition discovery + chunk 분절 + 추정 시간 출력 (실 PUT 0).
+
+    MCT-159: channel parametrize 적용 (orderbooksnapshot + transaction × L2/L3 4 case).
+    """
     from mctrader_data.nas_migration.backfill_orchestrator import (
         BackfillOrchestrator,
     )
     from unittest.mock import MagicMock
 
-    click.echo(f"[dry-run] scanning tier={tier} in {local_root}")
-    tier_root = (
-        local_root / "market" / "orderbooksnapshot" / f"tier={tier}"
-    )
-    if not tier_root.exists():
-        click.echo(f"[dry-run] tier root not found: {tier_root}")
+    click.echo(f"[dry-run] scanning channel={channel} tier={tier} in {local_root}")
+    # MCT-159: channel_root = market/<channel>/ (schema_version=* glob)
+    channel_root = local_root / "market" / channel
+    tier_dirs = list(channel_root.glob(f"schema_version=*/tier={tier}")) if channel_root.exists() else []
+    if not tier_dirs:
+        click.echo(
+            f"[dry-run] no tier={tier} dirs found under "
+            f"{channel_root}/schema_version=*/"
+        )
         return
+    click.echo(f"[dry-run] found {len(tier_dirs)} tier={tier} root(s):")
+    for td in tier_dirs:
+        click.echo(f"  {td}")
 
     # mock DI — partition discovery 만 실행
     mock_uploader = MagicMock()
@@ -265,6 +287,7 @@ def _run_dry(
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         _tier_literal = cast(Literal["L2", "L3"], tier)
+        _channel_literal = cast(Literal["orderbooksnapshot", "transaction"], channel)
         orch = BackfillOrchestrator(
             nas_uploader=mock_uploader,
             invariant_harness=mock_harness,
@@ -277,21 +300,24 @@ def _run_dry(
             lock_path=tmp_path / "dry.lock",
             max_workers=1,  # dry-run: 1 worker
             tier=_tier_literal,
+            channel=_channel_literal,  # MCT-159
         )
         files = orch._discover_partitions()
 
     n_chunks = len(files)
-    # NFR-3 budget: ~42-67분 estimate (single partition = 1 chunk model, §6.1)
+    # NFR-1 budget: 7118 file × 3s / 10-parallel ≈ 35 min (MCT-159 §8 Perf Baseline)
     per_chunk_s = 3.0  # MCT-148 T2 50MB p99 ~2871ms
     est_s = n_chunks * per_chunk_s / 10  # 10-parallel
     click.echo(f"[dry-run] discovered {n_chunks} closed-day partitions")
     click.echo(f"[dry-run] estimated time: {est_s/60:.1f} min ({est_s:.0f}s @ 10-parallel)")
-    click.echo(f"[dry-run] NFR-3 gate: ~80 min budget ({n_chunks*per_chunk_s/10/60:.1f} vs 80)")
+    click.echo(f"[dry-run] NFR budget: 80 min target ({n_chunks*per_chunk_s/10/60:.1f} vs 80)")
+    click.echo(f"[dry-run] MCT-159 evidence pack path: {local_root / '.tmp' / 'evidence-pack-MCT-159.md'}")
 
 
 def _build_orchestrator(
     *,
     tier: Literal["L2", "L3"],
+    channel: Literal["orderbooksnapshot", "transaction"] = "orderbooksnapshot",  # MCT-159
     local_root: Path,
     nas_partition_root: str,
     checkpoint_path: Path,
@@ -366,6 +392,7 @@ def _build_orchestrator(
         chunk_timeout_s=30.0,
         tier=tier,
         partition_normalization=True,
+        channel=channel,  # MCT-159
     )
 
 
