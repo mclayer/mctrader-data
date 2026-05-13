@@ -19,10 +19,9 @@ FIX#1 F4 박제: test_status_priority_drift_over_iops
 """
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 # Platform-specific file locking
 if sys.platform != "win32":
@@ -46,7 +45,6 @@ from mctrader_data.nas_storage.compaction_barrier import BarrierResult, Compacti
 from mctrader_data.nas_migration.invariant_harness import (
     InvariantHarness,
     InvariantResult,
-    PerInvariantResult,
 )
 from mctrader_data.ops.nas_unreachable_sop import NASUnreachableSOPRunner, SOPState
 from mctrader_data.nas_metrics.prometheus_exporters import PrometheusExporter
@@ -512,11 +510,6 @@ class TestDrift7DayConsecutivePassRelease:
         mock_metrics: PrometheusExporter,
         mock_iops_collector: MagicMock,
     ) -> None:
-        runner = _make_runner(
-            tmp_path, mock_harness, mock_barrier, mock_sop_runner,
-            mock_metrics, mock_iops_collector,
-        )
-
         # 7 consecutive healthy runs
         results = []
         for _ in range(7):
@@ -557,7 +550,8 @@ class TestOverlapFileLockRejection:
         lock_path = tmp_path / "dual_write_window.lock"
 
         # Pre-acquire the lock (simulating another process)
-        lock_fd = open(str(lock_path), "w")
+        # noqa: SIM115 — fd must persist across try block (cannot use context manager here)
+        lock_fd = open(str(lock_path), "w")  # noqa: SIM115
         try:
             fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)  # type: ignore[name-defined]
 
@@ -631,11 +625,13 @@ class TestIOPSCollectorBaseline15PctGate:
             gate_pct=15.0,
         )
         # Monkeypatch the internal query to return controlled values
-        with patch.object(collector, "_query_prometheus", return_value=2900.0):
-            with patch.object(collector, "_query_host_read_iops", return_value=100.0):
-                with patch.object(collector, "_query_host_write_iops", return_value=200.0):
-                    with patch.object(collector, "_query_container_io_pct", return_value=5.0):
-                        result = collector.snapshot(time_range_h=24)
+        with (
+            patch.object(collector, "_query_prometheus", return_value=2900.0),
+            patch.object(collector, "_query_host_read_iops", return_value=100.0),
+            patch.object(collector, "_query_host_write_iops", return_value=200.0),
+            patch.object(collector, "_query_container_io_pct", return_value=5.0),
+        ):
+            result = collector.snapshot(time_range_h=24)
 
         assert result.within_15pct_gate is True
         assert result.pre_baseline_p99_put_ms == 2870.65
@@ -648,11 +644,13 @@ class TestIOPSCollectorBaseline15PctGate:
             baseline_p99_ms=2870.65,
             gate_pct=15.0,
         )
-        with patch.object(collector, "_query_prometheus", return_value=3400.0):
-            with patch.object(collector, "_query_host_read_iops", return_value=150.0):
-                with patch.object(collector, "_query_host_write_iops", return_value=300.0):
-                    with patch.object(collector, "_query_container_io_pct", return_value=10.0):
-                        result = collector.snapshot(time_range_h=24)
+        with (
+            patch.object(collector, "_query_prometheus", return_value=3400.0),
+            patch.object(collector, "_query_host_read_iops", return_value=150.0),
+            patch.object(collector, "_query_host_write_iops", return_value=300.0),
+            patch.object(collector, "_query_container_io_pct", return_value=10.0),
+        ):
+            result = collector.snapshot(time_range_h=24)
 
         assert result.within_15pct_gate is False
         assert result.delta_pct > 15.0  # 18.45 approx
@@ -690,7 +688,7 @@ class TestEvidencePackAppendIdempotent:
     ) -> None:
         evidence_path = tmp_path / "evidence-pack.md"
 
-        for i in range(2):
+        for _i in range(2):
             reg_i = CollectorRegistry()
             metrics_i = PrometheusExporter(registry=reg_i)
             barrier_i = MagicMock(spec=CompactionBarrier)
@@ -726,18 +724,19 @@ class TestFileLockPersistsAcrossRestart:
         lock_path = tmp_path / "dual_write_window.lock"
 
         # Simulate: another process holds the lock
-        fd = open(str(lock_path), "w")
+        # fd must persist across try block — intentional non-context-manager use
+        fd = open(str(lock_path), "w")  # noqa: SIM115
         fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)  # type: ignore[name-defined]
 
         # Verify: lock is exclusive — cannot be acquired non-blocking
         try:
-            fd2 = open(str(lock_path), "w")
+            fd2 = open(str(lock_path), "w")  # noqa: SIM115
             try:
                 fcntl.flock(fd2.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)  # type: ignore[name-defined]
                 # Should NOT reach here
                 fcntl.flock(fd2.fileno(), fcntl.LOCK_UN)  # type: ignore[name-defined]
                 fd2.close()
-                assert False, "Expected IOError from lock conflict"
+                raise AssertionError("Expected IOError from lock conflict")
             except OSError:
                 # Expected: lock conflict detected
                 pass
