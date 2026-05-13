@@ -35,7 +35,7 @@ class CompactorRunner:
         self,
         root: Path,
         *,
-        dual_writer: "DualWriter | None" = None,  # MCT-156: was minio_uploader (legacy MinioUploader removed)
+        dual_writer: DualWriter | None = None,  # MCT-156: was minio_uploader (legacy MinioUploader removed)
     ) -> None:
         self._root = root
         self._l1 = L1Compactor(root=root)
@@ -78,16 +78,14 @@ class CompactorRunner:
         compactor_tier_pending_segments.labels(tier="L1").set(len(sealed_list))
         # _last_l2 == 0.0 means "never run yet" — pending estimate is 0 until first cycle.
         # After first cycle, pending = elapsed / interval (capped at reasonable bound).
-        if self._last_l2 > 0:
-            pending_l2 = max(0, int((now - self._last_l2) / L2_INTERVAL_SECONDS))
-        else:
-            pending_l2 = 0
+        pending_l2 = (
+            max(0, int((now - self._last_l2) / L2_INTERVAL_SECONDS)) if self._last_l2 > 0 else 0
+        )
         compactor_tier_pending_segments.labels(tier="L2").set(pending_l2)
 
-        if self._last_l3 > 0:
-            pending_l3 = max(0, int((now - self._last_l3) / L3_INTERVAL_SECONDS))
-        else:
-            pending_l3 = 0
+        pending_l3 = (
+            max(0, int((now - self._last_l3) / L3_INTERVAL_SECONDS)) if self._last_l3 > 0 else 0
+        )
         compactor_tier_pending_segments.labels(tier="L3").set(pending_l3)
 
         for sealed in sealed_list:

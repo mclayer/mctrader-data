@@ -81,12 +81,11 @@ def test_l2_cleans_tmp_on_exception(tmp_path: Path) -> None:
 
     with patch(
         "mctrader_data.compactor.l2.pq.ParquetWriter", return_value=fake_writer
-    ):
-        with pytest.raises(RuntimeError, match="boom"):
-            compactor.compact_hour(
-                exchange="bithumb", symbol="KRW-BTC", channel="transaction",
-                hour_utc=datetime(2026, 5, 11, 0, 0, tzinfo=timezone.utc),
-            )
+    ), pytest.raises(RuntimeError, match="boom"):
+        compactor.compact_hour(
+            exchange="bithumb", symbol="KRW-BTC", channel="transaction",
+            hour_utc=datetime(2026, 5, 11, 0, 0, tzinfo=timezone.utc),
+        )
 
     market_root = tmp_path / "market"
     leftover = (

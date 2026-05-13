@@ -86,12 +86,11 @@ def test_l3_cleans_tmp_on_exception(tmp_path: Path) -> None:
 
     with patch(
         "mctrader_data.compactor.l3.pq.ParquetWriter", return_value=fake_writer
-    ):
-        with pytest.raises(RuntimeError, match="boom"):
-            compactor.compact_day(
-                exchange="bithumb", symbol="KRW-BTC", channel="transaction",
-                date_utc=date(2026, 5, 11),
-            )
+    ), pytest.raises(RuntimeError, match="boom"):
+        compactor.compact_day(
+            exchange="bithumb", symbol="KRW-BTC", channel="transaction",
+            date_utc=date(2026, 5, 11),
+        )
 
     market_root = tmp_path / "market"
     leftover = (

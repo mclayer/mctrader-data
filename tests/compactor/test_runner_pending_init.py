@@ -1,7 +1,6 @@
 """Verify tier_pending Gauge does not emit epoch-derived nonsense on fresh start."""
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 import pytest

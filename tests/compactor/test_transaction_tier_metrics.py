@@ -69,7 +69,7 @@ def test_writer_open_count_decremented_on_failure(tmp_path: Path, monkeypatch):
     before = _gauge_value("L1")
     comp = TransactionTierCompactor(root=tmp_path)
     from mctrader_data.compactor import transaction_tier as tt_mod
-    monkeypatch.setattr(tt_mod, "atomic_replace_parquet", lambda *a, **kw: (_ for _ in ()).throw(IOError("nope")))
+    monkeypatch.setattr(tt_mod, "atomic_replace_parquet", lambda *a, **kw: (_ for _ in ()).throw(OSError("nope")))
     with pytest.raises(IOError):
         comp.write_table(
             _make_table(5),

@@ -22,11 +22,10 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
-from mctrader_data.nas_storage.compaction_barrier import BarrierResult, CompactionBarrier
+from mctrader_data.nas_storage.compaction_barrier import CompactionBarrier
 
 
 # ─── fixtures ────────────────────────────────────────────────────────────────

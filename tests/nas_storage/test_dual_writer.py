@@ -23,13 +23,12 @@ MCT-150 lesson 4 invariants 적용:
 from __future__ import annotations
 
 import hashlib
-import io
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock
 
 import pytest
 
-from mctrader_data.nas_storage.dual_writer import DualWriteResult, DualWriter
+from mctrader_data.nas_storage.dual_writer import DualWriter
 from mctrader_data.nas_storage.nas_uploader import NASUploader, PutResult
 
 
@@ -353,7 +352,7 @@ class TestChaosNasUnreachableL1InFlight:
         # Mix of status to simulate chaos: 3 queued + 1 hard_floor + 1 uploaded
         statuses = ["queued", "queued", "hard_floor_blocked", "queued", "uploaded"]
 
-        for (key, data), put_status in zip(segments, statuses):
+        for (key, data), put_status in zip(segments, statuses, strict=False):
             sha = hashlib.sha256(data).hexdigest()
             uploader = _make_uploader(put_status)
             writer = DualWriter(nas_uploader=uploader, local_root=local_root)

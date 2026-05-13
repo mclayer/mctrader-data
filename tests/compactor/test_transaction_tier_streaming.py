@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Iterator
+from collections.abc import Iterator
 
 import pyarrow as pa
 import pyarrow.parquet as pq

@@ -20,14 +20,20 @@ def publisher(mock_client):
 
 def test_publish_transaction_stream_key(publisher):
     pub, client = publisher
-    pub.publish_transaction(exchange="bithumb", symbol="KRW-BTC", record={"price": 135000000, "quantity": 0.001, "side": "bid", "ts_utc": "2026-05-09T00:00:00+00:00"})
+    pub.publish_transaction(
+        exchange="bithumb", symbol="KRW-BTC",
+        record={"price": 135000000, "quantity": 0.001, "side": "bid", "ts_utc": "2026-05-09T00:00:00+00:00"},
+    )
     client.xadd.assert_called_once()
     assert client.xadd.call_args[0][0] == "mctrader:stream:transaction:bithumb:KRW-BTC"
 
 
 def test_publish_transaction_fields(publisher):
     pub, client = publisher
-    pub.publish_transaction(exchange="bithumb", symbol="KRW-BTC", record={"price": 135000000, "quantity": 0.001, "side": "bid", "ts_utc": "t"})
+    pub.publish_transaction(
+        exchange="bithumb", symbol="KRW-BTC",
+        record={"price": 135000000, "quantity": 0.001, "side": "bid", "ts_utc": "t"},
+    )
     fields = client.xadd.call_args[0][1]
     assert fields["price"] == "135000000"
     assert fields["side"] == "bid"
@@ -49,7 +55,10 @@ def test_publish_orderbook_snapshot_key(publisher):
 def test_publish_orderbook_snapshot_json(publisher):
     pub, client = publisher
     bids = [{"price": 100, "quantity": 1.0}]
-    pub.publish_orderbook_snapshot(exchange="bithumb", symbol="KRW-BTC", record={"bids": bids, "asks": [], "ts_utc": "t"})
+    pub.publish_orderbook_snapshot(
+        exchange="bithumb", symbol="KRW-BTC",
+        record={"bids": bids, "asks": [], "ts_utc": "t"},
+    )
     payload = json.loads(client.set.call_args[0][1])
     assert payload["bids"] == bids
 

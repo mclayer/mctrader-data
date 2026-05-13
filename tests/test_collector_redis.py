@@ -1,7 +1,5 @@
-from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
 
 from mctrader_market.types import Symbol
 

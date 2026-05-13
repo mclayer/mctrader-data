@@ -28,7 +28,7 @@ import contextlib
 import os
 import tempfile
 from pathlib import Path
-from typing import Iterable
+from collections.abc import Iterable
 
 import pyarrow as pa
 import pyarrow.parquet as pq
