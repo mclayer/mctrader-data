@@ -310,3 +310,107 @@ class PrometheusExporter:
             inv_result = per_invariant_results.get(drift_type)
             if inv_result and getattr(inv_result, "status", None) == "fail":
                 self._inv_schema_drift.labels(partition=partition, drift_type=drift_type).inc()
+
+    # ─── MCT-152 신규 method (nas_dual_write_window_* prefix — NFR-4 prefix-disjoint) ──
+
+    def _ensure_dual_write_window_metrics(self) -> None:
+        """Lazy-initialize nas_dual_write_window_* metrics (NFR-4 prefix-disjoint 의무).
+
+        MCT-150 nas_uploader_* + MCT-151 nas_invariant_* prefix 와 collision 0 보장.
+        emit_dual_write_window_* method 최초 호출 시 1회 초기화.
+
+        Metrics (§6.8.4 박제, variant 금지):
+        - nas_dual_write_window_status_count (Counter, labels: status [5 enum])
+        - nas_dual_write_window_cycle_duration_seconds (Histogram, buckets [60,300,1800,3600,7200])
+        - nas_dual_write_window_iops_delta_pct (Gauge, labels: metric_type [p99|read_iops|write_iops])
+        - nas_dual_write_window_sop_trigger_count (Counter, labels: sop_state [3 enum])
+        """
+        if hasattr(self, "_dww_initialized"):
+            return
+
+        _reg = self.__dict__.get("_registry_ref", REGISTRY)
+
+        self._dww_status_count = Counter(
+            "nas_dual_write_window_status_count",
+            "DualWriteWindowRunner.run() result status count (MCT-152 §6.8.4)",
+            ["status"],
+            registry=_reg,
+        )
+
+        self._dww_cycle_duration = Histogram(
+            "nas_dual_write_window_cycle_duration_seconds",
+            "DualWriteWindowRunner.run() cycle duration in seconds (MCT-152 §8.3)",
+            [],
+            buckets=(60.0, 300.0, 1800.0, 3600.0, 7200.0),
+            registry=_reg,
+        )
+
+        self._dww_iops_delta_pct = Gauge(
+            "nas_dual_write_window_iops_delta_pct",
+            "IOPS delta percentage vs MCT-148 T2 baseline (MCT-152 S11 박제)",
+            ["metric_type"],
+            registry=_reg,
+        )
+
+        self._dww_sop_trigger_count = Counter(
+            "nas_dual_write_window_sop_trigger_count",
+            "SOPRunner state trigger count during dual-write window (MCT-152 S10 박제)",
+            ["sop_state"],
+            registry=_reg,
+        )
+
+        self._dww_initialized = True
+
+    def emit_dual_write_window_status(self, status: str) -> None:
+        """DualWriteWindowResult.status emit — 5 enum Counter.
+
+        Metrics (nas_dual_write_window_* prefix — NFR-4 freeze):
+        - nas_dual_write_window_status_count (Counter, labels: status)
+
+        §6.8.1 Wording SSOT: status ∈ {"healthy", "drift_detected", "barrier_drain_timeout",
+        "sop_manual_gate", "iops_gate_breached"}.
+        variant 사용 금지.
+        """
+        self._ensure_dual_write_window_metrics()
+        self._dww_status_count.labels(status=status).inc()
+
+    def emit_dual_write_window_cycle_duration(self, duration_s: float) -> None:
+        """DualWriteWindowRunner.run() cycle duration emit — Histogram.
+
+        Metrics:
+        - nas_dual_write_window_cycle_duration_seconds (Histogram)
+
+        §8.3 Perf Baseline: buckets [60, 300, 1800, 3600, 7200] (1min/5min/30min/1h/2h).
+        """
+        self._ensure_dual_write_window_metrics()
+        self._dww_cycle_duration.observe(duration_s)
+
+    def emit_dual_write_window_iops_delta(
+        self, p99_pct: float, read_iops: float, write_iops: float
+    ) -> None:
+        """IOPS during delta % emit — Gauge (3 metric_type labels).
+
+        Metrics:
+        - nas_dual_write_window_iops_delta_pct (Gauge, labels: metric_type)
+          metric_type ∈ {"p99", "read_iops", "write_iops"}
+
+        S11 박제: MCT-150 pre vs MCT-152 during delta 비교 표 source.
+        NFR cross-reference: ±15% gate (MCT-148 T2 baseline 50MB p99 = 2870.65ms).
+        """
+        self._ensure_dual_write_window_metrics()
+        self._dww_iops_delta_pct.labels(metric_type="p99").set(p99_pct)
+        self._dww_iops_delta_pct.labels(metric_type="read_iops").set(read_iops)
+        self._dww_iops_delta_pct.labels(metric_type="write_iops").set(write_iops)
+
+    def emit_dual_write_window_sop_trigger(self, sop_state: str) -> None:
+        """SOPRunner state trigger count emit — Counter.
+
+        Metrics:
+        - nas_dual_write_window_sop_trigger_count (Counter, labels: sop_state)
+          sop_state ∈ {"auto_resume", "threshold_breached", "manual_gate"} (§6.8.3 SOPState SSOT)
+
+        S10 박제: SOP 실전 가동 evidence-rich source.
+        per-trigger evidence: timestamp (evidence pack) + sop_state counter (Prometheus).
+        """
+        self._ensure_dual_write_window_metrics()
+        self._dww_sop_trigger_count.labels(sop_state=sop_state).inc()
