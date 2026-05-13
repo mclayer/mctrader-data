@@ -980,3 +980,99 @@ class TestChannelAwareColumnCount:
         assert ADR009_CHANNEL_SCHEMA_MATRIX["tick.v1"][0] == 8
         assert ADR009_CHANNEL_SCHEMA_MATRIX["tick.v1.1"][0] == 11
         assert ADR009_CHANNEL_SCHEMA_MATRIX["ohlcv.v1"][0] == 16
+
+
+class TestInvariantHarnessPerFileModeFixIter2:
+    """MCT-159 FIX Iter 2 — verify() per-file mode (ADR-027 §D6.1 chunk↔verify per-file contract).
+
+    Iter 1 의 channel-aware redesign 정합 보존 + caller wiring per-file basis 추가.
+    """
+
+    def test_per_file_mode_skips_partition_glob_all_pass(self, tmp_path: Path) -> None:
+        """FIX Iter 2: per-file mode = local_files+nas_objects 직접 inject → partition glob/list skip → all_pass.
+
+        chunk_spec per-file PUT 단위 (MCT-153 박제) ↔ verify 단위 (per-file) 일치 의무.
+        """
+        local_root = tmp_path / "local"
+        part = (
+            local_root
+            / "schema_version=orderbook_snapshot.v1"
+            / "tier=L2"
+            / "exchange=BITHUMB"
+            / "symbol=KRW-BTC"
+            / "date=2026-05-10"
+            / "hour=04"
+            / "node=MERGED"
+        )
+        part.mkdir(parents=True, exist_ok=True)
+        # local에 12 file 생성 (partition mode 시 object_count fail 유발) — but per-file mode 는 single chunk only
+        for i in range(12):
+            make_obs_v1_parquet(part / f"part-{i:04d}.parquet")
+        single_chunk = part / "part-0000.parquet"
+        nas_key = (
+            "schema_version=orderbook_snapshot.v1/tier=L2/exchange=BITHUMB/"
+            "symbol=KRW-BTC/date=2026-05-10/hour=04/node=MERGED/part-0000.parquet"
+        )
+        # NAS 에는 1 object 만 (per-file PUT 시점)
+        nas_objects = {nas_key: single_chunk.read_bytes()}
+        uploader = _make_mock_uploader(nas_objects)
+        harness = _make_channel_harness(uploader, local_root)
+
+        # per-file mode: local_files=[single_chunk], nas_objects=[nas_key] inject
+        result = harness.verify(
+            local_partition=part,
+            nas_partition=(
+                "schema_version=orderbook_snapshot.v1/tier=L2/exchange=BITHUMB/"
+                "symbol=KRW-BTC/date=2026-05-10/hour=04/node=MERGED"
+            ),
+            local_files=[single_chunk],
+            nas_objects=[nas_key],
+        )
+
+        assert result.status == "all_pass", (
+            f"FIX Iter 2 per-file mode: expected all_pass (1 local file == 1 NAS object), "
+            f"got {result.status!r}. per_invariant_results={result.per_invariant_results}"
+        )
+        oc = result.per_invariant_results["object_count"]
+        assert oc.measured_local == 1, f"per-file mode: local count must be 1, got {oc.measured_local}"
+        assert oc.measured_nas == 1, f"per-file mode: NAS count must be 1, got {oc.measured_nas}"
+
+    def test_partition_mode_default_backward_compat(self, tmp_path: Path) -> None:
+        """FIX Iter 2: partition mode (local_files=None) 시 기존 동작 보존 (partition glob).
+
+        backward-compat 회귀 0 의무.
+        """
+        local_root = tmp_path / "local"
+        part = (
+            local_root
+            / "schema_version=orderbook_snapshot.v1"
+            / "tier=L2"
+            / "exchange=BITHUMB"
+            / "symbol=KRW-BTC"
+            / "date=2026-05-10"
+            / "hour=04"
+            / "node=MERGED"
+        )
+        part.mkdir(parents=True, exist_ok=True)
+        data = make_obs_v1_parquet(part / "part-0000.parquet")
+        nas_key = (
+            "schema_version=orderbook_snapshot.v1/tier=L2/exchange=BITHUMB/"
+            "symbol=KRW-BTC/date=2026-05-10/hour=04/node=MERGED/part-0000.parquet"
+        )
+        nas_objects = {nas_key: data}
+        uploader = _make_mock_uploader(nas_objects)
+        harness = _make_channel_harness(uploader, local_root)
+
+        # partition mode (local_files / nas_objects 미지정 = None default)
+        result = harness.verify(
+            local_partition=part,
+            nas_partition=(
+                "schema_version=orderbook_snapshot.v1/tier=L2/exchange=BITHUMB/"
+                "symbol=KRW-BTC/date=2026-05-10/hour=04/node=MERGED"
+            ),
+        )
+
+        assert result.status == "all_pass", (
+            f"FIX Iter 2 partition mode (backward-compat): expected all_pass, "
+            f"got {result.status!r}. per_invariant_results={result.per_invariant_results}"
+        )

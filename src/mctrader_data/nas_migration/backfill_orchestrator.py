@@ -808,9 +808,13 @@ class BackfillOrchestrator:
             )
 
         # Step 6: InvariantHarness.verify() (uploaded / skipped_idempotent / skipped_etag_overwrite)
+        # MCT-159 FIX Iter 2: per-file mode (ADR-027 §D6.1 chunk↔verify per-file contract)
+        # chunk_spec = 1 file = 1 chunk_id (MCT-153 박제 보존), verify = per-file basis
         invariant_result = self._harness.verify(
             local_partition=chunk.source_path.parent,
             nas_partition=chunk.nas_partition_prefix,
+            local_files=[chunk.source_path],
+            nas_objects=[chunk.nas_object_key],
         )
 
         if invariant_result.status == "all_pass":

@@ -231,23 +231,29 @@ class InvariantHarness:
         *,
         local_partition: Path,
         nas_partition: str,
+        local_files: list[Path] | None = None,
+        nas_objects: list[str] | None = None,
     ) -> InvariantResult:
         """7종 invariant single-shot verify (§6.9 unconditional sequential — early return 0).
 
+        MCT-159 FIX Iter 2: per-file mode 추가 (ADR-027 §D6.1 chunk↔verify per-file contract).
+        - default (partition mode): `local_files=None` + `nas_objects=None` → partition glob/list (backward-compat)
+        - per-file mode: caller 가 single-file `local_files=[Path]` + `nas_objects=[str]` 직접 inject
+          → partition glob/list skip, chunk_spec per-file PUT 단위와 verify 단위 일치
+
         Algorithm:
-        1. list local .parquet files from local_partition
-        2. list NAS objects from nas_partition (via _list_objects)
-        3. 7종 invariant verify (sequential unconditional, FAIL 발생 후에도 계속):
+        1. local_files / nas_objects 가 None 시 partition glob/list (backward-compat)
+        2. 7종 invariant verify (sequential unconditional, FAIL 발생 후에도 계속):
            - object_count (set-level): local count == NAS count
            - sha256 (byte-level): per file sha256 match
            - row_count (set-level): per file row count match
-           - column_count (schema-level): == expected_column_count (16)
+           - column_count (schema-level): channel-aware lookup (ADR-009 §D2.6)
            - column_order (schema-level): == expected_column_names
            - dtype (schema-level): pyarrow type-level identity (EC-5: Decimal precision/scale)
-           - schema_version (schema-level): partition prefix schema_version={expected_schema_version}
-        4. status 결정: priority 순서
+           - schema_version (schema-level): partition prefix schema_version ∈ expected_schema_version
+        3. status 결정: priority 순서
            (object_count > sha256 > row_count > column_count > column_order > dtype > schema_version)
-        5. InvariantResult return
+        4. InvariantResult return
 
         EC-4: partition_normalization=True 시 nas_partition 의 node= 부재 → fallback node=DEFAULT.
         EC-5: dtype 비교 시 pyarrow type-level identity (str(type) 비교 — precision/scale 포함).
@@ -256,16 +262,18 @@ class InvariantHarness:
         """
         start_ms = time.monotonic() * 1000
 
-        # ── gather local files ─────────────────────────────────────────────────
-        local_files = sorted(local_partition.glob("*.parquet"))
+        # ── gather local files (MCT-159 FIX Iter 2: per-file mode skip glob) ───
+        if local_files is None:
+            local_files = sorted(local_partition.glob("*.parquet"))
 
         # ── EC-4: partition normalization (conditional) ────────────────────────
         effective_nas_partition = nas_partition
         if self._partition_normalization:
             effective_nas_partition = self._normalize_nas_partition(nas_partition)
 
-        # ── gather NAS objects ─────────────────────────────────────────────────
-        nas_objects = self._uploader._list_objects(prefix=effective_nas_partition)
+        # ── gather NAS objects (MCT-159 FIX Iter 2: per-file mode skip list) ──
+        if nas_objects is None:
+            nas_objects = self._uploader._list_objects(prefix=effective_nas_partition)
 
         # ── 7종 invariant sequential unconditional verify ─────────────────────
         per_results: dict[str, PerInvariantResult] = {}
