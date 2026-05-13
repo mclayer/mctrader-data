@@ -173,6 +173,109 @@ class TestQueueBytesGauge:
         assert labels_found[0]["queue_path"] == "/nas/queue"
 
 
+class TestInvariantMetricPrefixFreeze:
+    """§8.2 MCT-151: nas_invariant_* prefix freeze — MCT-150 nas_uploader_* prefix-disjoint (AC-5).
+
+    NFR-4 박제: emit_invariant_* method 가 생성하는 모든 metric 의 prefix == nas_invariant_*.
+    MCT-150 prefix (nas_uploader_*) 와 collision 0.
+    """
+
+    EXPECTED_INVARIANT_METRICS = [
+        "nas_invariant_dual_write_status_count",
+        "nas_invariant_dual_write_latency_seconds",
+        "nas_invariant_compaction_barrier_status_count",
+        "nas_invariant_compaction_barrier_drain_wait_seconds",
+        "nas_invariant_compaction_barrier_in_flight_remaining",
+        "nas_invariant_status_count",
+        "nas_invariant_verify_latency_seconds",
+        "nas_invariant_sha256_match_count",
+        "nas_invariant_object_count_match",
+        "nas_invariant_row_count_match_count",
+        "nas_invariant_schema_drift_count",
+    ]
+
+    def test_invariant_metric_prefix_freeze(
+        self, registry: CollectorRegistry
+    ) -> None:
+        """nas_invariant_* prefix 가 정확히 사용 + nas_uploader_* 와 collision 0.
+
+        §8.2 NFR-4: emit_invariant_* method 가 생성하는 metric prefix == nas_invariant_*.
+        MCT-150 nas_uploader_* prefix-disjoint 보장.
+        """
+        exporter = PrometheusExporter(registry=registry)
+
+        # emit MCT-150 metrics
+        exporter.emit_success(bucket="b", latency_s=0.1)
+        exporter.set_queue_depth(queue_path="/q", depth=0)
+        exporter.set_queue_bytes(queue_path="/q", bytes_total=0)
+
+        # emit MCT-151 invariant metrics
+        exporter.emit_invariant_dual_write(
+            status="committed", nas_key_prefix="schema_version=v1", latency_s=0.5
+        )
+        exporter.emit_invariant_compaction_barrier(
+            status="ok", drain_wait_s=1.0, in_flight_remaining=0
+        )
+        exporter.emit_invariant_verify(
+            status="all_pass",
+            partition="schema_version=v1/exchange=KRX",
+            latency_s=2.0,
+            per_invariant_results={},
+        )
+
+        all_names = _get_all_metric_names(registry)
+
+        # All invariant metrics must use nas_invariant_* prefix
+        for expected in self.EXPECTED_INVARIANT_METRICS:
+            assert expected in all_names, (
+                f"Expected invariant metric '{expected}' not registered. "
+                f"Registered: {sorted(n for n in all_names if 'invariant' in n)}"
+            )
+
+        # nas_uploader_* and nas_invariant_* must be completely disjoint
+        uploader_metrics = {n for n in all_names if n.startswith("nas_uploader_")}
+        invariant_metrics = {n for n in all_names if n.startswith("nas_invariant_")}
+        overlap = uploader_metrics & invariant_metrics
+        assert not overlap, f"Metric prefix collision detected: {overlap}"
+
+    def test_invariant_metrics_exact_prefix(self, registry: CollectorRegistry) -> None:
+        """모든 emit_invariant_* method 가 nas_invariant_* prefix 만 사용.
+
+        no nas_uploader_invariant_*, no invariant_nas_*, no uploader_invariant_*.
+        """
+        exporter = PrometheusExporter(registry=registry)
+        exporter.emit_invariant_dual_write(
+            status="local_only", nas_key_prefix="schema_version=v1", latency_s=0.1
+        )
+        exporter.emit_invariant_compaction_barrier(
+            status="drain_timeout", drain_wait_s=86400.0, in_flight_remaining=2
+        )
+        exporter.emit_invariant_verify(
+            status="sha256_fail",
+            partition="schema_version=v1/p",
+            latency_s=1.5,
+            per_invariant_results={},
+        )
+
+        all_names = _get_all_metric_names(registry)
+        invariant_metrics = {n for n in all_names if "invariant" in n}
+
+        forbidden_patterns = [
+            "nas_uploader_invariant",
+            "invariant_nas",
+            "uploader_invariant",
+        ]
+        for metric_name in invariant_metrics:
+            for pattern in forbidden_patterns:
+                assert not metric_name.startswith(pattern), (
+                    f"Forbidden metric name pattern found: {metric_name!r} matches {pattern!r}"
+                )
+            # Must start with nas_invariant_
+            assert metric_name.startswith("nas_invariant_"), (
+                f"Invariant metric must start with 'nas_invariant_', got: {metric_name!r}"
+            )
+
+
 class TestMetricPrefixFreeze:
     """§8.2 invariant: metric prefix freeze — nas_uploader_* namespace. NFR-4."""
 
