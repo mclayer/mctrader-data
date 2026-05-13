@@ -8,7 +8,7 @@ import gc  # stdlib — Python heap GC; named collision with .gc (filesystem GC)
 import logging
 import os
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -113,22 +113,30 @@ class CompactorRunner:
         run_gc(self._root)
 
     def _run_l2(self) -> None:
-        now = datetime.now(timezone.utc)
-        seen: set[tuple[str, str, str]] = set()
+        """MCT-160 D2: today + yesterday 2일치 명시 scan + hour 24-loop."""
+        now_utc = datetime.now(timezone.utc)
+        today = now_utc.date()
+        yesterday = today - timedelta(days=1)
+
+        seen: set[tuple] = set()
         for parquet in (self._root / "market").rglob("*/tier=L1/**/part-*.parquet"):
             try:
                 exchange = _extract_partition(parquet, "exchange")
                 symbol = _extract_partition(parquet, "symbol")
                 channel = parquet.parts[list(parquet.parts).index("market") + 1]
-                key = (exchange, symbol, channel)
-                if key in seen:
-                    continue
-                seen.add(key)
-                self._run_l2_for_parquet(
-                    exchange=exchange, symbol=symbol, channel=channel, hour_utc=now,
-                )
+
+                for date_utc in [today, yesterday]:
+                    for hour in range(24):
+                        key = (exchange, symbol, channel, date_utc, hour)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        self._run_l2_for_parquet(
+                            exchange=exchange, symbol=symbol, channel=channel,
+                            date_utc=date_utc, hour_utc=hour,
+                        )
             except Exception:
-                log.exception("[compactor] L2 failed %s", parquet)
+                log.exception("[compactor] L2 dispatch failed %s", parquet)
 
     def _run_l2_for_parquet(
         self,
@@ -136,15 +144,18 @@ class CompactorRunner:
         exchange: str,
         symbol: str,
         channel: str,
-        hour_utc: datetime,
+        date_utc: date,
+        hour_utc: int,
     ) -> None:
-        """MCT-156: L2 compaction 후 DualWriter 로 NAS dual-write.
+        """MCT-156/MCT-160: L2 compaction 후 DualWriter 로 NAS dual-write.
 
+        MCT-160 D2: date_utc + hour_utc 명시 전달 (KST→UTC roll silent skip 차단).
         ADR-027 D4 amendment 박제 — Stage 3 wiring obligation.
         S3 invariant: L1 는 NAS upload 0 (hot path 무영향, ADR-017 / ADR-027 §D5 정합).
         """
         out = self._l2.compact_hour(
-            exchange=exchange, symbol=symbol, channel=channel, hour_utc=hour_utc,
+            exchange=exchange, symbol=symbol, channel=channel,
+            date_utc=date_utc, hour_utc=hour_utc,
         )
         if out is None:
             return
@@ -154,17 +165,29 @@ class CompactorRunner:
             self._dispatch_dual_write(out, tier="L2")
 
     def _run_l3(self) -> None:
-        now = datetime.now(timezone.utc)
+        """MCT-160 D1+D2: L3 today + yesterday."""
+        now_utc = datetime.now(timezone.utc)
+        today = now_utc.date()
+        yesterday = today - timedelta(days=1)
+
+        seen: set[tuple] = set()
         for parquet in (self._root / "market").rglob("*/tier=L2/**/part-*.parquet"):
             try:
                 exchange = _extract_partition(parquet, "exchange")
                 symbol = _extract_partition(parquet, "symbol")
                 channel = parquet.parts[list(parquet.parts).index("market") + 1]
-                self._run_l3_for_parquet(
-                    exchange=exchange, symbol=symbol, channel=channel, now_date=now.date()
-                )
+
+                for date_utc in [today, yesterday]:
+                    key = (exchange, symbol, channel, date_utc)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    self._run_l3_for_parquet(
+                        exchange=exchange, symbol=symbol, channel=channel,
+                        date_utc=date_utc,
+                    )
             except Exception:
-                log.exception("[compactor] L3 failed %s", parquet)
+                log.exception("[compactor] L3 dispatch failed %s", parquet)
 
     def _run_l3_for_parquet(
         self,
@@ -172,16 +195,16 @@ class CompactorRunner:
         exchange: str,
         symbol: str,
         channel: str,
-        now_date: date | None,
+        date_utc: date,
     ) -> None:
-        """MCT-156: L3 compaction 후 DualWriter 로 NAS dual-write.
+        """MCT-156/MCT-160: L3 compaction 후 DualWriter 로 NAS dual-write.
 
+        MCT-160 D1+D2: date_utc caller 명시 전달.
         legacy MinioUploader.upload() 호출 제거 (ADR-027 D4 amendment 박제).
         DualWriter inject 0 시 NAS upload 0 (degraded mode — test/local dev 호환).
         """
-        d = now_date or datetime.now(timezone.utc).date()
         out = self._l3.compact_day(
-            exchange=exchange, symbol=symbol, channel=channel, date_utc=d,
+            exchange=exchange, symbol=symbol, channel=channel, date_utc=date_utc,
         )
         if out is not None:
             from mctrader_data.metrics import record_l3_compaction
@@ -190,8 +213,9 @@ class CompactorRunner:
                 self._dispatch_dual_write(out, tier="L3")
 
     def _dispatch_dual_write(self, parquet_path: Path, *, tier: str) -> None:
-        """MCT-156: DualWriter write() + status 3종 처리 + Prometheus emit.
+        """MCT-156/MCT-160: DualWriter write() + status 3종 처리 + Prometheus emit.
 
+        MCT-160 D6/R-EXTRA: streaming sha256 + data=Path (read_bytes 제거, OOM 차단).
         ADR-027 D5 amendment caller contract:
         - "committed" → log info (local + NAS atomic visible)
         - "local_only" → log warning (retry_queue enqueue, backlog drain 후속)
@@ -205,14 +229,19 @@ class CompactorRunner:
 
         # nas_key = local path relative to root, normalized to S3 prefix
         nas_key = str(parquet_path.relative_to(self._root)).replace("\\", "/")
-        payload = parquet_path.read_bytes()
-        sha256 = hashlib.sha256(payload).hexdigest()
+
+        # MCT-160 D6: streaming sha256 (8192-byte chunks, no full memory load)
+        sha = hashlib.sha256()
+        with parquet_path.open("rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                sha.update(chunk)
+        sha256 = sha.hexdigest()
 
         try:
             result = self._dual_writer.write(  # type: ignore[union-attr]
                 local_path=parquet_path,
                 nas_key=nas_key,
-                data=payload,
+                data=parquet_path,   # MCT-160 D6: Path streaming (DualWriter reads internally)
                 sha256=sha256,
             )
         except Exception:

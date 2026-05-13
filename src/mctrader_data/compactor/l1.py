@@ -49,19 +49,20 @@ import contextlib
 
 # ADR-009 §D11.9.2 — orderbook_depth.v1 schema (11 column, per-level flat row)
 # raw_json = pa.large_string() (LargeUtf8, i64 offset) 의무 (§D11.9.6, i32 4GB overflow 차단)
+# MCT-160 D7+P1: pa.field(name, dtype, nullable=...) 명시 — raw_json만 True, 나머지 False
 # MCT-162 (2026-05-13)
 _ORDERBOOKDEPTH_SCHEMA = pa.schema([
-    ("ts_utc",           pa.timestamp("us", tz="UTC")),
-    ("received_at",      pa.timestamp("us", tz="UTC")),
-    ("exchange",         pa.string()),
-    ("symbol",           pa.string()),
-    ("side",             pa.string()),
-    ("price",            pa.decimal128(38, 18)),
-    ("quantity",         pa.decimal128(38, 18)),
-    ("raw_json",         pa.large_string()),  # LargeUtf8 의무 — §D11.9.6
-    ("node_id",          pa.string()),
-    ("collector_run_id", pa.string()),
-    ("ingest_seq",       pa.int64()),
+    pa.field("ts_utc",           pa.timestamp("us", tz="UTC"),   nullable=False),
+    pa.field("received_at",      pa.timestamp("us", tz="UTC"),   nullable=False),
+    pa.field("exchange",         pa.string(),                     nullable=False),
+    pa.field("symbol",           pa.string(),                     nullable=False),
+    pa.field("side",             pa.string(),                     nullable=False),
+    pa.field("price",            pa.decimal128(38, 18),           nullable=False),
+    pa.field("quantity",         pa.decimal128(38, 18),           nullable=False),
+    pa.field("raw_json",         pa.large_string(),               nullable=True),   # nullable=True
+    pa.field("node_id",          pa.string(),                     nullable=False),
+    pa.field("collector_run_id", pa.string(),                     nullable=False),
+    pa.field("ingest_seq",       pa.int64(),                      nullable=False),
 ])
 
 
@@ -323,15 +324,32 @@ class L1Compactor:
         for ingest_seq, frame in enumerate(records_raw):
             ts_utc = self._parse_ts(frame["ts_utc"])
             received_at = self._parse_ts(frame["received_at"])
-            for change in frame["changes"]:
+            for change_idx, change in enumerate(frame["changes"]):
+                # MCT-160 F4 fix: AC-6/D7 malformed frame validation
+                side = change.get("side")
+                price = change.get("price")
+                quantity = change.get("quantity")
+                if side is None or price is None or quantity is None:
+                    from mctrader_data.nas_metrics.prometheus_exporters import (
+                        compactor_malformed_frame_total,
+                    )
+                    compactor_malformed_frame_total.labels(
+                        channel="orderbookdepth",
+                        exchange=frame.get("exchange", "unknown"),
+                    ).inc()
+                    raise ValueError(
+                        f"malformed orderbookdepth frame at index={ingest_seq} "
+                        f"change={change_idx}: "
+                        f"side={side!r}, price={price!r}, quantity={quantity!r}"
+                    )
                 flat_rows.append({
                     "ts_utc": ts_utc,
                     "received_at": received_at,
                     "exchange": frame["exchange"],
                     "symbol": frame["symbol"],
-                    "side": change["side"],
-                    "price": Decimal(str(change["price"])),
-                    "quantity": Decimal(str(change["quantity"])),
+                    "side": side,
+                    "price": Decimal(str(price)),
+                    "quantity": Decimal(str(quantity)),
                     "raw_json": frame.get("raw_json"),
                     "node_id": node_id,
                     "collector_run_id": collector_run_id,

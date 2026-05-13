@@ -14,8 +14,11 @@ from mctrader_data.wal.ingester import WalIngester
 from mctrader_data.wal.segment import scan_sealed
 
 # Use today's date so that WalIngester's wall-clock-based partitioning
-# matches the compact_hour call's hour_utc date.
+# matches the compact_hour call's date_utc/hour_utc.
+# MCT-160 D2: date_utc + hour_utc(int) 시그니처 반영
 _TODAY = datetime.now(tz=timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+_TODAY_DATE = _TODAY.date()
+_TODAY_HOUR = _TODAY.hour
 
 
 def _write_and_compact_l1(tmp_path: Path, n_records: int, node_id: str = "N") -> None:
@@ -39,10 +42,12 @@ def _write_and_compact_l1(tmp_path: Path, n_records: int, node_id: str = "N") ->
 def test_l2_merges_l1_files(tmp_path: Path) -> None:
     _write_and_compact_l1(tmp_path, 20)
     compactor = L2Compactor(root=tmp_path)
+    # MCT-160 D2: date_utc=date, hour_utc=int
     result = compactor.compact_hour(
         exchange="bithumb", symbol="KRW-BTC",
         channel="transaction",
-        hour_utc=_TODAY,
+        date_utc=_TODAY_DATE,
+        hour_utc=_TODAY_HOUR,
     )
     assert result is not None
     tbl = pq.ParquetFile(result).read()
@@ -58,8 +63,10 @@ def test_l2_row_count_equals_l1_total(tmp_path: Path) -> None:
     l1_total = sum(pq.ParquetFile(f).read().num_rows for f in l1_files)
 
     compactor = L2Compactor(root=tmp_path)
+    # MCT-160 D2: date_utc=date, hour_utc=int
     result = compactor.compact_hour(
         exchange="bithumb", symbol="KRW-BTC", channel="transaction",
-        hour_utc=_TODAY,
+        date_utc=_TODAY_DATE,
+        hour_utc=_TODAY_HOUR,
     )
     assert pq.ParquetFile(result).read().num_rows == l1_total

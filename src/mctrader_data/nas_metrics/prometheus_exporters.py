@@ -56,6 +56,22 @@ compactor_unsupported_channel_total = Counter(
     ["channel"],  # cardinality bounded low — collector emit channel 종류만
 )
 
+# MCT-160 D4 + R-EXTRA: L2/L3 post-write monotonic verify 실패 시 quarantine event Counter
+# tier ∈ {L2, L3}, reason ∈ {monotonic_violation, ...}
+compactor_quarantine_total = Counter(
+    "mctrader_compactor_quarantine_total",
+    "L2/L3 quarantine events by tier and reason (MCT-160 D4)",
+    ["tier", "reason"],  # tier ∈ {L2, L3}, reason ∈ {monotonic_violation}
+)
+
+# MCT-160 F4 fix: AC-6/D7 malformed orderbookdepth frame validation Counter
+# channel ∈ {orderbookdepth, ...}, exchange ∈ {bithumb, ...}
+compactor_malformed_frame_total = Counter(
+    "mctrader_compactor_malformed_frame_total",
+    "L1Compactor malformed frame encountered (MCT-160 AC-6)",
+    ["channel", "exchange"],
+)
+
 if TYPE_CHECKING:
     pass
 

@@ -8,7 +8,6 @@ import os
 from datetime import date
 from pathlib import Path
 
-import pyarrow as pa
 import pyarrow.parquet as pq
 
 from mctrader_data.compactor.l1 import _schema_version
@@ -27,6 +26,13 @@ class L3Compactor:
         channel: str,
         date_utc: date,
     ) -> Path | None:
+        """MCT-160 D1+D3+D4: L2 동형 streaming pattern (D3 chunk write + D4 monotonic verify).
+
+        D1: L3 = 1day window (hour_utc 인자 없음, L2 모든 hour 병합)
+        D2: date_utc caller 명시
+        D3: pa.concat_tables 제거, ParquetWriter chunk write + row_group_size=100_000
+        D4: post-write monotonic verify, 위반 시 quarantine
+        """
         date_str = date_utc.isoformat()
         schema_ver = _schema_version(channel)
         l2_dir = (
@@ -39,8 +45,9 @@ class L3Compactor:
         if not l2_files:
             return None
 
-        tables = [pq.ParquetFile(f).read() for f in l2_files]
-        merged = pa.concat_tables(tables).sort_by("ts_utc")
+        # Pre-read first file to extract schema (D7: nullability preserved)
+        first_pf = pq.ParquetFile(str(l2_files[0]))
+        schema = first_pf.schema_arrow
 
         run_id = hashlib.sha256(
             "|".join(str(f) for f in l2_files).encode()
@@ -55,20 +62,38 @@ class L3Compactor:
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"part-{run_id}.parquet"
         tmp = out_dir / f"part-tmp-{os.getpid()}.tmp"
-        # MCT-133 A1 Task 6b: use ParquetWriter as context manager so writer.close()
-        # runs even when write_table raises (e.g. under memory pressure). On any
-        # exception, clean the tmp file to prevent leftover *.tmp accumulation.
-        # MCT-134 A2 Task 7: track open ParquetWriter instances per tier
-        # (inc before open, dec in finally — paired across success + exception).
+
+        # D3: streaming chunk write with row_group_size=100_000
+        # D4: monotonic verify (chunk-level, no full-table sort in memory)
+        last_ts = None
+        monotonic_violation = False
         try:
             compactor_writer_open_count.labels(tier="L3").inc()
             try:
-                with pq.ParquetWriter(
-                    str(tmp), merged.schema, compression="snappy"
-                ) as writer:
-                    writer.write_table(merged)
+                with pq.ParquetWriter(str(tmp), schema, compression="snappy") as writer:
+                    for f in l2_files:
+                        tbl = pq.ParquetFile(str(f)).read()
+                        # D4: monotonic verify per chunk
+                        ts_col = tbl.column("ts_utc")
+                        for i in range(tbl.num_rows):
+                            cur = ts_col[i].as_py()
+                            if last_ts is not None and cur < last_ts:
+                                monotonic_violation = True
+                                break
+                            last_ts = cur
+                        if monotonic_violation:
+                            break
+                        writer.write_table(tbl, row_group_size=100_000)
             finally:
                 compactor_writer_open_count.labels(tier="L3").dec()
+
+            if monotonic_violation:
+                from mctrader_data.compactor.quarantine import quarantine_l3
+                from mctrader_data.nas_metrics.prometheus_exporters import compactor_quarantine_total
+                quarantine_l3(tmp, channel=channel, date_utc=date_utc, reason="monotonic_violation")
+                compactor_quarantine_total.labels(tier="L3", reason="monotonic_violation").inc()
+                return None
+
             os.replace(str(tmp), str(out_path))
         except Exception:
             with contextlib.suppress(OSError):

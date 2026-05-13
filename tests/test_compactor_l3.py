@@ -35,9 +35,11 @@ def _setup_l2(tmp_path: Path, n: int) -> None:
     ing.close()
     for s in scan_sealed(tmp_path):
         L1Compactor(root=tmp_path).compact_segment(s)
+    # MCT-160 D2: date_utc=date, hour_utc=int
     L2Compactor(root=tmp_path).compact_hour(
         exchange="bithumb", symbol="KRW-BTC", channel="transaction",
-        hour_utc=_TODAY,
+        date_utc=_TODAY.date(),
+        hour_utc=_TODAY.hour,
     )
 
 
