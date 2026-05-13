@@ -230,6 +230,60 @@ def orchestrator(
     )
 
 
+def make_orchestrator(
+    *,
+    local_root: Path,
+    tier: str = "L2",
+    channel: str = "orderbooksnapshot",
+    nas_partition_root: str = "tier=L2",
+    tmp_path: Path | None = None,
+    invariant_harness=None,
+) -> BackfillOrchestrator:
+    """BackfillOrchestrator 공통 factory (MCT-159 Task 9 추가)."""
+    import tempfile
+    from unittest.mock import MagicMock
+    from mctrader_data.nas_migration.invariant_harness import InvariantResult
+
+    if tmp_path is None:
+        _tmpdir = tempfile.mkdtemp()
+        tmp_path = Path(_tmpdir)
+
+    mock_uploader = MagicMock()
+    mock_uploader.put.return_value = None  # not used in discovery-only tests
+    mock_uploader.bucket = "test-bucket"
+
+    if invariant_harness is None:
+        mock_harness = MagicMock()
+        mock_harness.verify.return_value = InvariantResult(status="all_pass", per_invariant_results={})
+    else:
+        mock_harness = invariant_harness
+
+    mock_sop = MagicMock()
+    mock_sop.is_manual_gate.return_value = False
+    mock_metrics = MagicMock()
+
+    from typing import Literal, cast
+    tier_lit = cast(Literal["L2", "L3"], tier)
+
+    return BackfillOrchestrator(
+        nas_uploader=mock_uploader,
+        invariant_harness=mock_harness,
+        sop_runner=mock_sop,
+        metrics=mock_metrics,
+        local_root=local_root,
+        nas_partition_root=nas_partition_root,
+        checkpoint_path=tmp_path / "backfill_checkpoint.sqlite",
+        evidence_pack_path=tmp_path / "evidence_pack.md",
+        lock_path=tmp_path / "backfill.lock",
+        max_workers=2,
+        verify_retry_budget=3,
+        chunk_timeout_s=10.0,
+        tier=tier_lit,
+        partition_normalization=True,
+        channel=channel,  # MCT-159 channel parametrize
+    )
+
+
 # ─── §6.8 Wording SSOT tests ─────────────────────────────────────────────────
 
 
@@ -664,3 +718,67 @@ def test_chunk_spec_is_frozen(tmp_path):
     )
     with pytest.raises((AttributeError, TypeError)):
         chunk.symbol = "ETH_KRW"  # type: ignore[misc]
+
+
+# ─── MCT-159 Task 9: channel parametrize tests ───────────────────────────────
+
+
+def test_orchestrator_discovers_transaction_channel(tmp_path):
+    """MCT-159 — channel parametrize. transaction channel 의 closed-day partition 탐색."""
+    p_dir = make_partition_dir(
+        tmp_path,
+        channel="transaction",
+        schema_version="tick.v1",
+        tier="L2",
+        date_str="2026-05-10",
+        hour="13",
+        node="MERGED",
+    )
+    parquet_path = p_dir / "part-test.parquet"
+    parquet_path.write_bytes(b"PAR1")
+
+    orch = make_orchestrator(local_root=tmp_path, tier="L2", channel="transaction", tmp_path=tmp_path)
+    partitions = orch._discover_partitions()
+    assert len(partitions) == 1
+    assert "transaction" in str(partitions[0])
+
+
+def test_orchestrator_default_channel_orderbooksnapshot(tmp_path):
+    """MCT-159 — default channel=orderbooksnapshot backward-compat (R4 mitigation)."""
+    p_dir = make_partition_dir(
+        tmp_path,
+        channel="orderbooksnapshot",
+        schema_version="orderbook_snapshot.v1",
+        tier="L2",
+        date_str="2025-01-01",
+        hour="10",
+        node="MERGED",
+    )
+    parquet_path = p_dir / "part-default.parquet"
+    parquet_path.write_bytes(b"PAR1")
+
+    # channel 미지정 → default "orderbooksnapshot"
+    orch = make_orchestrator(local_root=tmp_path, tier="L2", tmp_path=tmp_path)
+    partitions = orch._discover_partitions()
+    assert len(partitions) == 1
+    assert "orderbooksnapshot" in str(partitions[0])
+
+
+def test_orchestrator_transaction_not_discovered_when_orderbooksnapshot(tmp_path):
+    """MCT-159 — channel isolation: orderbooksnapshot orchestrator 는 transaction 미발견."""
+    # transaction 파티션만 생성
+    p_dir = make_partition_dir(
+        tmp_path,
+        channel="transaction",
+        schema_version="tick.v1",
+        tier="L2",
+        date_str="2025-01-01",
+        hour="10",
+        node="MERGED",
+    )
+    (p_dir / "part-trans.parquet").write_bytes(b"PAR1")
+
+    # orderbooksnapshot 채널 orchestrator → transaction 미발견
+    orch = make_orchestrator(local_root=tmp_path, tier="L2", channel="orderbooksnapshot", tmp_path=tmp_path)
+    partitions = orch._discover_partitions()
+    assert len(partitions) == 0
