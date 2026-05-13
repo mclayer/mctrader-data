@@ -47,6 +47,15 @@ dual_write_result_total = Counter(
     ["status", "tier"],  # status ∈ {committed, local_only, hard_floor_blocked}, tier ∈ {L2, L3}
 )
 
+# MCT-162 (ADR-027 D4 amendment, 2026-05-13)
+# L1Compactor unsupported channel encounter = fail-fast invariant (silent skip 차단)
+# cardinality bounded low — collector emit channel 종류만 (attacker-controlled injection path 0)
+compactor_unsupported_channel_total = Counter(
+    "mctrader_compactor_unsupported_channel_total",
+    "L1Compactor unsupported channel encountered (MCT-162 fail-fast, silent skip 차단)",
+    ["channel"],  # cardinality bounded low — collector emit channel 종류만
+)
+
 if TYPE_CHECKING:
     pass
 

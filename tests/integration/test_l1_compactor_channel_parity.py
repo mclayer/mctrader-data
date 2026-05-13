@@ -329,8 +329,8 @@ def test_orderbookdepth_parquet_schema_adr_009_d11_9(
     schema = tbl.schema
 
     # ---- Column count verification ----
-    assert schema.num_fields == 11, (
-        f"ADR-009 §D11.9.2 specifies 11 columns, got {schema.num_fields}. "
+    assert len(schema) == 11, (
+        f"ADR-009 §D11.9.2 specifies 11 columns, got {len(schema)}. "
         f"Schema: {schema}"
     )
 
@@ -349,7 +349,7 @@ def test_orderbookdepth_parquet_schema_adr_009_d11_9(
         "collector_run_id",
         "ingest_seq",
     ]
-    actual_columns = [schema.field(i).name for i in range(schema.num_fields)]
+    actual_columns = [schema.field(i).name for i in range(len(schema))]
 
     assert actual_columns == expected_columns, (
         f"Column name/order mismatch. Expected: {expected_columns}, "
