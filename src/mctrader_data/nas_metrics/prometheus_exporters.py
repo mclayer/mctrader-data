@@ -38,6 +38,15 @@ from prometheus_client import (
     REGISTRY,
 )
 
+# MCT-156: DualWriter status/tier Counter (Stage 3 wiring, AC-G)
+# status ∈ {committed, local_only, hard_floor_blocked}, tier ∈ {L2, L3}
+# ADR-027 D5 amendment caller contract — caller (CompactorRunner._dispatch_dual_write) emit.
+dual_write_result_total = Counter(
+    "mctrader_dual_write_result_total",
+    "DualWriter put() result count by status and tier (MCT-156)",
+    ["status", "tier"],  # status ∈ {committed, local_only, hard_floor_blocked}, tier ∈ {L2, L3}
+)
+
 if TYPE_CHECKING:
     pass
 

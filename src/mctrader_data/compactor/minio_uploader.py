@@ -1,4 +1,12 @@
-"""MinIO uploader — uploads completed L3 Parquet files to S3-compatible object storage."""
+"""MinIO uploader — uploads completed L3 Parquet files to S3-compatible object storage.
+
+.. deprecated:: MCT-156 (Stage 3 wiring, 2026-05-13)
+   Replaced by DualWriter (MCT-151 primitive, src/mctrader_data/nas_storage/dual_writer.py)
+   for L2/L3 NAS dual-write. Call sites removed in MCT-156 Phase 2.
+   Module file removal scheduled for post-EPIC-cold-tier-stage-3-wiring Epic.
+
+   See ADR-027 D4 amendment (mctrader-hub#279, 2026-05-13).
+"""
 from __future__ import annotations
 
 import logging

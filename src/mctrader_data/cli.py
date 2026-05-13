@@ -636,12 +636,43 @@ def compact_cmd(root: str, once: bool, log_level: str) -> None:
     # MCT-134 — bootstrap /metrics HTTP endpoint (RSS gauge for now; Task 7 will
     # add the remaining 4 metric series). Skip in --once mode (one-shot CLI runs
     # have no scrape window). Port via env: MCTRADER_COMPACTOR_METRICS_PORT.
+    log = logging.getLogger("mctrader-data.compact")
+
     if not once:
         metrics_port = int(os.environ.get("MCTRADER_COMPACTOR_METRICS_PORT", "8080"))
         start_metrics_server(port=metrics_port)
 
+    # MCT-156: NASUploader + DualWriter lazy build (ADR-027 D4/D5 amendment 박제 정합)
+    # NAS_MINIO_ENDPOINT 부재 시 = test/local dev mode → dual_writer=None,
+    # CompactorRunner 는 L2/L3 NAS upload 0 (degraded mode).
+    dual_writer = None
+    if os.environ.get("NAS_MINIO_ENDPOINT"):
+        from mctrader_data.nas_storage.nas_uploader import NASUploader
+        from mctrader_data.nas_storage.dual_writer import DualWriter
+        from mctrader_data.nas_storage.retry_queue import RetryQueue
+
+        retry_queue_path = Path(root) / "nas_retry_queue.sqlite"
+        retry_queue = RetryQueue(path=retry_queue_path)
+        nas_uploader = NASUploader(
+            endpoint=os.environ["NAS_MINIO_ENDPOINT"],
+            access_key=os.environ["NAS_MINIO_ACCESS_KEY"],
+            secret_key=os.environ["NAS_MINIO_SECRET_KEY"],
+            bucket=os.environ.get("NAS_MINIO_BUCKET", "mctrader-market"),
+            retry_queue=retry_queue,
+        )
+        dual_writer = DualWriter(nas_uploader=nas_uploader, local_root=Path(root))
+        log.info(
+            "[compactor] NAS dual-write enabled: endpoint=%s bucket=%s",
+            os.environ["NAS_MINIO_ENDPOINT"],
+            os.environ.get("NAS_MINIO_BUCKET", "mctrader-market"),
+        )
+    else:
+        log.warning(
+            "[compactor] NAS_MINIO_ENDPOINT not set — L2/L3 NAS upload disabled (degraded mode)"
+        )
+
     async def _run() -> None:
-        runner = CompactorRunner(Path(root))
+        runner = CompactorRunner(Path(root), dual_writer=dual_writer)
         if once:
             await runner._tick()
             return
