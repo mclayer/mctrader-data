@@ -70,3 +70,29 @@ FeasibilityAgent·ContinuityAgent = `claude-opus-4-7` 유지.
 ### Plugin 업그레이드 체크리스트
 
 `mctrader-hub/.claude/_overlay/CLAUDE.md` §"codeforge 업그레이드 프로세스" (step 1~6) 참조.
+
+### BackfillOrchestrator channel parametrize + hour key amend (MCT-159, EPIC-cold-tier-stage-3-wiring sibling)
+
+MCT-156 Phase 2 LAND (`mctrader-data#47` dff8aa5) 후 hot pipeline NAS PUT 정상화. 그러나 LAND 이전 로컬 누적 L2/L3 backlog (~8.85 GiB / 7118 file, 신규 schema `tier=L{2,3}/.../date=D/hour=HH/node=MERGED/`) 강제 이관 필요. MCT-153 (transaction-only path) `BackfillOrchestrator` 의 2 amendment 후 재호출.
+
+**amendment 2종**:
+
+1. **channel parametrize**: `BackfillOrchestrator.__init__` 에 `channel: Literal["orderbooksnapshot", "transaction"] = "orderbooksnapshot"` 추가 + `_discover_partitions` 의 `"orderbooksnapshot"` 하드코딩 (line 596) → `self._channel` parametrize. `run_backfill.py` 에 `--channel` flag 추가.
+2. **hour key 처리**: `_build_chunk_spec` (line 645-709) 에 `hour = _extract_hive_value(parts, "hour")` 추출 + `nas_partition_prefix` 에 `/hour={hour}/` 박제 (있을 시). hour 부재 시 backward-compat (legacy ADR-009 §D2.1 layout 정합).
+
+**🔴 CRITICAL — test fixture 갱신 의무**: 사용자 unstaged `_discover_partitions()` hot-fix 가 `make_partition_dir()` fixture (`tests/nas_migration/test_backfill_orchestrator.py`) 와 mismatch → 8+ integration test silent 통과 (total_chunks=0 오통과) 위험. **Phase 2 Task 8 first step = fixture 갱신 (TDD red phase 강제)**.
+
+**회귀 보호**:
+- `tests/nas_migration/test_backfill_orchestrator.py` + `test_backfill_resumability_chaos.py` 양 channel 매트릭스 확장
+- default `channel="orderbooksnapshot"` backward-compat 유지 (MCT-153 transaction-only 회귀 0)
+- hour 부재 case (legacy layout) backward-compat 보존
+
+**invariant 보존**:
+- forward-only (ADR-009 §D12.2) — row 변경/삭제 0
+- 7종 invariant ALL PASS (MCT-151 InvariantHarness inject 자동)
+- local GC 7d grace 답습 (MCT-155 gc_runner 재사용, MCT-153 손실 교훈 정합)
+
+**scope 한계**:
+- L2/L3 backlog 8.85 GiB only (~4.8% of 전체 183 GiB)
+- L1 sealed backlog (76,200 file / ~115 GiB) + WAL (59 GiB) = MCT-160 책임 (sequential 의무)
+- bucket versioning 활성화 = MCT-161 책임
