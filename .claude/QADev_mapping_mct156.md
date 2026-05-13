@@ -99,7 +99,7 @@ Phase 2 별 PR 의 GitHub Actions workflow:
 ### ✅ 없음
 
 모든 src/ 코드는 이미 MCT-150/151에서 구현완료.
-Phase 2는 CompactorRunner integration 및 Prometheus emit 추가만 필요 (DeveloperPL 담당).
+Phase 2 DeveloperPL commit `cbc4ba6` 에서 CompactorRunner integration 및 Prometheus emit 완료 (파일 disjoint 정합).
 
 ## 다음 단계
 
