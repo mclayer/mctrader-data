@@ -660,10 +660,11 @@ class BackfillOrchestrator:
         EC-2 (mixed legacy/non-legacy): partition 별 is_legacy_node 개별 판단
         """
         parts = source_path.parts
-        # ADR-009 §D2.1 Hive layout: .../tier=L2/exchange=X/symbol=S/date=D/[node=N/]file.parquet
+        # ADR-009 §D2.1 Hive layout: .../tier=L2/exchange=X/symbol=S/date=D/[hour=HH/][node=N/]file.parquet
         exchange = _extract_hive_value(parts, "exchange")
         symbol = _extract_hive_value(parts, "symbol")
         date_str = _extract_hive_value(parts, "date")
+        hour = _extract_hive_value(parts, "hour")  # MCT-159: hour 축 추가
         node = _extract_hive_value(parts, "node")
 
         if symbol is None:
@@ -673,6 +674,9 @@ class BackfillOrchestrator:
 
         is_legacy_node = node is None
 
+        # MCT-159: hour=HH segment (있으면 박제, 없으면 "" — legacy backward-compat R5)
+        hour_segment = f"/hour={hour}" if hour is not None else ""
+
         if is_legacy_node:
             # S6: legacy partition → node=DEFAULT 명시 삽입
             nas_partition_prefix = (
@@ -680,6 +684,7 @@ class BackfillOrchestrator:
                 f"/exchange={exchange or 'UNKNOWN'}"
                 f"/symbol={symbol}"
                 f"/date={date_str}"
+                f"{hour_segment}"
                 f"/node=DEFAULT"
             )
             if self._metrics is not None:
@@ -691,6 +696,7 @@ class BackfillOrchestrator:
                 f"/exchange={exchange or 'UNKNOWN'}"
                 f"/symbol={symbol}"
                 f"/date={date_str}"
+                f"{hour_segment}"
                 f"/node={node}"
             )
 

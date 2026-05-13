@@ -782,3 +782,45 @@ def test_orchestrator_transaction_not_discovered_when_orderbooksnapshot(tmp_path
     orch = make_orchestrator(local_root=tmp_path, tier="L2", channel="orderbooksnapshot", tmp_path=tmp_path)
     partitions = orch._discover_partitions()
     assert len(partitions) == 0
+
+
+# ─── MCT-159 Task 10: hour key 박제 tests ────────────────────────────────────
+
+
+def test_chunk_spec_includes_hour_partition(tmp_path):
+    """MCT-159 — hour key 박제. 신규 schema 의 hour=HH/node=MERGED 가 nas_object_key 에 박제."""
+    parquet_path = make_partition_dir(
+        tmp_path,
+        channel="orderbooksnapshot",
+        schema_version="orderbook_snapshot.v1",
+        tier="L2",
+        date_str="2026-05-10",
+        hour="13",
+        node="MERGED",
+    ) / "part-abc123.parquet"
+    parquet_path.write_bytes(b"PAR1")
+
+    orch = make_orchestrator(local_root=tmp_path, tier="L2", nas_partition_root="tier=L2", tmp_path=tmp_path)
+    chunk = orch._build_chunk_spec(parquet_path)
+    assert "hour=13" in chunk.nas_object_key
+    assert "node=MERGED" in chunk.nas_object_key
+    assert chunk.nas_object_key.endswith("part-abc123.parquet")
+
+
+def test_chunk_spec_hour_absent_legacy_backward_compat(tmp_path):
+    """MCT-159 — hour 부재 시 hour_segment="" (legacy backward-compat, R5 mitigation)."""
+    # legacy path (hour 부재)
+    legacy_dir = (
+        tmp_path / "market" / "orderbooksnapshot"
+        / "schema_version=orderbook_snapshot.v1"
+        / "tier=L2" / "exchange=BITHUMB" / "symbol=BTC_KRW" / "date=2025-01-01"
+    )
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+    parquet_path = legacy_dir / "part-legacy.parquet"
+    parquet_path.write_bytes(b"PAR1")
+
+    orch = make_orchestrator(local_root=tmp_path, tier="L2", nas_partition_root="tier=L2", tmp_path=tmp_path)
+    chunk = orch._build_chunk_spec(parquet_path)
+    # hour 없으면 nas_object_key 에 "hour=" 미포함 (legacy backward-compat)
+    assert "hour=" not in chunk.nas_object_key
+    assert chunk.nas_object_key.endswith("part-legacy.parquet")
