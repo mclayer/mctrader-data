@@ -3,6 +3,13 @@
 Story: MCT-151 (Stage 2 — dual-write atomic primitives + 7종 invariant harness)
 Issue: mclayer/mctrader-hub#257
 
+MCT-159 FIX Iter 1 amendment (2026-05-13):
+- ADR009_CHANNEL_SCHEMA_MATRIX 추가 (ADR-009 §D2.6 SSOT)
+- __init__ expected_column_count=None (None 시 schema_version 추출 → matrix lookup)
+- _resolve_expected_column_count: D1 Hybrid (prefix 추출 primary → explicit fallback → miss=diagnostic)
+- _check_schema_version: channel-aware (tuple/list valid set 지원)
+- _check_object_count: per-file basis (ADR-027 §D6.1 chunk↔verify per-file contract)
+
 Design decisions (§6.2.3 Change Plan 박제):
 
 S5 박제 (scope_manifest design_decisions S5):
@@ -43,6 +50,7 @@ from __future__ import annotations
 import hashlib
 import io
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -60,6 +68,7 @@ log = logging.getLogger(__name__)
 
 # ─── ADR-009 §D2.1 16-col schema SSOT ───────────────────────────────────────
 # 변경 시 ADR-009 amendment 의무 (column count + order 모두 SSOT)
+# OHLCV cutover path backward-compat 회귀 0 — 기존 상수 보존 (MCT-159 FIX 박제)
 ADR009_EXPECTED_COLUMN_COUNT: int = 16
 ADR009_EXPECTED_COLUMN_NAMES: tuple[str, ...] = (
     "schema_version", "exchange", "symbol", "date", "ts",
@@ -68,6 +77,46 @@ ADR009_EXPECTED_COLUMN_NAMES: tuple[str, ...] = (
     "source_provenance", "ingestion_ts",
 )
 ADR009_EXPECTED_SCHEMA_VERSION: str = "v1"
+
+# ─── ADR-009 §D2.6 ADR009_CHANNEL_SCHEMA_MATRIX SSOT ────────────────────────
+# MCT-159 FIX Iter 1 (2026-05-13): channel-aware column_count resolve
+# Key = schema_version prefix (e.g. "orderbook_snapshot.v1")
+# Value = (column_count: int, column_names: tuple[str, ...])
+# 신규 schema_version 추가 시 본 matrix + ADR-009 §D2.6 amendment 의무 (CFP-26 sibling sync 정합)
+ADR009_CHANNEL_SCHEMA_MATRIX: dict[str, tuple[int, tuple[str, ...]]] = {
+    "orderbook_snapshot.v1": (
+        11,
+        (
+            "ts_utc", "received_at", "exchange", "symbol",
+            "baseline_seq", "side", "level", "price", "quantity",
+            "payload_hash", "raw_json",
+        ),
+    ),
+    "tick.v1": (
+        8,
+        (
+            "ts_utc", "received_at", "exchange", "symbol",
+            "price", "quantity", "side", "raw_json",
+        ),
+    ),
+    "tick.v1.1": (
+        11,
+        (
+            "ts_utc", "received_at", "exchange", "symbol",
+            "price", "quantity", "side", "raw_json",
+            "ingest_seq", "payload_hash", "validation_status",
+        ),
+    ),
+    "ohlcv.v1": (
+        16,
+        (
+            "schema_version", "exchange", "symbol", "date", "ts",
+            "open", "high", "low", "close", "volume", "vwap",
+            "trade_count", "bid_count", "ask_count",
+            "source_provenance", "ingestion_ts",
+        ),
+    ),
+}
 
 # §6.8 Wording SSOT — InvariantResult.status enum 8종 (frozen)
 _INVARIANT_NAMES: tuple[str, ...] = (
@@ -150,16 +199,30 @@ class InvariantHarness:
         nas_uploader: NASUploader,
         local_root: Path,
         metrics: PrometheusExporter | None = None,
-        expected_column_count: int = ADR009_EXPECTED_COLUMN_COUNT,
-        expected_column_names: tuple[str, ...] = ADR009_EXPECTED_COLUMN_NAMES,
-        expected_schema_version: str = ADR009_EXPECTED_SCHEMA_VERSION,
+        expected_column_count: int | None = None,
+        expected_column_names: tuple[str, ...] | None = None,
+        expected_schema_version: str | tuple[str, ...] | list[str] = ADR009_EXPECTED_SCHEMA_VERSION,
         partition_normalization: bool = False,  # EC-4: legacy node= fallback
     ) -> None:
+        """7종 invariant harness 초기화.
+
+        MCT-159 FIX Iter 1 signature amend (ADR-009 §D2.6 SSOT):
+        - expected_column_count: None 시 schema_version 추출 → ADR009_CHANNEL_SCHEMA_MATRIX lookup (D1 Hybrid primary)
+          int 주입 시 backward-compat 유지 (OHLCV cutover path 회귀 0)
+        - expected_column_names: None 시 matrix lookup 결과 사용 (expected_column_count=None 연동)
+          tuple 주입 시 backward-compat 유지
+        - expected_schema_version: str / tuple[str] / list[str] 지원 (channel-aware valid set)
+        """
         self._uploader = nas_uploader
         self._local_root = local_root
         self._metrics = metrics
-        self._expected_column_count = expected_column_count
-        self._expected_column_names = list(expected_column_names)
+        # None = lookup mode (D1 Hybrid primary); int = explicit injection (backward-compat)
+        self._expected_column_count: int | None = expected_column_count
+        # None = lookup mode (linked to expected_column_count=None); tuple = explicit injection
+        self._expected_column_names_override: tuple[str, ...] | None = expected_column_names
+        # backward-compat: when explicit count provided, fall back to OHLCV names
+        if expected_column_count is not None and expected_column_names is None:
+            self._expected_column_names_override = ADR009_EXPECTED_COLUMN_NAMES
         self._expected_schema_version = expected_schema_version
         self._partition_normalization = partition_normalization
 
@@ -268,14 +331,26 @@ class InvariantHarness:
             if local_rows != nas_rows:
                 row_count_mismatches.append(basename)
 
-            # column_count
+            # column_count (D1 Hybrid: per-file schema_version lookup primary)
+            expected_col_count, expected_col_names = self._resolve_expected_column_count(local_file)
             local_col_count = len(local_schema.names)
             nas_col_count = len(nas_schema.names)
-            if local_col_count != self._expected_column_count or nas_col_count != self._expected_column_count:
+            if expected_col_count is None:
+                # miss strategy: unknown schema_version → column_count_fail diagnostic
+                log.warning(
+                    "InvariantHarness: unknown schema_version for %r — column_count_fail (diagnostic)",
+                    basename,
+                )
+                column_count_mismatches.append(basename)
+            elif local_col_count != expected_col_count or nas_col_count != expected_col_count:
                 column_count_mismatches.append(basename)
 
-            # column_order
-            if local_schema.names != self._expected_column_names or nas_schema.names != self._expected_column_names:
+            # column_order (D1 Hybrid: use resolved expected_col_names)
+            if expected_col_names is not None:
+                if local_schema.names != list(expected_col_names) or nas_schema.names != list(expected_col_names):
+                    column_order_mismatches.append(basename)
+            else:
+                # miss: unknown schema → column_order_fail (consistent with column_count miss)
                 column_order_mismatches.append(basename)
 
             # dtype (EC-5: pyarrow type-level identity — str(type) includes precision/scale for Decimal)
@@ -300,15 +375,20 @@ class InvariantHarness:
         per_results["column_count"] = PerInvariantResult(
             invariant_name="column_count",
             status="fail" if column_count_mismatches else "pass",
-            measured_local=self._expected_column_count,
-            measured_nas=self._expected_column_count,
+            measured_local=self._expected_column_count if self._expected_column_count is not None else "lookup",
+            measured_nas=self._expected_column_count if self._expected_column_count is not None else "lookup",
             mismatch_files=column_count_mismatches,
+        )
+        _col_names_repr: list[str] | str = (
+            list(self._expected_column_names_override)
+            if self._expected_column_names_override
+            else "lookup"
         )
         per_results["column_order"] = PerInvariantResult(
             invariant_name="column_order",
             status="fail" if column_order_mismatches else "pass",
-            measured_local=list(self._expected_column_names),
-            measured_nas=list(self._expected_column_names),
+            measured_local=_col_names_repr,
+            measured_nas=_col_names_repr,
             mismatch_files=column_order_mismatches,
         )
         per_results["dtype"] = PerInvariantResult(
@@ -355,11 +435,17 @@ class InvariantHarness:
 
         # ── Metrics emit (optional) ────────────────────────────────────────────
         if self._metrics is not None:
+            # Extract channel (schema_version) and tier from NAS partition for label cardinality
+            _channel = self._extract_schema_version(effective_nas_partition) or "unknown"
+            _tier_match = re.search(r"tier=(L\d)", effective_nas_partition)
+            _tier = _tier_match.group(1) if _tier_match else "unknown"
             self._metrics.emit_invariant_verify(
                 status=status,
                 partition=str(effective_nas_partition),
                 latency_s=verify_latency_ms / 1000.0,
                 per_invariant_results=dict(per_results.items()),
+                channel=_channel,
+                tier=_tier,
             )
 
         return result
@@ -369,31 +455,98 @@ class InvariantHarness:
     def _check_schema_version(
         self, local_partition: Path, nas_partition: str
     ) -> PerInvariantResult:
-        """schema_version pin invariant: local + NAS partition prefix == schema_version=v1."""
-        expected_prefix = f"schema_version={self._expected_schema_version}"
+        """schema_version pin invariant: local + NAS partition prefix schema_version match.
 
-        # Check local partition path
-        local_str = str(local_partition)
-        local_has_sv = expected_prefix in local_str.replace("\\", "/")
+        MCT-159 FIX Iter 1: channel-aware — expected_schema_version 이 str / tuple / list 지원.
+        - str: 단일 값 (기존 OHLCV v1 path, backward-compat)
+        - tuple / list: channel valid set (여러 schema_version 허용, e.g. ["tick.v1", "tick.v1.1"])
 
-        # Check NAS partition
-        nas_has_sv = nas_partition.startswith(expected_prefix) or (
-            expected_prefix in nas_partition
+        Resolution: partition prefix 에서 schema_version=<value> 추출 후 valid set 검사.
+        """
+        sv = self._expected_schema_version
+        if isinstance(sv, str):
+            valid_set: set[str] = {sv}
+        else:
+            valid_set = set(sv)
+
+        # Extract schema_version from local partition path
+        local_str = str(local_partition).replace("\\", "/")
+        local_sv = self._extract_schema_version(local_str)
+        local_has_sv = local_sv in valid_set if local_sv else any(
+            f"schema_version={v}" in local_str for v in valid_set
+        )
+
+        # Extract schema_version from NAS partition prefix
+        nas_sv = self._extract_schema_version(nas_partition)
+        nas_has_sv = nas_sv in valid_set if nas_sv else any(
+            f"schema_version={v}" in nas_partition for v in valid_set
         )
 
         passed = local_has_sv and nas_has_sv
         return PerInvariantResult(
             invariant_name="schema_version",
             status="pass" if passed else "fail",
-            measured_local=expected_prefix if local_has_sv else "missing",
-            measured_nas=expected_prefix if nas_has_sv else "missing",
+            measured_local=local_sv or "missing",
+            measured_nas=nas_sv or "missing",
             mismatch_files=[],
         )
+
+    def _extract_schema_version(self, path_str: str) -> str | None:
+        """Extract schema_version value from a partition path string.
+
+        e.g. "schema_version=orderbook_snapshot.v1/tier=L2/..." → "orderbook_snapshot.v1"
+        Returns None if not found.
+        """
+        match = re.search(r"schema_version=([^/\\]+)", path_str)
+        return match.group(1) if match else None
+
+    def _resolve_expected_column_count(
+        self, file_path: Path
+    ) -> tuple[int | None, tuple[str, ...] | None]:
+        """D1 Hybrid: schema_version 추출 → ADR009_CHANNEL_SCHEMA_MATRIX lookup.
+
+        ADR-027 §D6.1 + ADR-009 §D2.6 SSOT (MCT-159 FIX Iter 1):
+        1. Primary: file_path 에서 schema_version 추출 → matrix lookup
+        2. Fallback: _expected_column_count 명시 주입 시 explicit 사용
+        3. Miss: unknown schema_version → (None, None) → column_count_fail diagnostic
+
+        Returns (expected_count, expected_names) or (None, None) on miss.
+        """
+        # Fallback path: explicit injection (backward-compat — OHLCV cutover path 회귀 0)
+        if self._expected_column_count is not None:
+            return (self._expected_column_count, self._expected_column_names_override)
+
+        # Primary: schema_version 추출
+        path_str = str(file_path).replace("\\", "/")
+        sv = self._extract_schema_version(path_str)
+        if sv is None:
+            log.debug(
+                "InvariantHarness._resolve_expected_column_count: "
+                "no schema_version in path %r — miss",
+                path_str,
+            )
+            return (None, None)
+
+        entry = ADR009_CHANNEL_SCHEMA_MATRIX.get(sv)
+        if entry is None:
+            log.warning(
+                "InvariantHarness._resolve_expected_column_count: "
+                "unknown schema_version=%r — column_count_fail diagnostic",
+                sv,
+            )
+            return (None, None)
+
+        return (entry[0], entry[1])
 
     def _check_object_count(
         self, local_files: list[Path], nas_objects: list[str]
     ) -> PerInvariantResult:
-        """object_count invariant: local file count == NAS object count (per partition)."""
+        """object_count invariant: local file count == NAS object count (per-file basis).
+
+        ADR-027 §D6.1 chunk↔verify per-file contract (MCT-159 FIX Iter 1):
+        chunk_spec 변경 0 (MCT-153 박제 보존), invariant verify = per-file.
+        local file count == NAS object count within the same partition.
+        """
         local_count = len(local_files)
         nas_count = len(nas_objects)
         passed = local_count == nas_count

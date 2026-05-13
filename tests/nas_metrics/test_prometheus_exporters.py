@@ -270,9 +270,11 @@ class TestInvariantMetricPrefixFreeze:
                 assert not metric_name.startswith(pattern), (
                     f"Forbidden metric name pattern found: {metric_name!r} matches {pattern!r}"
                 )
-            # Must start with nas_invariant_
-            assert metric_name.startswith("nas_invariant_"), (
-                f"Invariant metric must start with 'nas_invariant_', got: {metric_name!r}"
+            # Must start with nas_invariant_* OR mctrader_invariant_* (MCT-159 FIX Iter 1 신규)
+            # mctrader_invariant_verify_total = channel-aware Counter (ADR-027 §D6.1 정합)
+            allowed_prefixes = ("nas_invariant_", "mctrader_invariant_")
+            assert any(metric_name.startswith(p) for p in allowed_prefixes), (
+                f"Invariant metric must start with {allowed_prefixes}, got: {metric_name!r}"
             )
 
 

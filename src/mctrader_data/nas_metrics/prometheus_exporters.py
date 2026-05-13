@@ -199,11 +199,11 @@ class PrometheusExporter:
             registry=_reg,
         )
 
-        # nas_invariant_verify_*
+        # nas_invariant_verify_* (MCT-159 FIX Iter 1: channel+tier label 추가)
         self._inv_verify_status = Counter(
             "nas_invariant_status_count",
-            "InvariantHarness.verify() result status count (MCT-151 §6.2.3)",
-            ["status"],
+            "InvariantHarness.verify() result status count (MCT-151 §6.2.3, MCT-159 channel-aware)",
+            ["status", "channel", "tier"],
             registry=_reg,
         )
         self._inv_verify_latency = Histogram(
@@ -211,6 +211,14 @@ class PrometheusExporter:
             "InvariantHarness.verify() latency in seconds (MCT-151)",
             ["status"],
             buckets=(0.1, 1.0, 5.0, 30.0, 60.0, 600.0),
+            registry=_reg,
+        )
+        # mctrader_invariant_verify_total{status, channel, tier} — ADR-027 §D6.1 channel-aware Counter
+        # MCT-159 FIX Iter 1: channel label 추가 (cardinality: status×channel×tier)
+        self._invariant_verify_total = Counter(
+            "mctrader_invariant_verify_total",
+            "InvariantHarness.verify() total count by status, channel, and tier (MCT-159 §D6.1)",
+            ["status", "channel", "tier"],
             registry=_reg,
         )
         self._inv_sha256_match = Counter(
@@ -278,22 +286,28 @@ class PrometheusExporter:
         partition: str,
         latency_s: float,
         per_invariant_results: dict,
+        channel: str = "unknown",
+        tier: str = "unknown",
     ) -> None:
         """InvariantHarness.verify() emit — InvariantResult.status 8종 + per-invariant 측정값.
 
+        MCT-159 FIX Iter 1: channel + tier label 추가 (ADR-027 §D6.1 channel-aware contract).
+
         Metrics (nas_invariant_* prefix):
-        - nas_invariant_status_count (Counter, labels: status)
+        - nas_invariant_status_count (Counter, labels: status, channel, tier) — MCT-159 channel label 추가
         - nas_invariant_verify_latency_seconds (Histogram, labels: status)
         - nas_invariant_sha256_match_count (Counter, labels: partition) — sha256 PASS 시
         - nas_invariant_object_count_match (Gauge, labels: partition, type)
         - nas_invariant_row_count_match_count (Counter, labels: partition) — row_count PASS 시
         - nas_invariant_schema_drift_count (Counter, labels: partition, drift_type) — FAIL 시
+        - mctrader_invariant_verify_total (Counter, labels: status, channel, tier) — MCT-159 신규
 
         §6.8 Wording SSOT: status ∈ {"all_pass", "sha256_fail", "object_count_fail",
         "row_count_fail", "column_count_fail", "column_order_fail", "dtype_fail", "schema_version_fail"}.
         """
         self._ensure_invariant_metrics()
-        self._inv_verify_status.labels(status=status).inc()
+        self._inv_verify_status.labels(status=status, channel=channel, tier=tier).inc()
+        self._invariant_verify_total.labels(status=status, channel=channel, tier=tier).inc()
         self._inv_verify_latency.labels(status=status).observe(latency_s)
 
         # sha256 match count (pass only)

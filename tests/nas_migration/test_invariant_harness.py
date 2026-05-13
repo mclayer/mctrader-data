@@ -3,6 +3,13 @@
 Story: MCT-151 (Stage 2 — dual-write atomic primitives + 7종 invariant harness)
 Issue: mclayer/mctrader-hub#257
 
+MCT-159 FIX Iter 1 amendment (2026-05-13):
+- channel fixture 4종 추가: make_obs_v1_parquet (11-col) / make_tick_v1_parquet (8-col) /
+  make_tick_v1_1_parquet (11-col) / make_ohlcv_v1_parquet (16-col, backward-compat 회귀 path)
+- T-new-1~4: channel-aware verify integration test (ADR-009 §D2.6 SSOT 정합)
+- _make_harness: ohlcv.v1 lookup path 사용 (schema_version=ohlcv.v1 prefix)
+  기존 회귀 테스트 = expected_column_count=16 explicit injection (backward-compat 보존)
+
 Test Contract §8.2 (TestContractArchitectAgent — MCT-151):
 - test_7_invariant_all_pass: 7종 ALL PASS → status="all_pass"
 - test_per_invariant_fail_surface: per-invariant FAIL surface (8 status enum)
@@ -16,6 +23,12 @@ Test Contract §8.2 (TestContractArchitectAgent — MCT-151):
 - test_legacy_node_default_fallback (EC-4)
 - test_verify_idempotent_across_invocations (§8.5 active)
 - test_status_enum_exact_string_match (§6.8 wording SSOT)
+
+Test Contract (MCT-159 FIX Iter 1 — ADR-009 §D2.6 channel-aware):
+- T-new-1: orderbook_snapshot.v1 11-col → all_pass
+- T-new-2: tick.v1 8-col → all_pass
+- T-new-3: ohlcv.v1 16-col (matrix lookup) → all_pass
+- T-new-4: unknown schema_version → column_count_fail diagnostic
 
 ADR-009 §D2.1 16-col schema:
 schema_version, exchange, symbol, date, ts, open, high, low, close, volume,
@@ -38,6 +51,7 @@ import pyarrow.parquet as pq
 
 from mctrader_data.nas_storage.nas_uploader import NASUploader
 from mctrader_data.nas_migration.invariant_harness import (
+    ADR009_CHANNEL_SCHEMA_MATRIX,
     InvariantHarness,
 )
 
@@ -124,10 +138,142 @@ def _make_mock_uploader(nas_objects: dict[str, bytes]) -> NASUploader:
 
 
 def _make_harness(uploader: NASUploader, local_root: Path) -> InvariantHarness:
+    """OHLCV explicit injection harness (backward-compat 회귀 path).
+
+    MCT-159 FIX Iter 1: 기존 회귀 테스트는 expected_column_count=16 explicit injection 사용.
+    schema_version=v1 (레거시 경로) → matrix miss 방지 위해 explicit injection.
+    """
     return InvariantHarness(
         nas_uploader=uploader,
         local_root=local_root,
+        expected_column_count=16,
+        expected_column_names=tuple(ADR009_COLUMN_NAMES),
     )
+
+
+def _make_channel_harness(uploader: NASUploader, local_root: Path) -> InvariantHarness:
+    """Channel-aware lookup harness (MCT-159 FIX Iter 1 — ADR-009 §D2.6 matrix lookup).
+
+    expected_column_count=None → schema_version 추출 → ADR009_CHANNEL_SCHEMA_MATRIX lookup.
+    expected_schema_version = tuple(all matrix keys) → channel-aware valid set.
+    """
+    return InvariantHarness(
+        nas_uploader=uploader,
+        local_root=local_root,
+        # expected_column_count=None (default) → lookup mode
+        # expected_schema_version = all known schema_versions from matrix
+        expected_schema_version=tuple(ADR009_CHANNEL_SCHEMA_MATRIX.keys()),
+    )
+
+
+# ─── MCT-159 FIX Iter 1: channel fixture 4종 (ADR-009 §D2.6 SSOT) ───────────
+
+def make_obs_v1_parquet(path: Path, n_rows: int = 3) -> bytes:
+    """orderbook_snapshot.v1 11-col parquet fixture (ADR-009 §D14 SSOT).
+
+    Columns (11): ts_utc / received_at / exchange / symbol / baseline_seq /
+                  side / level / price / quantity / payload_hash / raw_json
+    """
+    schema = pa.schema([
+        pa.field("ts_utc", pa.int64()),
+        pa.field("received_at", pa.int64()),
+        pa.field("exchange", pa.string()),
+        pa.field("symbol", pa.string()),
+        pa.field("baseline_seq", pa.int64()),
+        pa.field("side", pa.string()),
+        pa.field("level", pa.int64()),
+        pa.field("price", pa.decimal128(38, 9)),
+        pa.field("quantity", pa.decimal128(38, 9)),
+        pa.field("payload_hash", pa.string()),
+        pa.field("raw_json", pa.string()),
+    ])
+    arrays = []
+    for fld in schema:
+        if pa.types.is_int64(fld.type):
+            arrays.append(pa.array([1] * n_rows, type=fld.type))
+        elif pa.types.is_decimal(fld.type):
+            arrays.append(pa.array([Decimal("1.0")] * n_rows, type=fld.type))
+        else:
+            arrays.append(pa.array(["v"] * n_rows, type=fld.type))
+    table = pa.table(dict(zip(schema.names, arrays, strict=False)), schema=schema)
+    buf = io.BytesIO()
+    pq.write_table(table, buf)
+    data = buf.getvalue()
+    path.write_bytes(data)
+    return data
+
+
+def make_tick_v1_parquet(path: Path, n_rows: int = 3) -> bytes:
+    """tick.v1 8-col parquet fixture (ADR-009 §D10 baseline SSOT).
+
+    Columns (8): ts_utc / received_at / exchange / symbol / price / quantity / side / raw_json
+    """
+    schema = pa.schema([
+        pa.field("ts_utc", pa.int64()),
+        pa.field("received_at", pa.int64()),
+        pa.field("exchange", pa.string()),
+        pa.field("symbol", pa.string()),
+        pa.field("price", pa.decimal128(38, 9)),
+        pa.field("quantity", pa.decimal128(38, 9)),
+        pa.field("side", pa.string()),
+        pa.field("raw_json", pa.string()),
+    ])
+    arrays = []
+    for fld in schema:
+        if pa.types.is_int64(fld.type):
+            arrays.append(pa.array([1] * n_rows, type=fld.type))
+        elif pa.types.is_decimal(fld.type):
+            arrays.append(pa.array([Decimal("1.0")] * n_rows, type=fld.type))
+        else:
+            arrays.append(pa.array(["v"] * n_rows, type=fld.type))
+    table = pa.table(dict(zip(schema.names, arrays, strict=False)), schema=schema)
+    buf = io.BytesIO()
+    pq.write_table(table, buf)
+    data = buf.getvalue()
+    path.write_bytes(data)
+    return data
+
+
+def make_tick_v1_1_parquet(path: Path, n_rows: int = 3) -> bytes:
+    """tick.v1.1 11-col parquet fixture (ADR-009 §D10 MCT-141 amendment SSOT).
+
+    Columns (11): tick.v1 8 col + ingest_seq + payload_hash + validation_status
+    """
+    schema = pa.schema([
+        pa.field("ts_utc", pa.int64()),
+        pa.field("received_at", pa.int64()),
+        pa.field("exchange", pa.string()),
+        pa.field("symbol", pa.string()),
+        pa.field("price", pa.decimal128(38, 9)),
+        pa.field("quantity", pa.decimal128(38, 9)),
+        pa.field("side", pa.string()),
+        pa.field("raw_json", pa.string()),
+        pa.field("ingest_seq", pa.int64()),
+        pa.field("payload_hash", pa.string()),
+        pa.field("validation_status", pa.string()),
+    ])
+    arrays = []
+    for fld in schema:
+        if pa.types.is_int64(fld.type):
+            arrays.append(pa.array([1] * n_rows, type=fld.type))
+        elif pa.types.is_decimal(fld.type):
+            arrays.append(pa.array([Decimal("1.0")] * n_rows, type=fld.type))
+        else:
+            arrays.append(pa.array(["v"] * n_rows, type=fld.type))
+    table = pa.table(dict(zip(schema.names, arrays, strict=False)), schema=schema)
+    buf = io.BytesIO()
+    pq.write_table(table, buf)
+    data = buf.getvalue()
+    path.write_bytes(data)
+    return data
+
+
+def make_ohlcv_v1_parquet(path: Path, n_rows: int = 3) -> bytes:
+    """ohlcv.v1 16-col parquet fixture (ADR-009 §D2.1 SSOT, backward-compat 회귀 path).
+
+    기존 ADR009_SCHEMA 정합 — OHLCV cutover path 회귀 test 영역.
+    """
+    return _write_parquet(path, ADR009_SCHEMA, n_rows)
 
 
 # ─── §8.2: 7종 ALL PASS ──────────────────────────────────────────────────────
@@ -638,3 +784,199 @@ class TestInvariantHarnessStatusEnumExactStringMatch:
                 f"PerInvariantResult.status for {inv_name!r} must be 'pass' or 'fail', "
                 f"got {inv_result.status!r}"
             )
+
+
+# ─── MCT-159 FIX Iter 1: T-new-1~4 (ADR-009 §D2.6 channel-aware) ─────────────
+
+class TestChannelAwareColumnCount:
+    """MCT-159 FIX Iter 1: ADR009_CHANNEL_SCHEMA_MATRIX channel-aware column_count verify.
+
+    T-new-1: orderbook_snapshot.v1 11-col → all_pass
+    T-new-2: tick.v1 8-col → all_pass
+    T-new-3: ohlcv.v1 16-col (matrix lookup) → all_pass
+    T-new-4: unknown schema_version → column_count_fail diagnostic
+    """
+
+    def test_t_new_1_orderbook_snapshot_v1_11col_all_pass(self, tmp_path: Path) -> None:
+        """T-new-1: orderbook_snapshot.v1 11-col channel fixture → all_pass.
+
+        ADR-009 §D2.6 SSOT: orderbook_snapshot.v1 = 11 col.
+        InvariantHarness lookup mode (expected_column_count=None) → matrix lookup → 11.
+        """
+        local_root = tmp_path / "local"
+        # schema_version=orderbook_snapshot.v1 prefix (ADR-009 §D2.6 정합)
+        part = (
+            local_root
+            / "schema_version=orderbook_snapshot.v1"
+            / "tier=L2"
+            / "exchange=BITHUMB"
+            / "symbol=KRW-BTC"
+            / "date=2026-05-10"
+            / "hour=04"
+            / "node=MERGED"
+        )
+        part.mkdir(parents=True)
+
+        data = make_obs_v1_parquet(part / "part-0000.parquet")
+        nas_key = (
+            "schema_version=orderbook_snapshot.v1/tier=L2/exchange=BITHUMB/"
+            "symbol=KRW-BTC/date=2026-05-10/hour=04/node=MERGED/part-0000.parquet"
+        )
+        nas_objects = {nas_key: data}
+        uploader = _make_mock_uploader(nas_objects)
+        harness = _make_channel_harness(uploader, local_root)
+
+        result = harness.verify(
+            local_partition=part,
+            nas_partition=(
+                "schema_version=orderbook_snapshot.v1/tier=L2/exchange=BITHUMB/"
+                "symbol=KRW-BTC/date=2026-05-10/hour=04/node=MERGED"
+            ),
+        )
+
+        assert result.status == "all_pass", (
+            f"T-new-1: expected all_pass, got {result.status!r}. "
+            f"per_invariant_results={result.per_invariant_results}"
+        )
+        cc = result.per_invariant_results["column_count"]
+        assert cc.status == "pass", f"column_count must pass for 11-col obs: {cc}"
+
+    def test_t_new_2_tick_v1_8col_all_pass(self, tmp_path: Path) -> None:
+        """T-new-2: tick.v1 8-col channel fixture → all_pass.
+
+        ADR-009 §D2.6 SSOT: tick.v1 = 8 col.
+        InvariantHarness lookup mode → matrix lookup → 8.
+        """
+        local_root = tmp_path / "local"
+        part = (
+            local_root
+            / "schema_version=tick.v1"
+            / "tier=L2"
+            / "exchange=BITHUMB"
+            / "symbol=KRW-BTC"
+            / "date=2026-05-10"
+            / "hour=04"
+            / "node=MERGED"
+        )
+        part.mkdir(parents=True)
+
+        data = make_tick_v1_parquet(part / "part-0000.parquet")
+        nas_key = (
+            "schema_version=tick.v1/tier=L2/exchange=BITHUMB/"
+            "symbol=KRW-BTC/date=2026-05-10/hour=04/node=MERGED/part-0000.parquet"
+        )
+        nas_objects = {nas_key: data}
+        uploader = _make_mock_uploader(nas_objects)
+        harness = _make_channel_harness(uploader, local_root)
+
+        result = harness.verify(
+            local_partition=part,
+            nas_partition=(
+                "schema_version=tick.v1/tier=L2/exchange=BITHUMB/"
+                "symbol=KRW-BTC/date=2026-05-10/hour=04/node=MERGED"
+            ),
+        )
+
+        assert result.status == "all_pass", (
+            f"T-new-2: expected all_pass, got {result.status!r}. "
+            f"per_invariant_results={result.per_invariant_results}"
+        )
+        cc = result.per_invariant_results["column_count"]
+        assert cc.status == "pass", f"column_count must pass for 8-col tick: {cc}"
+
+    def test_t_new_3_ohlcv_v1_16col_all_pass(self, tmp_path: Path) -> None:
+        """T-new-3: ohlcv.v1 16-col channel fixture (matrix lookup) → all_pass.
+
+        ADR-009 §D2.6 SSOT: ohlcv.v1 = 16 col.
+        InvariantHarness lookup mode → matrix lookup → 16.
+        backward-compat 회귀 test (기존 explicit injection path 와 결과 동일 확인).
+        """
+        local_root = tmp_path / "local"
+        part = (
+            local_root
+            / "schema_version=ohlcv.v1"
+            / "tier=L2"
+            / "exchange=BITHUMB"
+            / "symbol=KRW-BTC"
+            / "date=2026-05-10"
+            / "hour=04"
+            / "node=MERGED"
+        )
+        part.mkdir(parents=True)
+
+        data = make_ohlcv_v1_parquet(part / "part-0000.parquet")
+        nas_key = (
+            "schema_version=ohlcv.v1/tier=L2/exchange=BITHUMB/"
+            "symbol=KRW-BTC/date=2026-05-10/hour=04/node=MERGED/part-0000.parquet"
+        )
+        nas_objects = {nas_key: data}
+        uploader = _make_mock_uploader(nas_objects)
+        harness = _make_channel_harness(uploader, local_root)
+
+        result = harness.verify(
+            local_partition=part,
+            nas_partition=(
+                "schema_version=ohlcv.v1/tier=L2/exchange=BITHUMB/"
+                "symbol=KRW-BTC/date=2026-05-10/hour=04/node=MERGED"
+            ),
+        )
+
+        assert result.status == "all_pass", (
+            f"T-new-3: expected all_pass (ohlcv.v1 matrix lookup 16-col), "
+            f"got {result.status!r}. per_invariant_results={result.per_invariant_results}"
+        )
+        cc = result.per_invariant_results["column_count"]
+        assert cc.status == "pass", f"column_count must pass for 16-col ohlcv.v1: {cc}"
+
+    def test_t_new_4_unknown_schema_version_column_count_fail(self, tmp_path: Path) -> None:
+        """T-new-4: unknown schema_version → column_count_fail diagnostic.
+
+        ADR-009 §D2.6 Miss strategy: unknown schema_version → column_count_fail
+        with diagnostic 'unknown_schema_version'.
+        schema evolution detection surface (새 channel 추가 시 즉시 검출).
+        """
+        local_root = tmp_path / "local"
+        # schema_version=unknown.v9 — matrix 에 없는 값
+        part = (
+            local_root
+            / "schema_version=unknown.v9"
+            / "tier=L2"
+            / "exchange=BITHUMB"
+            / "symbol=KRW-BTC"
+        )
+        part.mkdir(parents=True)
+
+        # 어떤 schema 든 상관없음 — unknown schema_version miss 자체를 test
+        data = make_tick_v1_parquet(part / "part-0000.parquet")
+        nas_key = "schema_version=unknown.v9/tier=L2/exchange=BITHUMB/symbol=KRW-BTC/part-0000.parquet"
+        nas_objects = {nas_key: data}
+        uploader = _make_mock_uploader(nas_objects)
+        harness = _make_channel_harness(uploader, local_root)
+
+        result = harness.verify(
+            local_partition=part,
+            nas_partition="schema_version=unknown.v9/tier=L2/exchange=BITHUMB/symbol=KRW-BTC",
+        )
+
+        assert result.status == "column_count_fail", (
+            f"T-new-4: expected column_count_fail for unknown schema_version, "
+            f"got {result.status!r}. per_invariant_results={result.per_invariant_results}"
+        )
+        cc = result.per_invariant_results["column_count"]
+        assert cc.status == "fail", f"column_count must fail for unknown schema_version: {cc}"
+
+    def test_adr009_channel_schema_matrix_completeness(self) -> None:
+        """ADR009_CHANNEL_SCHEMA_MATRIX 4종 entry 포함 검증 (§D2.6 SSOT 정합).
+
+        신규 schema_version 추가 시 본 test 도 갱신 의무 (matrix entry 박제 guard).
+        """
+        required_keys = {"orderbook_snapshot.v1", "tick.v1", "tick.v1.1", "ohlcv.v1"}
+        assert required_keys.issubset(set(ADR009_CHANNEL_SCHEMA_MATRIX.keys())), (
+            f"ADR009_CHANNEL_SCHEMA_MATRIX 누락: "
+            f"{required_keys - set(ADR009_CHANNEL_SCHEMA_MATRIX.keys())}"
+        )
+        # column count SSOT 검증
+        assert ADR009_CHANNEL_SCHEMA_MATRIX["orderbook_snapshot.v1"][0] == 11
+        assert ADR009_CHANNEL_SCHEMA_MATRIX["tick.v1"][0] == 8
+        assert ADR009_CHANNEL_SCHEMA_MATRIX["tick.v1.1"][0] == 11
+        assert ADR009_CHANNEL_SCHEMA_MATRIX["ohlcv.v1"][0] == 16

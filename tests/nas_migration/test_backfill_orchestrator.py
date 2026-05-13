@@ -4,6 +4,12 @@ Story: MCT-153 (Stage 2 — backfill 76GB closed-day per-(symbol,day) chunking)
 Issue: mclayer/mctrader-hub#265
 ADR: ADR-027 D4 step 2 (backfill) + D6 (7종 invariant) + ADR-009 §D2.1 (node=DEFAULT)
 
+MCT-159 FIX Iter 1 amendment (2026-05-13):
+- ADR009_CHANNEL_SCHEMA_MATRIX 기반 channel fixture factory (make_channel_parquet) 추가
+- make_parquet (16-col) = OHLCV backward-compat 회귀 path 유지
+- 기존 mock_harness 테스트: column_count bypass (mock all_pass) → 기존 테스트 영향 0
+- channel parametrize 테스트: channel별 올바른 schema 사용 (orderbooksnapshot=11 / transaction=8)
+
 Test Contract §8.1 (TestContractArchitectAgent — MCT-153):
 - test_chunk_spec_is_legacy_node_true/false: S6 enforcement marker
 - test_chunk_id_deterministic: resumability prerequisite (sha256[:16])
@@ -57,7 +63,10 @@ from mctrader_data.nas_migration.backfill_orchestrator import (
     ChunkSpec,
 )
 from mctrader_data.nas_storage.nas_uploader import PutResult
-from mctrader_data.nas_migration.invariant_harness import InvariantResult
+from mctrader_data.nas_migration.invariant_harness import (
+    ADR009_CHANNEL_SCHEMA_MATRIX,
+    InvariantResult,
+)
 
 
 # ─── ADR-009 §D2.1 16-col schema SSOT ───────────────────────────────────────
@@ -107,6 +116,56 @@ def make_parquet(path: Path, rows: int = 3) -> bytes:
         },
         schema=ADR009_SCHEMA,
     )
+    buf = io.BytesIO()
+    pq.write_table(table, buf)
+    data = buf.getvalue()
+    path.write_bytes(data)
+    return data
+
+
+def make_channel_parquet(path: Path, schema_version: str, rows: int = 3) -> bytes:
+    """ADR009_CHANNEL_SCHEMA_MATRIX channel별 schema 정합 parquet 생성 (MCT-159 FIX Iter 1).
+
+    ADR-009 §D2.6 SSOT:
+    - orderbook_snapshot.v1 → 11 col
+    - tick.v1 → 8 col
+    - tick.v1.1 → 11 col
+    - ohlcv.v1 → 16 col (ADR009_SCHEMA 정합)
+
+    Unknown schema_version: ADR009_SCHEMA (16-col) fallback (backward-compat).
+    """
+    if schema_version not in ADR009_CHANNEL_SCHEMA_MATRIX:
+        # fallback: ohlcv.v1 16-col (backward-compat, R6 회귀 방지)
+        return make_parquet(path, rows)
+
+    col_count, col_names = ADR009_CHANNEL_SCHEMA_MATRIX[schema_version]
+
+    # Build pyarrow schema from column names (type inference: int64/decimal128/string)
+    _int_cols = {"ts_utc", "received_at", "baseline_seq", "level", "ingest_seq",
+                 "ts", "trade_count", "bid_count", "ask_count", "ingestion_ts"}
+    _decimal_cols = {"price", "quantity", "open", "high", "low", "close",
+                     "volume", "vwap"}
+    fields = []
+    for col in col_names:
+        if col in _int_cols or col.endswith("_count") or col.endswith("_seq"):
+            fields.append(pa.field(col, pa.int64()))
+        elif col in _decimal_cols:
+            fields.append(pa.field(col, pa.decimal128(38, 9)))
+        else:
+            fields.append(pa.field(col, pa.string()))
+
+    schema = pa.schema(fields)
+    arrays = []
+    for fld in schema:
+        if pa.types.is_int64(fld.type):
+            arrays.append(pa.array([1] * rows, type=fld.type))
+        elif pa.types.is_decimal(fld.type):
+            from decimal import Decimal  # noqa: PLC0415
+            arrays.append(pa.array([Decimal("1.0")] * rows, type=fld.type))
+        else:
+            arrays.append(pa.array(["v"] * rows, type=fld.type))
+
+    table = pa.table(dict(zip(col_names, arrays, strict=False)), schema=schema)
     buf = io.BytesIO()
     pq.write_table(table, buf)
     data = buf.getvalue()
