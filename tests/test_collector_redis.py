@@ -10,6 +10,7 @@ from mctrader_data.redis_publisher import RedisTickPublisher
 def _make_transaction_event():
     from mctrader_market_bithumb.ws_events import TransactionEvent
     evt = MagicMock(spec=TransactionEvent)
+    evt.kind = "transaction"
     evt.exchange = "bithumb"
     evt.symbol = Symbol.from_string("KRW-BTC")
     evt.price = 135000000
@@ -24,6 +25,7 @@ def _make_transaction_event():
 def _make_orderbook_snapshot_event():
     from mctrader_market_bithumb.ws_events import OrderbookSnapshotEvent
     evt = MagicMock(spec=OrderbookSnapshotEvent)
+    evt.kind = "orderbook_snapshot"
     evt.exchange = "bithumb"
     evt.symbol = Symbol.from_string("KRW-BTC")
     lvl = MagicMock()

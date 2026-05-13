@@ -14,6 +14,10 @@ from mctrader_data.compactor.l3 import L3Compactor
 from mctrader_data.wal.ingester import WalIngester
 from mctrader_data.wal.segment import scan_sealed
 
+# Use today's date so that WalIngester's wall-clock-based partitioning
+# matches the compact_* calls' date.
+_TODAY = datetime.now(tz=timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+
 
 def _setup_l2(tmp_path: Path, n: int) -> None:
     ing = WalIngester(
@@ -21,7 +25,7 @@ def _setup_l2(tmp_path: Path, n: int) -> None:
         channel="transaction", node_id="N", segment_seconds=86400,
     )
     for i in range(n):
-        ts = datetime(2026, 5, 9, 0, 0, i, tzinfo=timezone.utc)
+        ts = _TODAY.replace(second=i)
         ing.append({
             "ts_utc": ts.isoformat(), "received_at": ts.isoformat(),
             "exchange": "bithumb", "symbol": "KRW-BTC",
@@ -33,7 +37,7 @@ def _setup_l2(tmp_path: Path, n: int) -> None:
         L1Compactor(root=tmp_path).compact_segment(s)
     L2Compactor(root=tmp_path).compact_hour(
         exchange="bithumb", symbol="KRW-BTC", channel="transaction",
-        hour_utc=datetime(2026, 5, 9, 0, 0, tzinfo=timezone.utc),
+        hour_utc=_TODAY,
     )
 
 
@@ -42,7 +46,7 @@ def test_l3_produces_daily_parquet(tmp_path: Path) -> None:
     compactor = L3Compactor(root=tmp_path)
     result = compactor.compact_day(
         exchange="bithumb", symbol="KRW-BTC", channel="transaction",
-        date_utc=datetime(2026, 5, 9, tzinfo=timezone.utc).date(),
+        date_utc=_TODAY.date(),
     )
     assert result is not None
     assert "tier=L3" in result.parts
@@ -53,7 +57,7 @@ def test_l3_reprocessing_monotone(tmp_path: Path) -> None:
     """INV-8: compact same day twice → row count non-decreasing."""
     _setup_l2(tmp_path, 10)
     compactor = L3Compactor(root=tmp_path)
-    d = datetime(2026, 5, 9, tzinfo=timezone.utc).date()
+    d = _TODAY.date()
     r1 = compactor.compact_day(exchange="bithumb", symbol="KRW-BTC", channel="transaction", date_utc=d)
     r2 = compactor.compact_day(exchange="bithumb", symbol="KRW-BTC", channel="transaction", date_utc=d)
     assert pq.ParquetFile(r2).read().num_rows >= pq.ParquetFile(r1).read().num_rows

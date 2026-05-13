@@ -13,7 +13,10 @@ import pytest
 from mctrader_data.wal.ndjson_codec import decode_line
 
 
-@pytest.mark.parametrize("n_messages", [1, 10_000])
+@pytest.mark.parametrize("n_messages", [
+    1,
+    pytest.param(10_000, marks=pytest.mark.slow),
+])
 def test_force_kill_zero_loss(tmp_path: Path, n_messages: int) -> None:
     """Write N messages via subprocess, force-kill it, verify all N present in WAL."""
     # Use a sentinel file to know when all writes are done
