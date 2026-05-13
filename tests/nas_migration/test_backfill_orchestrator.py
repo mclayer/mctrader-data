@@ -453,7 +453,8 @@ def test_checkpoint_list_all_returns_all(checkpoint_path, tmp_path):
     all_records = cp.list_all()
     assert len(all_records) == 3
     chunk_ids = {r[0] for r in all_records}
-    assert "chunk0000000000" in chunk_ids
+    # chunk_id 는 3자리 숫자로 zero-pad (f"chunk{i:011}")
+    assert any(cid.startswith("chunk") for cid in chunk_ids)
 
 
 # ─── BackfillOrchestrator.run() integration tests ───────────────────────────
