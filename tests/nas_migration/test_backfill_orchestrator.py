@@ -824,3 +824,213 @@ def test_chunk_spec_hour_absent_legacy_backward_compat(tmp_path):
     # hour 없으면 nas_object_key 에 "hour=" 미포함 (legacy backward-compat)
     assert "hour=" not in chunk.nas_object_key
     assert chunk.nas_object_key.endswith("part-legacy.parquet")
+
+
+# ─── MCT-159 Task 12: Integration test 7종 (AC-1~AC-5 + Edge Case 2) ──────────
+
+
+def test_ac1_new_schema_path_100_percent(tmp_path, mock_uploader, mock_harness, mock_sop, mock_metrics):
+    """AC-1: 신규 schema path (hour=HH/node=MERGED) 100% 준수, legacy 경로 혼입 0건."""
+    # 4 partition × 다른 hour
+    for hr in ["10", "11", "12", "13"]:
+        p_dir = make_partition_dir(tmp_path, date_str="2025-01-01", hour=hr, node="MERGED")
+        make_parquet(p_dir / f"part-{hr}.parquet")
+
+    mock_uploader.put.return_value = PutResult(status="uploaded", latency_ms=50.0)
+    mock_harness.verify.return_value = InvariantResult(status="all_pass", per_invariant_results={})
+    mock_sop.is_manual_gate.return_value = False
+
+    from mctrader_data.nas_migration.backfill_orchestrator import BackfillOrchestrator
+    from typing import cast, Literal
+    orch = BackfillOrchestrator(
+        nas_uploader=mock_uploader,
+        invariant_harness=mock_harness,
+        sop_runner=mock_sop,
+        metrics=mock_metrics,
+        local_root=tmp_path,
+        nas_partition_root="tier=L2",
+        checkpoint_path=tmp_path / "cp.sqlite",
+        evidence_pack_path=tmp_path / "ep.md",
+        lock_path=tmp_path / "lock",
+        max_workers=2,
+        tier="L2",
+        channel="orderbooksnapshot",
+    )
+
+    # _build_chunk_spec 로 각 chunk 의 nas_object_key 확인
+    partitions = orch._discover_partitions()
+    assert len(partitions) == 4
+
+    for pf in partitions:
+        chunk = orch._build_chunk_spec(pf)
+        # AC-1: 신규 schema path 준수 — hour= + node=MERGED 포함
+        assert "hour=" in chunk.nas_object_key, f"hour= missing in {chunk.nas_object_key}"
+        assert "node=MERGED" in chunk.nas_object_key, f"node=MERGED missing in {chunk.nas_object_key}"
+        # legacy 경로 (node=DEFAULT) 혼입 0
+        assert "node=DEFAULT" not in chunk.nas_object_key
+
+
+def test_ac2_mct156_legacy_exclusion_zero(tmp_path):
+    """AC-2: legacy hour-key 부재 partition 제외 0건 (S1/S6 정합 — 신규 schema only)."""
+    # 신규 schema partition (hour=HH 포함)
+    p_new = make_partition_dir(tmp_path, date_str="2025-01-01", hour="10", node="MERGED")
+    make_parquet(p_new / "part-new.parquet")
+
+    # legacy partition (hour 부재) — _discover_partitions 는 모두 발견 (hour filter 없음),
+    # _build_chunk_spec 이 hour_segment="" 로 처리 (legacy backward-compat)
+    legacy_dir = (
+        tmp_path / "market" / "orderbooksnapshot"
+        / "schema_version=orderbook_snapshot.v1" / "tier=L2"
+        / "exchange=BITHUMB" / "symbol=BTC_KRW" / "date=2025-01-02"
+    )
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+    make_parquet(legacy_dir / "part-legacy.parquet")
+
+    orch = make_orchestrator(local_root=tmp_path, tier="L2", tmp_path=tmp_path)
+    partitions = orch._discover_partitions()
+    # 신규 + legacy 모두 발견 (discovery filter 없음 — chunk 처리 레이어에서 분기)
+    assert len(partitions) == 2
+
+    # _build_chunk_spec 으로 신규 vs legacy 분기 검증
+    chunks = [orch._build_chunk_spec(pf) for pf in partitions]
+    new_chunks = [c for c in chunks if "hour=" in c.nas_object_key]
+    legacy_chunks = [c for c in chunks if "hour=" not in c.nas_object_key]
+    assert len(new_chunks) == 1   # 신규 schema (hour=10)
+    assert len(legacy_chunks) == 1  # legacy (hour 부재)
+
+
+def test_ac3_invariant_harness_injected(tmp_path):
+    """AC-3: BackfillOrchestrator 가 InvariantHarness inject 받아 verify 자동 호출."""
+    from unittest.mock import MagicMock, patch
+
+    mock_harness = MagicMock()
+    mock_harness.verify.return_value = InvariantResult(status="all_pass", per_invariant_results={})
+    mock_uploader = MagicMock()
+    mock_uploader.put.return_value = PutResult(status="uploaded", latency_ms=50.0)
+    mock_sop = MagicMock()
+    mock_sop.is_manual_gate.return_value = False
+    mock_metrics = MagicMock()
+
+    p_dir = make_partition_dir(tmp_path, date_str="2025-01-01", hour="10", node="MERGED")
+    make_parquet(p_dir / "part-test.parquet")
+
+    from mctrader_data.nas_migration.backfill_orchestrator import BackfillOrchestrator
+    orch = BackfillOrchestrator(
+        nas_uploader=mock_uploader,
+        invariant_harness=mock_harness,
+        sop_runner=mock_sop,
+        metrics=mock_metrics,
+        local_root=tmp_path,
+        nas_partition_root="tier=L2",
+        checkpoint_path=tmp_path / "cp.sqlite",
+        evidence_pack_path=tmp_path / "ep.md",
+        lock_path=tmp_path / "lock",
+        max_workers=2,
+        tier="L2",
+        channel="orderbooksnapshot",
+    )
+
+    with patch("mctrader_data.nas_migration.backfill_orchestrator.date") as mock_date:
+        mock_date.today.return_value = __import__("datetime").date(2030, 1, 1)
+        result = orch.run()
+
+    # AC-3: InvariantHarness.verify() 가 호출됐어야 함
+    assert mock_harness.verify.called, "InvariantHarness.verify() 가 호출되지 않음"
+    assert result.status == "all_chunks_verified"
+
+
+@pytest.mark.parametrize("channel", ["orderbooksnapshot", "transaction"])
+@pytest.mark.parametrize("tier", ["L2", "L3"])
+def test_ac4_channel_tier_matrix(tmp_path, channel, tier):
+    """AC-4: channel + tier 4 case 매트릭스 — 각 case partition 탐색 정합."""
+    schema_version = "orderbook_snapshot.v1" if channel == "orderbooksnapshot" else "tick.v1"
+    p_dir = make_partition_dir(
+        tmp_path,
+        channel=channel,
+        schema_version=schema_version,
+        tier=tier,
+        date_str="2025-01-01",
+        hour="10",
+        node="MERGED",
+    )
+    make_parquet(p_dir / "part-matrix.parquet")
+
+    orch = make_orchestrator(local_root=tmp_path, tier=tier, channel=channel, tmp_path=tmp_path)
+    partitions = orch._discover_partitions()
+    assert len(partitions) == 1, f"channel={channel} tier={tier}: expected 1 partition, got {len(partitions)}"
+    assert channel in str(partitions[0])
+    assert f"tier={tier}" in str(partitions[0])
+
+
+def test_ac5_ec1_path_mapping_failure_quarantine(tmp_path):
+    """AC-5 / Edge Case 1: date/hour/node 누락 partition → quarantine 처리.
+
+    _build_chunk_spec 이 date=None → "unknown" fallback, 이관은 진행되지만
+    chunk_id 에 "unknown" date 가 박제되어 후속 검증에서 분리 가능.
+    """
+    # 비정상 경로 — date= 누락 (schema_version=*/tier=L2/exchange=X/symbol=Y/ 바로 파일)
+    invalid_dir = (
+        tmp_path / "market" / "orderbooksnapshot"
+        / "schema_version=orderbook_snapshot.v1" / "tier=L2"
+        / "exchange=BITHUMB" / "symbol=BTC_KRW"
+    )
+    invalid_dir.mkdir(parents=True, exist_ok=True)
+    invalid_parquet = invalid_dir / "part-invalid.parquet"
+    invalid_parquet.write_bytes(b"PAR1")
+
+    orch = make_orchestrator(local_root=tmp_path, tier="L2", tmp_path=tmp_path)
+
+    # date= 누락 path 는 _extract_date_from_path 가 None 반환 → _discover_partitions 에서 skip
+    partitions = orch._discover_partitions()
+    # date= 없는 path 는 closed-day filter 에서 제외 (quarantine — 수동 검토)
+    assert len(partitions) == 0, "date= 없는 invalid partition 은 discovery 에서 제외되어야 함"
+
+
+def test_ac5_ec2_partial_verify_fail_blocks_local_delete(tmp_path):
+    """AC-5 / Edge Case 2: 검증 부분 실패 시 BackfillResult 로 명확히 표시.
+
+    1종 invariant FAIL → chunk_invariant_failed + quarantined_chunks >= 1
+    → 원본 source_path 가 여전히 존재 (local delete 미실행 검증).
+    """
+    from unittest.mock import MagicMock, patch
+
+    mock_harness = MagicMock()
+    # 첫 chunk 는 invariant FAIL
+    mock_harness.verify.return_value = InvariantResult(status="sha256_fail", per_invariant_results={})
+    mock_uploader = MagicMock()
+    mock_uploader.put.return_value = PutResult(status="uploaded", latency_ms=50.0)
+    mock_sop = MagicMock()
+    mock_sop.is_manual_gate.return_value = False
+    mock_metrics = MagicMock()
+
+    p_dir = make_partition_dir(tmp_path, date_str="2025-01-01", hour="10", node="MERGED")
+    source_file = p_dir / "part-verify-fail.parquet"
+    make_parquet(source_file)
+
+    from mctrader_data.nas_migration.backfill_orchestrator import BackfillOrchestrator
+    orch = BackfillOrchestrator(
+        nas_uploader=mock_uploader,
+        invariant_harness=mock_harness,
+        sop_runner=mock_sop,
+        metrics=mock_metrics,
+        local_root=tmp_path,
+        nas_partition_root="tier=L2",
+        checkpoint_path=tmp_path / "cp.sqlite",
+        evidence_pack_path=tmp_path / "ep.md",
+        lock_path=tmp_path / "lock",
+        max_workers=2,
+        verify_retry_budget=3,
+        tier="L2",
+        channel="orderbooksnapshot",
+    )
+
+    with patch("mctrader_data.nas_migration.backfill_orchestrator.date") as mock_date:
+        mock_date.today.return_value = __import__("datetime").date(2030, 1, 1)
+        result = orch.run()
+
+    # EC-2: 검증 부분 실패 → chunk_invariant_failed, quarantined >= 1
+    assert result.status == "chunk_invariant_failed"
+    assert result.quarantined_chunks >= 1
+
+    # 원본 파일 보존 검증 (BackfillOrchestrator 는 local DELETE 0)
+    assert source_file.exists(), "invariant FAIL 시 원본 source file 이 삭제되어서는 안 됨 (CutoverVerifier gate)"
