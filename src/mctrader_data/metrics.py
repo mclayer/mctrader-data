@@ -16,6 +16,18 @@ wal_write_lag_seconds = Gauge(
     ["exchange", "symbol"],
 )
 
+compactor_last_l2_timestamp = Gauge(
+    "mctrader_compactor_last_l2_timestamp_seconds",
+    "Unix timestamp of most recent successful L2 compaction",
+    ["exchange", "symbol", "channel"],
+)
+
+compactor_l2_runs_total = Counter(
+    "mctrader_compactor_l2_runs_total",
+    "Total L2 compaction runs completed (MCT-156)",
+    ["exchange", "symbol", "channel"],
+)
+
 compactor_last_l3_timestamp = Gauge(
     "mctrader_compactor_last_l3_timestamp_seconds",
     "Unix timestamp of most recent successful L3 compaction",
@@ -31,6 +43,17 @@ compactor_l3_runs_total = Counter(
 
 def record_ingester_event(*, exchange: str, symbol: str, channel: str) -> None:
     ingester_events_total.labels(exchange=exchange, symbol=symbol, channel=channel).inc()
+
+
+def record_l2_compaction(*, exchange: str, symbol: str, channel: str) -> None:
+    """MCT-156: L2 compaction 완료 시 timestamp + counter emit."""
+    now = time.time()
+    compactor_last_l2_timestamp.labels(
+        exchange=exchange, symbol=symbol, channel=channel
+    ).set(now)
+    compactor_l2_runs_total.labels(
+        exchange=exchange, symbol=symbol, channel=channel
+    ).inc()
 
 
 def record_l3_compaction(*, exchange: str, symbol: str, channel: str) -> None:
