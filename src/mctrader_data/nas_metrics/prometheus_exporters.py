@@ -56,6 +56,14 @@ compactor_unsupported_channel_total = Counter(
     ["channel"],  # cardinality bounded low — collector emit channel 종류만
 )
 
+# MCT-160 D4 + R-EXTRA: L2/L3 post-write monotonic verify 실패 시 quarantine event Counter
+# tier ∈ {L2, L3}, reason ∈ {monotonic_violation, ...}
+compactor_quarantine_total = Counter(
+    "mctrader_compactor_quarantine_total",
+    "L2/L3 quarantine events by tier and reason (MCT-160 D4)",
+    ["tier", "reason"],  # tier ∈ {L2, L3}, reason ∈ {monotonic_violation}
+)
+
 if TYPE_CHECKING:
     pass
 

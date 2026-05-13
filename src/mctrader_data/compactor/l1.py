@@ -49,19 +49,20 @@ import contextlib
 
 # ADR-009 §D11.9.2 — orderbook_depth.v1 schema (11 column, per-level flat row)
 # raw_json = pa.large_string() (LargeUtf8, i64 offset) 의무 (§D11.9.6, i32 4GB overflow 차단)
+# MCT-160 D7+P1: pa.field(name, dtype, nullable=...) 명시 — raw_json만 True, 나머지 False
 # MCT-162 (2026-05-13)
 _ORDERBOOKDEPTH_SCHEMA = pa.schema([
-    ("ts_utc",           pa.timestamp("us", tz="UTC")),
-    ("received_at",      pa.timestamp("us", tz="UTC")),
-    ("exchange",         pa.string()),
-    ("symbol",           pa.string()),
-    ("side",             pa.string()),
-    ("price",            pa.decimal128(38, 18)),
-    ("quantity",         pa.decimal128(38, 18)),
-    ("raw_json",         pa.large_string()),  # LargeUtf8 의무 — §D11.9.6
-    ("node_id",          pa.string()),
-    ("collector_run_id", pa.string()),
-    ("ingest_seq",       pa.int64()),
+    pa.field("ts_utc",           pa.timestamp("us", tz="UTC"),   nullable=False),
+    pa.field("received_at",      pa.timestamp("us", tz="UTC"),   nullable=False),
+    pa.field("exchange",         pa.string(),                     nullable=False),
+    pa.field("symbol",           pa.string(),                     nullable=False),
+    pa.field("side",             pa.string(),                     nullable=False),
+    pa.field("price",            pa.decimal128(38, 18),           nullable=False),
+    pa.field("quantity",         pa.decimal128(38, 18),           nullable=False),
+    pa.field("raw_json",         pa.large_string(),               nullable=True),   # nullable=True
+    pa.field("node_id",          pa.string(),                     nullable=False),
+    pa.field("collector_run_id", pa.string(),                     nullable=False),
+    pa.field("ingest_seq",       pa.int64(),                      nullable=False),
 ])
 
 

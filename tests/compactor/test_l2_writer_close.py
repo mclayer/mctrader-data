@@ -10,7 +10,7 @@ Post-fix: use pq.ParquetWriter as a context manager and clean tmp on exception.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -58,7 +58,8 @@ def test_l2_closes_writer_on_exception(tmp_path: Path) -> None:
         with pytest.raises(RuntimeError, match="boom"):
             compactor.compact_hour(
                 exchange="bithumb", symbol="KRW-BTC", channel="transaction",
-                hour_utc=datetime(2026, 5, 11, 0, 0, tzinfo=timezone.utc),
+                date_utc=date(2026, 5, 11),
+                hour_utc=0,
             )
         assert ctor.called, "ParquetWriter should have been constructed"
 
@@ -87,7 +88,8 @@ def test_l2_cleans_tmp_on_exception(tmp_path: Path) -> None:
         with pytest.raises(RuntimeError, match="boom"):
             compactor.compact_hour(
                 exchange="bithumb", symbol="KRW-BTC", channel="transaction",
-                hour_utc=datetime(2026, 5, 11, 0, 0, tzinfo=timezone.utc),
+                date_utc=date(2026, 5, 11),
+                hour_utc=0,
             )
 
     market_root = tmp_path / "market"
