@@ -47,17 +47,52 @@ from mctrader_data.orderbook_snapshot_storage import (
 from mctrader_data.metrics import compactor_writer_open_count
 import contextlib
 
+# ADR-009 §D11.9.2 — orderbook_depth.v1 schema (11 column, per-level flat row)
+# raw_json = pa.large_string() (LargeUtf8, i64 offset) 의무 (§D11.9.6, i32 4GB overflow 차단)
+# MCT-162 (2026-05-13)
+_ORDERBOOKDEPTH_SCHEMA = pa.schema([
+    ("ts_utc",           pa.timestamp("us", tz="UTC")),
+    ("received_at",      pa.timestamp("us", tz="UTC")),
+    ("exchange",         pa.string()),
+    ("symbol",           pa.string()),
+    ("side",             pa.string()),
+    ("price",            pa.decimal128(38, 18)),
+    ("quantity",         pa.decimal128(38, 18)),
+    ("raw_json",         pa.large_string()),  # LargeUtf8 의무 — §D11.9.6
+    ("node_id",          pa.string()),
+    ("collector_run_id", pa.string()),
+    ("ingest_seq",       pa.int64()),
+])
+
+
+# Allowlist — ADR-027 D4 amendment + ADR-009 §D2.6 matrix row 정합
+# MCT-162 (2026-05-13) — orderbookdepth 추가
+_CHANNEL_SCHEMA_VERSION: dict[str, str] = {
+    "transaction": TICK_SCHEMA_VERSION,
+    "orderbooksnapshot": ORDERBOOK_SNAPSHOT_SCHEMA_VERSION,
+    "orderbookdepth": "orderbook_depth.v1",  # MCT-162 신규
+}
+
 
 def _schema_version(channel: str) -> str:
-    """Return the schema version string for *channel* (module-level helper for L2/L3)."""
-    if channel == "transaction":
-        return TICK_SCHEMA_VERSION
-    if channel == "orderbooksnapshot":
-        return ORDERBOOK_SNAPSHOT_SCHEMA_VERSION
-    raise NotImplementedError(
-        f"_schema_version: channel {channel!r} not supported. "
-        "Supported: 'transaction', 'orderbooksnapshot'."
-    )
+    """Return the schema version string for *channel* (module-level helper for L2/L3).
+
+    ADR-027 D4 amendment 정합 — fail-fast vs silent skip.
+    Unsupported channel → NotImplementedError raise (silent skip 금지)
+    + Prometheus counter ``compactor_unsupported_channel_total{channel}`` emit
+    (cardinality bounded low — collector emit channel 종류만).
+    """
+    if channel not in _CHANNEL_SCHEMA_VERSION:
+        from mctrader_data.nas_metrics.prometheus_exporters import (  # lazy import (circular 회피)
+            compactor_unsupported_channel_total,
+        )
+        compactor_unsupported_channel_total.labels(channel=channel).inc()
+        raise NotImplementedError(
+            f"_schema_version: channel {channel!r} not supported. "
+            f"Supported: {sorted(_CHANNEL_SCHEMA_VERSION.keys())}. "
+            f"ADR-009 §D11.9 + ADR-027 D4 channel parity 정책 정합."
+        )
+    return _CHANNEL_SCHEMA_VERSION[channel]
 
 
 class L1Compactor:
@@ -91,6 +126,8 @@ class L1Compactor:
 
         if not parquet_path.exists():
             records_raw = self._read_ndjson(sealed)
+            # inject run_id as collector_run_id for channel-specific converters (e.g. orderbookdepth)
+            self._current_meta = {**meta, "collector_run_id": run_id}
             table = self._convert_to_arrow(records_raw, meta["channel"])
             # Sort by ts_utc (INV-4)
             table = table.sort_by("ts_utc")
@@ -185,9 +222,11 @@ class L1Compactor:
             return _TICK_SCHEMA
         if channel == "orderbooksnapshot":
             return _OB_SNAPSHOT_SCHEMA
+        if channel == "orderbookdepth":
+            return _ORDERBOOKDEPTH_SCHEMA
         raise NotImplementedError(
             f"L1Compactor: no Arrow schema for channel '{channel}'. "
-            "Supported: 'transaction', 'orderbooksnapshot'."
+            f"Supported: {sorted(_CHANNEL_SCHEMA_VERSION.keys())}."
         )
 
     def _read_ndjson(self, sealed: Path) -> list[dict]:
@@ -206,9 +245,11 @@ class L1Compactor:
             return self._tick_dicts_to_arrow(records_raw)
         if channel == "orderbooksnapshot":
             return self._ob_snapshot_dicts_to_arrow(records_raw)
+        if channel == "orderbookdepth":
+            return self._orderbookdepth_dicts_to_arrow(records_raw)
         raise NotImplementedError(
             f"L1Compactor._convert_to_arrow: channel '{channel}' not supported. "
-            "Supported: 'transaction', 'orderbooksnapshot'."
+            f"Supported: {sorted(_CHANNEL_SCHEMA_VERSION.keys())}."
         )
 
     def _ob_snapshot_dicts_to_arrow(self, records_raw: list[dict]) -> pa.Table:
@@ -259,6 +300,44 @@ class L1Compactor:
                     **common, side="ask", level=level, price=price, quantity=qty,
                 ))
         return _ob_snapshot_records_to_arrow(ob_records)
+
+    def _orderbookdepth_dicts_to_arrow(self, records_raw: list[dict]) -> pa.Table:
+        """Convert orderbookdepth WAL records → Arrow table (MCT-162, ADR-009 §D11.9).
+
+        Schema = ADR-009 §D11.9.2 (11 column, per-level flat row).
+        Flat 변환 규칙: WAL frame 1개 (N levels) → parquet N rows (per-level flatten).
+        row count = Σ len(frame.changes) (across all frames in segment).
+
+        raw_json = pa.large_string() (LargeUtf8, i64 offset) — i32 4GB overflow 차단
+        (MCT-156 OOM exit 137 cross-ref, ADR-009 §D11.9.6 의무).
+
+        metadata 4 column (node_id, collector_run_id, ingest_seq, validation_status)
+        = L1Compactor segment metadata 에서 inject (§D2.1 정합).
+        """
+        meta = self._current_meta  # set by compact_segment before _convert_to_arrow call
+        node_id: str = meta["node_id"]
+        collector_run_id: str = meta.get("collector_run_id", "unknown")
+
+        # per-level flatten: 1 frame → N rows (N = len(frame.changes))
+        flat_rows: list[dict] = []
+        for ingest_seq, frame in enumerate(records_raw):
+            ts_utc = self._parse_ts(frame["ts_utc"])
+            received_at = self._parse_ts(frame["received_at"])
+            for change in frame["changes"]:
+                flat_rows.append({
+                    "ts_utc": ts_utc,
+                    "received_at": received_at,
+                    "exchange": frame["exchange"],
+                    "symbol": frame["symbol"],
+                    "side": change["side"],
+                    "price": Decimal(str(change["price"])),
+                    "quantity": Decimal(str(change["quantity"])),
+                    "raw_json": frame.get("raw_json"),
+                    "node_id": node_id,
+                    "collector_run_id": collector_run_id,
+                    "ingest_seq": ingest_seq,
+                })
+        return pa.Table.from_pylist(flat_rows, schema=_ORDERBOOKDEPTH_SCHEMA)
 
     def _tick_dicts_to_arrow(self, records_raw: list[dict]) -> pa.Table:
         """Convert transaction channel dicts → Arrow table via TickRecord + _records_to_arrow."""
