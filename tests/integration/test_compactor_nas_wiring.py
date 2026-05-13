@@ -279,7 +279,7 @@ class TestL1NoNASUpload:
         runner_file = Path("src/mctrader_data/compactor/runner.py")
 
         if runner_file.exists():
-            runner_content = runner_file.read_text()
+            runner_content = runner_file.read_text(encoding="utf-8")
             # Find _run_l1 method (if it exists)
             lines = runner_content.split("\n")
             in_run_l1 = False
@@ -318,13 +318,13 @@ class TestLegacyMinioUploaderDeprecation:
 
         # Check cli.py
         if cli_file.exists():
-            cli_content = cli_file.read_text()
+            cli_content = cli_file.read_text(encoding="utf-8")
             cli_count = cli_content.count("MinioUploader(")
             assert cli_count == 0, f"MinioUploader() found {cli_count} times in cli.py (expected 0)"
 
         # Check runner.py
         if runner_file.exists():
-            runner_content = runner_file.read_text()
+            runner_content = runner_file.read_text(encoding="utf-8")
             runner_count = runner_content.count("MinioUploader(")
             assert runner_count == 0, f"MinioUploader() found {runner_count} times in runner.py (expected 0)"
 
