@@ -52,14 +52,12 @@ def _make_real_uploader():
     access_key = os.environ.get("NAS_MINIO_ACCESS_KEY", "minioadmin")
     secret_key = os.environ.get("NAS_MINIO_SECRET_KEY", "minioadmin")
     bucket = os.environ.get("NAS_MINIO_BUCKET", "mctrader-market")
-    secure = os.environ.get("NAS_MINIO_SECURE", "false").lower() == "true"
 
     return NASUploader(
         endpoint=endpoint,
         access_key=access_key,
         secret_key=secret_key,
         bucket=bucket,
-        secure=secure,
     )
 
 
