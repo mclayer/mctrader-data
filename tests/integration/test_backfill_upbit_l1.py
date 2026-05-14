@@ -11,13 +11,12 @@ Marked as integration (runs in CI, not in --skip-integration mode).
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pyarrow.parquet as pq
 import pytest
 
-from mctrader_data.compactor.backfill import iter_frozen_segments, BackfillManifest
+from mctrader_data.compactor.backfill import iter_frozen_segments
 from mctrader_data.compactor.runner import run_backfill
 from mctrader_data.orderbook_snapshot_storage import _OB_SNAPSHOT_SCHEMA
 
@@ -83,8 +82,6 @@ def _build_wal_tree(
     date_dir.mkdir(parents=True)
     segments = []
     for i in range(n_segments):
-        ts_str = f"2026051{3 + i // 10:01d}T{i * 5:04d}Z"  # deterministic ts strings
-        ts_str = f"20260513T{i:04d}Z"  # simple incrementing
         seg = _write_sealed_segment(date_dir, ts_str=f"20260513T{i * 5:04d}0Z", n_records=n_records_each)
         segments.append(seg)
     return segments
@@ -185,13 +182,7 @@ def test_verify_partial_loss_pass(tmp_path: Path) -> None:
     _build_wal_tree(root=root, n_segments=2, n_records_each=2)
     run_backfill(root=root, exchange="upbit", tier="L1", channel="orderbooksnapshot")
 
-    # Import and run verify
-    from scripts.verify_backfill_partial_loss import verify_partial_loss  # type: ignore[import]
-
-    # Can't import scripts directly — test the logic inline
-    from pathlib import Path as _Path
-    from collections import defaultdict
-
+    # Test the V2 verify logic inline (scripts/ not importable in CI)
     wal_root = root / "wal"
     market_root = root / "market"
 
