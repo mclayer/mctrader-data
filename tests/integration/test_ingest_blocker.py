@@ -27,9 +27,8 @@ verified-via: Read docs/superpowers/specs/2026-05-14-MCT-171-dr-runbook-capacity
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
-import pytest
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
