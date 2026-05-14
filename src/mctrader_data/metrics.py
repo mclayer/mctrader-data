@@ -178,3 +178,30 @@ def observe_compactor_runtime() -> None:
 
     for gen, count in enumerate(gc.get_count()):
         compactor_python_gc_gen_count.labels(generation=str(gen)).set(count)
+
+
+# ---------------------------------------------------------------------------
+# MCT-166 Phase 2 -- collector/compactor unsupported channel counters (AC-4/5)
+# ADR-027 Amendment 2 + INV-1 (fail-fast, silent-skip 차단)
+# Counter objects are defined in allowlist.py to avoid circular imports.
+# These helpers provide a metrics.py-level access point for documentation.
+# ---------------------------------------------------------------------------
+
+def record_collector_unsupported_channel(*, exchange: str, channel: str) -> None:
+    """Emit collector_unsupported_channel_total counter (AC-4, INV-1).
+
+    Called by allowlist.validate_channel_exchange() on unsupported combo.
+    Do not call directly -- use allowlist.validate_channel_exchange() instead.
+    """
+    from mctrader_data.allowlist import collector_unsupported_channel_total
+    collector_unsupported_channel_total.labels(exchange=exchange, channel=channel).inc()
+
+
+def record_compactor_unsupported_source(*, tier: str, exchange: str, channel: str) -> None:
+    """Emit compactor_unsupported_source_total counter (AC-5, INV-1).
+
+    Called by allowlist.validate_compactor_source() on unsupported combo.
+    Do not call directly -- use allowlist.validate_compactor_source() instead.
+    """
+    from mctrader_data.allowlist import compactor_unsupported_source_total
+    compactor_unsupported_source_total.labels(tier=tier, exchange=exchange, channel=channel).inc()
