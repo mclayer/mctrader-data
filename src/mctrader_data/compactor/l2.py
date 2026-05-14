@@ -176,7 +176,7 @@ class L2Compactor:
             return None
 
         # Pre-read first object for schema
-        first_stream = get_streaming(nas_uploader=self._nas_uploader, nas_key=nas_keys[0])
+        first_stream = get_streaming(nas_uploader=self._nas_uploader, nas_key=nas_keys[0])  # type: ignore[arg-type]
         first_pf = pq.ParquetFile(first_stream)
         schema = first_pf.schema_arrow
 
@@ -200,7 +200,7 @@ class L2Compactor:
                 with pq.ParquetWriter(str(tmp), schema, compression="snappy") as writer:
                     # Re-read first key (already consumed for schema)
                     for nas_key in nas_keys:
-                        stream = get_streaming(nas_uploader=self._nas_uploader, nas_key=nas_key)
+                        stream = get_streaming(nas_uploader=self._nas_uploader, nas_key=nas_key)  # type: ignore[arg-type]
                         pf = pq.ParquetFile(stream)
                         for batch in pf.iter_batches(batch_size=1024):
                             ts_col = batch.column("ts_utc")
