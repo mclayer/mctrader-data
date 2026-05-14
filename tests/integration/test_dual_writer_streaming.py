@@ -99,11 +99,18 @@ def sample_l2_parquet(tmp_data_root: Path) -> Path:
 def mock_nas_uploader(tmp_data_root: Path) -> NASUploader:
     """Mock NASUploader that returns 'uploaded' status (unittest.mock 방식, F2 fix).
 
+    MCT-163 F3: put_streaming() mock 추가 (DualWriter Path path → put_streaming 호출).
     실 NASUploader 인스턴스를 mock.MagicMock()으로 교체.
     NASUploader(endpoint=...) constructor 대신 mock 직접 주입.
     """
     uploader = mock.MagicMock(spec=NASUploader)
     uploader.put.return_value = PutResult(
+        status="uploaded",
+        object_etag="mock-etag-abc123",
+        latency_ms=5.0,
+    )
+    # MCT-163 F3: DualWriter Path path uses put_streaming (backward compat extension)
+    uploader.put_streaming.return_value = PutResult(
         status="uploaded",
         object_etag="mock-etag-abc123",
         latency_ms=5.0,

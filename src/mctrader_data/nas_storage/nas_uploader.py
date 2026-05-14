@@ -23,6 +23,13 @@ Design decisions (§6.2.1 Change Plan 박제, FIX#3 갱신):
 - PutResult.status 5종 (FIX#3 P0-NEW-1):
   "uploaded" | "skipped_idempotent" | "queued" | "hard_floor_blocked" | "skipped_etag_overwrite"
 
+MCT-163 F3 (D1=B, D3=A):
+- put_streaming(local_path_or_fileobj, nas_key, sha256): boto3 upload_fileobj + TransferConfig
+  - multipart idiomatic (D1=B): chunk-wise upload, 메모리 전체 로드 0 (INV-4)
+  - backward compat: 기존 put(key, data, sha256) signature 보존 (INV-2)
+  - caller sha256 SSOT: caller가 단일 hash 계산 후 주입 (D2=A, INV-3)
+  - DualWriter.write() 내부에서 put → put_streaming 교체 (read_bytes 0)
+
 SecurityArch (§6.3):
 - log 출력 시 endpoint URL masking: host:port 만 포함 (auth 정보 embedded URL 금지)
 - fail reason label = generic enum (raw boto3 exception message embed 금지)
@@ -31,14 +38,16 @@ SecurityArch (§6.3):
 from __future__ import annotations
 
 import hashlib
+import io
 import logging
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import IO, Literal, Union
 
 import boto3
+from boto3.s3.transfer import TransferConfig
 from botocore.config import Config
 from botocore.exceptions import ClientError, EndpointConnectionError
 
@@ -360,6 +369,157 @@ class NASUploader:
         log.info("[nas_uploader] uploaded key=%s etag=%s bytes=%d", key, etag, len(data))
 
         return PutResult(status="uploaded", object_etag=etag)
+
+    def put_streaming(
+        self,
+        local_path_or_fileobj: Union[Path, IO[bytes]],
+        nas_key: str,
+        sha256: str,
+    ) -> PutResult:
+        """Streaming upload via boto3 upload_fileobj + TransferConfig (MCT-163 F3, D1=B, D3=A).
+
+        Backward compat: 기존 put(key, data=bytes) 를 대체하지 않음 (INV-2).
+        DualWriter.write(data=Path) 가 내부적으로 본 method 호출 (F3 streaming path).
+
+        D1=B: boto3 upload_fileobj + TransferConfig(multipart_chunksize=8MB, multipart_threshold=8MB)
+          - 메모리 전체 로드 0 (INV-4: DualWriter ≤ 50 MB peak delta)
+          - multipart idiomatic (NAS MinIO 호환)
+        D2=A: caller-side sha256 SSOT — sha256 반드시 caller가 계산 후 주입 (INV-3)
+          - multipart ETag ≠ sha256: S3 multipart ETag = parts hash, sha256 = content hash (별도)
+        D3=A: 별 method (put() signature 보존, backward compat 격리)
+
+        HEAD-then-PUT idempotency: sha256 metadata Metadata={'sha256': sha256} 전달 (INV-3 정합).
+        NAS unreachable / ClientError: put() 와 동일 suppress_enqueue=False 패턴 (ADR-027 D5).
+
+        Returns:
+            PutResult(status='uploaded' | 'skipped_idempotent' | 'queued' | 'hard_floor_blocked')
+
+        Raises:
+            ConditionalWriteConflict: HEAD 200 + sha256 mismatch (forward-only invariant)
+        """
+        t_start = time.perf_counter()
+        client = self._get_client()
+
+        # HEAD idempotency check (sha256 match → skip, mismatch → conflict)
+        try:
+            head_response = client.head_object(Bucket=self.bucket, Key=nas_key)
+            metadata = head_response.get("Metadata", {})
+            existing_sha256 = metadata.get("sha256")
+            if existing_sha256 is not None:
+                if existing_sha256 == sha256:
+                    log.info(
+                        "[nas_uploader] put_streaming idempotent skip key=%s sha256=%s…",
+                        nas_key, sha256[:8],
+                    )
+                    return PutResult(
+                        status="skipped_idempotent",
+                        object_etag=existing_sha256,
+                        latency_ms=(time.perf_counter() - t_start) * 1000,
+                    )
+                else:
+                    safe_endpoint = _mask_endpoint(self._endpoint)
+                    log.error(
+                        "[nas_uploader] put_streaming sha256 mismatch endpoint=%s key=%s "
+                        "existing=%.8s… new=%.8s…",
+                        safe_endpoint, nas_key, existing_sha256, sha256,
+                    )
+                    raise ConditionalWriteConflict(
+                        f"key={nas_key} existing={existing_sha256[:8]}… new={sha256[:8]}…"
+                    )
+            else:
+                # Metadata sha256 absent → overwrite (legacy object)
+                safe_endpoint = _mask_endpoint(self._endpoint)
+                log.warning(
+                    "[nas_uploader] put_streaming metadata sha256 absent — overwrite key=%s",
+                    nas_key,
+                )
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code != "404":
+                raise
+
+        # Streaming upload via upload_fileobj + TransferConfig (D1=B)
+        # 8 MB chunk — NAS MinIO multipart default threshold
+        transfer_cfg = TransferConfig(
+            multipart_threshold=8 * 1024 * 1024,   # 8 MB
+            multipart_chunksize=8 * 1024 * 1024,   # 8 MB per part
+            max_concurrency=1,                       # sequential (memory 최소화)
+            use_threads=False,
+        )
+
+        try:
+            if isinstance(local_path_or_fileobj, Path):
+                # Open as binary stream — read_bytes() 호출 0 (INV-4)
+                with local_path_or_fileobj.open("rb") as fobj:
+                    client.upload_fileobj(
+                        fobj,
+                        self.bucket,
+                        nas_key,
+                        ExtraArgs={"Metadata": {"sha256": sha256}},
+                        Config=transfer_cfg,
+                    )
+            else:
+                # fileobj path — upstream already opened
+                client.upload_fileobj(
+                    local_path_or_fileobj,
+                    self.bucket,
+                    nas_key,
+                    ExtraArgs={"Metadata": {"sha256": sha256}},
+                    Config=transfer_cfg,
+                )
+            log.info("[nas_uploader] put_streaming uploaded key=%s sha256=%s…", nas_key, sha256[:8])
+            return PutResult(
+                status="uploaded",
+                object_etag="",  # upload_fileobj does not return ETag directly
+                latency_ms=(time.perf_counter() - t_start) * 1000,
+            )
+
+        except EndpointConnectionError:
+            safe_endpoint = _mask_endpoint(self._endpoint)
+            log.warning(
+                "[nas_uploader] put_streaming endpoint unreachable endpoint=%s key=%s",
+                safe_endpoint, nas_key,
+            )
+            # ADR-027 D5: raise 0, retry_queue.enqueue()
+            if self._retry_queue is not None:
+                # For streaming, we need bytes for retry queue — read path once
+                if isinstance(local_path_or_fileobj, Path):
+                    data_bytes = local_path_or_fileobj.read_bytes()
+                else:
+                    data_bytes = local_path_or_fileobj.read()
+                enq_result = self._retry_queue.enqueue(key=nas_key, data=data_bytes, sha256=sha256)
+                if enq_result.status == "hard_floor_blocked":
+                    return PutResult(
+                        status="hard_floor_blocked",
+                        latency_ms=(time.perf_counter() - t_start) * 1000,
+                    )
+            return PutResult(
+                status="queued",
+                latency_ms=(time.perf_counter() - t_start) * 1000,
+            )
+
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            safe_endpoint = _mask_endpoint(self._endpoint)
+            log.warning(
+                "[nas_uploader] put_streaming client error endpoint=%s key=%s code=%s",
+                safe_endpoint, nas_key, code,
+            )
+            if self._retry_queue is not None:
+                if isinstance(local_path_or_fileobj, Path):
+                    data_bytes = local_path_or_fileobj.read_bytes()
+                else:
+                    data_bytes = local_path_or_fileobj.read()
+                enq_result = self._retry_queue.enqueue(key=nas_key, data=data_bytes, sha256=sha256)
+                if enq_result.status == "hard_floor_blocked":
+                    return PutResult(
+                        status="hard_floor_blocked",
+                        latency_ms=(time.perf_counter() - t_start) * 1000,
+                    )
+            return PutResult(
+                status="queued",
+                latency_ms=(time.perf_counter() - t_start) * 1000,
+            )
 
     def _list_objects(self, prefix: str) -> list[str]:
         """List object keys in bucket with given prefix.
