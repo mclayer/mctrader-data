@@ -1,0 +1,90 @@
+# MCT-173 Phase 2.1 Entry Scan Audit
+
+scan_at: 2026-05-14T (Phase 2.1)
+exchange: upbit
+channel: orderbooksnapshot
+
+## D2=C 결정 박제 (frozen WAL path 실측)
+
+| 항목 | 값 |
+|---|---|
+| WAL root | `/var/lib/mctrader/data/wal/upbit/orderbooksnapshot/` |
+| freeze_executed | False (wal_freeze.py --execute 미실행) |
+| sealed_writable | 1,922 |
+| sealed_readonly | 0 |
+| 비고 | INV-1: backfill 중 WAL 무변경 보장 = PIT snapshot (D3=A) |
+
+**D2=C 결정**: frozen WAL path = `/var/lib/mctrader/data/wal/upbit/orderbooksnapshot/`
+wal_freeze.py (MCT-164) = chmod 방식, 실제 freeze 미실행.
+backfill 대상 = uncompacted sealed segment 전체 (1,922개).
+PIT snapshot (D3=A) 으로 concurrent ingester race 회피.
+
+## WAL 상태 요약
+
+| 항목 | 수량 |
+|---|---|
+| total sealed (including .compacted) | 3,806 |
+| compacted sentinel (.sealed.compacted) | 1,884 |
+| uncompacted sealed (backfill target) | 1,922 |
+| active (open, writing) | 40 |
+| WAL total lines (orderbooksnapshot records) | 1,746,844 |
+
+### 날짜별 분포
+
+| Date | sealed_uncompacted | compacted |
+|---|---|---|
+| 2026-05-13 | 915 | 915 |
+| 2026-05-14 | 1,007 | 969 |
+
+**비고**: 2026-05-14 uncompacted = 1,007 중 969 이미 compacted (L1 생성됨). 나머지 38개 = 오늘 실시간 진행 중인 세그먼트 포함.
+
+### 심볼별 분포 (주요)
+
+| Symbol | sealed_uncompacted (2026-05-13) | lines | sealed_uncompacted (2026-05-14) | lines |
+|---|---|---|---|---|
+| KRW-BTC | 48 | 81,180 | 53 | 72,314 |
+| KRW-ETH | 48 | 95,041 | 53 | 105,552 |
+| KRW-XRP | 48 | 82,282 | 53 | 80,518 |
+| KRW-SOL | 48 | 67,854 | 53 | 66,445 |
+| KRW-MATIC | 3 | 0 | — | — |
+
+**KRW-MATIC 비고**: 2026-05-13 에 3개 segment (size=0) 만 존재. partial boundary 케이스 — 심볼이 2026-05-13 13:25 UTC 부터 시작됨. L1에 3개 parquet 존재 (이미 처리됨).
+
+## D9=C 결정 박제 (pre-existing L1 처리 정책)
+
+| 항목 | 값 |
+|---|---|
+| dates in WAL | 2026-05-13, 2026-05-14 |
+| dates in L1 | 2026-05-13, 2026-05-14 |
+| L1 total parquets | 1,884 |
+| overlap dates | 2026-05-13, 2026-05-14 (전체 중복) |
+
+**D9=C 결정**: pre-existing L1 이 존재하는 segment = `.compacted` sentinel 보유 (1,884개).
+이미 처리된 segment → D4=A idempotency (sentinel skip).
+uncompacted sealed (1,922개) → backfill 대상 (`.compacted` 없으면 처리).
+
+**처리 정책 (ADR-017 §D2)**:
+- segment 에 `.compacted` 마커 존재 → skip (pre-existing L1 보호)
+- segment 에 `.compacted` 마커 없음 → L1 생성 후 `.compacted` 마커 touch
+
+## partial WAL date boundary
+
+| Symbol/Date | 비고 |
+|---|---|
+| KRW-MATIC/2026-05-13 | 3 segments, size=0, 13:25 UTC 시작 — 온보딩 첫날 partial |
+
+## 결론: Phase 2.2 runner extend 입력 조건
+
+1. backfill 대상: uncompacted sealed segments = 1,922 개
+2. WAL path: `/var/lib/mctrader/data/wal/upbit/orderbooksnapshot/`
+3. sentinel skip (D4=A): `.compacted` 존재 시 skip
+4. PIT snapshot (D3=A): scan_sealed() 결과를 리스트로 freeze 후 처리
+5. manifest 박제 (D5=B): date range = 2026-05-13 ~ 2026-05-14, partial_boundary = KRW-MATIC/2026-05-13
+
+## Phase 2.3 backfill 실행 결과 (추후 append)
+
+_Phase 2.3 완료 후 append 예정_
+
+## Phase 2.4 verify 결과 (추후 append)
+
+_Phase 2.4 완료 후 append 예정_
