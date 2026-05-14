@@ -27,7 +27,12 @@ verified-via: Read docs/superpowers/specs/2026-05-14-MCT-171-dr-runbook-capacity
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
+
+if TYPE_CHECKING:
+    from mctrader_data.capacity_probe import CapacityReport
+    from mctrader_data.ingest_blocker import IngestBlocker
 
 
 
@@ -40,7 +45,7 @@ def _make_capacity_report(
     l1_ratio: float = 0.0,
     nas_ratio: float = 0.0,
     host_ratio: float = 0.0,
-) -> object:
+) -> CapacityReport:
     """CapacityReport mock with given layer ratios."""
     from mctrader_data.capacity_probe import CapacityReport
 
@@ -61,7 +66,7 @@ def _make_capacity_report(
     )
 
 
-def _make_blocker(mock_metrics: MagicMock | None = None) -> object:
+def _make_blocker(mock_metrics: MagicMock | None = None) -> IngestBlocker:
     """IngestBlocker 인스턴스 helper."""
     from mctrader_data.ingest_blocker import IngestBlocker
 
@@ -314,7 +319,8 @@ class TestCollectorIngestBlockerHook:
         mock_blocker.should_block.assert_called()
         # WAL ingester.append NOT called (ingest rejected)
         for ingester in daemon._wal_ingesters.values():
-            ingester.append.assert_not_called()
+            cast_ingester: MagicMock = ingester  # type: ignore[assignment]
+            cast_ingester.append.assert_not_called()
 
     def test_collector_hook_allows_when_false(self, tmp_path: Path) -> None:
         """IngestBlocker.should_block() = False → ingest 정상 진행."""

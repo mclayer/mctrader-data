@@ -42,14 +42,13 @@ import pytest
 
 def _make_parquet_bytes(schema: pa.Schema | None = None) -> bytes:
     """Return minimal valid parquet bytes for test fixtures."""
-    if schema is None:
-        schema = pa.schema([
-            pa.field("schema_version", pa.string()),
-            pa.field("exchange", pa.string()),
-        ])
+    _schema: pa.Schema = schema if schema is not None else pa.schema([
+        pa.field("schema_version", pa.string()),
+        pa.field("exchange", pa.string()),
+    ])
     table = pa.table(
         {name: pa.array(["v1" if pa.types.is_string(field.type) else [0]])
-         for name, field in zip(schema.names, schema, strict=True)},
+         for name, field in zip(_schema.names, _schema, strict=True)},
     )
     buf = io.BytesIO()
     pq.write_table(table, buf)

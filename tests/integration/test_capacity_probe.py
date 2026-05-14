@@ -25,9 +25,13 @@ verified-via: Read docs/superpowers/specs/2026-05-14-MCT-171-dr-runbook-capacity
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+if TYPE_CHECKING:
+    from mctrader_data.capacity_probe import CapacityProbe
 
 
 # ─── Test: CapacityThresholds SSOT ──────────────────────────────────────────
@@ -100,7 +104,7 @@ class TestCapacityReport:
 class TestCapacityProbeOnce:
     """CapacityProbe.probe_once() → CapacityReport + Gauge emit."""
 
-    def _make_probe(self, tmp_path: Path, mock_metrics: MagicMock | None = None) -> object:
+    def _make_probe(self, tmp_path: Path, mock_metrics: MagicMock | None = None) -> CapacityProbe:
         """CapacityProbe 인스턴스 생성 helper."""
         from mctrader_data.capacity_probe import CapacityProbe, CapacityThresholds
 
