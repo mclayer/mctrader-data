@@ -125,11 +125,11 @@ def test_l1_nas_put_committed(tmp_path: Path) -> None:
     assert parquet_path.exists()
 
     # put_streaming (or put) 호출 확인 (AC-6: NAS PUT trigger)
-    assert mock_uploader.put_streaming.call_count >= 1 or mock_uploader.put.call_count >= 1
+    assert mock_uploader.put_streaming.call_count >= 1 or mock_uploader.put.call_count >= 1  # type: ignore[attr-defined]
 
     # nas_key = "l1/" prefix 확인 (R-3 mitigation)
-    if mock_uploader.put_streaming.call_count >= 1:
-        called_key = mock_uploader.put_streaming.call_args[0][1]
+    if mock_uploader.put_streaming.call_count >= 1:  # type: ignore[attr-defined]
+        called_key = mock_uploader.put_streaming.call_args[0][1]  # type: ignore[attr-defined]
         assert called_key.startswith("l1/"), f"tier prefix 위반: {called_key!r}"
 
 
@@ -159,7 +159,7 @@ def test_l1_nas_put_retry_queue_enqueue(tmp_path: Path) -> None:
     assert parquet_path.exists(), "INV-4 위반: local_only 시 L1 local 손실"
 
     # NAS PUT 호출 확인 (put_streaming 또는 put)
-    total_calls = mock_uploader.put_streaming.call_count + mock_uploader.put.call_count
+    total_calls = mock_uploader.put_streaming.call_count + mock_uploader.put.call_count  # type: ignore[attr-defined]
     assert total_calls >= 1
 
 

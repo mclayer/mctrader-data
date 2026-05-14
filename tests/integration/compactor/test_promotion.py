@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 from io import BytesIO
 
 import pytest

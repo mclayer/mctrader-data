@@ -18,10 +18,8 @@ INV-1: post-promotion 시점 = NAS only (local 부재) → XOR = true
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 import pytest
-
-from mctrader_data.nas_storage.nas_uploader import PutResult
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────
@@ -149,7 +147,7 @@ class TestAmbiguityInvariant:
 
         Promotion = local delete → NAS only 상태. XOR = true.
         """
-        from mctrader_data.compactor.promotion import promote_l1, verify_no_ambiguity, PromotionResult
+        from mctrader_data.compactor.promotion import promote_l1, verify_no_ambiguity
 
         local_file = tmp_path / "part-promote.parquet"
         local_file.write_bytes(b"fake parquet data")
