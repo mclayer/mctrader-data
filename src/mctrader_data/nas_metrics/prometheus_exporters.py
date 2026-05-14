@@ -39,12 +39,22 @@ from prometheus_client import (
 )
 
 # MCT-156: DualWriter status/tier Counter (Stage 3 wiring, AC-G)
-# status ∈ {committed, local_only, hard_floor_blocked}, tier ∈ {L2, L3}
+# status ∈ {committed, local_only, hard_floor_blocked}, tier ∈ {L1, L2, L3}
 # ADR-027 D5 amendment caller contract — caller (CompactorRunner._dispatch_dual_write) emit.
+# MCT-168: tier label 확장 — L1 추가 (ADR-029 D1+D2, AC-6 정합)
 dual_write_result_total = Counter(
     "mctrader_dual_write_result_total",
-    "DualWriter put() result count by status and tier (MCT-156)",
-    ["status", "tier"],  # status ∈ {committed, local_only, hard_floor_blocked}, tier ∈ {L2, L3}
+    "DualWriter put() result count by status and tier (MCT-156, MCT-168 L1 추가)",
+    ["status", "tier"],  # status ∈ {committed, local_only, hard_floor_blocked}, tier ∈ {L1, L2, L3}
+)
+
+# MCT-168: L1 NAS PUT latency histogram (AC-8 NFR: p99 < 1500ms)
+# buckets: (0.1, 0.25, 0.5, 1.0, 1.5, 3.0, 10.0) — 1500ms 버킷 포함 (NFR gate 정합)
+# ADR-029 D1=B + D2=B wiring evidence — DualWriter.put_l1() caller emit.
+dual_write_l1_latency_seconds = Histogram(
+    "mctrader_dual_write_l1_latency_seconds",
+    "L1 NAS DualWriter PUT latency in seconds (MCT-168 AC-8, NFR p99 < 1500ms)",
+    buckets=(0.1, 0.25, 0.5, 1.0, 1.5, 3.0, 10.0),
 )
 
 # MCT-162 (ADR-027 D4 amendment, 2026-05-13)

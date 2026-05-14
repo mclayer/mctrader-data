@@ -1,6 +1,7 @@
 """dual_writer.py — Dual-write atomic primitive (local + NAS 동시 PUT, 2-phase commit semantic).
 
 Story: MCT-151 (Stage 2 — dual-write atomic primitives + 7종 invariant harness)
+       MCT-168 (L1 NAS DualWriter wiring — put_l1() 신규 method, ADR-029 D1=B + D2=B)
 Issue: mclayer/mctrader-hub#257
 
 Design decisions (§6.2.1 Change Plan 박제, MCT-150 lesson 4 invariants 적용):
@@ -21,6 +22,13 @@ Design decisions (§6.2.1 Change Plan 박제, MCT-150 lesson 4 invariants 적용
   → DualWriteResult.status = "local_only" (caller source 삭제 가능 — retry_queue 후속 drain)
 - NASUploader.put() status == "hard_floor_blocked"
   → DualWriteResult.status = "hard_floor_blocked" (caller source retain 의무, RPO=0)
+
+MCT-168 put_l1() (ADR-029 D1=B + D2=B):
+- put_l1(path): tier prefix = "l1/" + relative path → write() 위임
+  - sha256 streaming 계산 (8MB chunk, read_bytes 0 — INV-4 정합)
+  - Prometheus: dual_write_result_total{tier="L1"} + dual_write_l1_latency_seconds
+  - NAS PUT fail → local_only 반환 (compactor 정상 종료, INV-4 L1 local 보존)
+  - INV-5: status enum 3종 (committed/local_only/hard_floor_blocked) 정확 1개 반환
 
 ADR-017 hot path 무영향: collector WAL/L1 ParquetWriter 침범 0 (별 process / 별 file path).
 Forward-only invariant (ADR-009 §D12.2): 양쪽 신규 row append-only.
@@ -273,5 +281,102 @@ class DualWriter:
                 nas_key_prefix=key_prefix,
                 latency_s=latency_ms / 1000.0,
             )
+
+        return result
+
+    def put_l1(self, path: Path) -> DualWriteResult:
+        """L1 NAS PUT — L1 ParquetWriter atomic rename 직후 호출 (ADR-029 D1=B, MCT-168).
+
+        L1 PUT 은 이미 atomic rename 완료된 파일에 대한 NAS upload — write() 의
+        local tmp copy 단계를 생략하고 NASUploader.put_streaming() 직접 호출.
+        (write() 는 local_path 신규 생성 용도; L1 PUT 은 기존 parquet 재upload)
+
+        nas_key = "l1/" + path.relative_to(local_root) (tier prefix enforce, R-3 mitigation).
+        sha256 = streaming 계산 (8MB chunk, read_bytes 0 — INV-4: L1 local SSOT 보존).
+
+        INV-4: NAS PUT fail → local_only 반환 (L1 local file 보존, compactor 정상 종료).
+        INV-5: status enum 3종 (committed/local_only/hard_floor_blocked) 정확 1개 반환.
+
+        Prometheus emit (AC-6 + AC-8):
+        - mctrader_dual_write_result_total{tier="L1", status} — AC-6
+        - mctrader_dual_write_l1_latency_seconds — AC-8 NFR p99 < 1500ms
+
+        Args:
+            path: L1 Parquet 파일 절대 경로 (local_root 하위 의무)
+
+        Returns:
+            DualWriteResult — status ∈ {"committed", "local_only", "hard_floor_blocked"}
+
+        Raises:
+            ValueError: path 가 local_root 하위가 아닌 경우
+        """
+        from mctrader_data.nas_metrics.prometheus_exporters import (
+            dual_write_result_total,
+            dual_write_l1_latency_seconds,
+        )
+        import time
+
+        start_ms = time.monotonic() * 1000
+
+        # tier prefix enforce (R-3 mitigation: l1/ 명시, l2/l3/ 와 명시적 분리)
+        try:
+            rel = path.relative_to(self._local_root)
+        except ValueError as err:
+            raise ValueError(
+                f"put_l1: path {path!r} is not under local_root {self._local_root!r}. "
+                f"L1 NAS PUT requires path within local_root (ADR-029 D1=B)."
+            ) from err
+        nas_key = "l1/" + rel.as_posix()
+
+        # sha256 streaming 계산 (8MB chunk, read_bytes 0 — MCT-163 INV-4 정합)
+        _sha256_obj = hashlib.sha256()
+        with path.open("rb") as _fv:
+            for _chunk in iter(lambda: _fv.read(8 * 1024 * 1024), b""):
+                _sha256_obj.update(_chunk)
+        sha256 = _sha256_obj.hexdigest()
+
+        # NASUploader.put_streaming() 직접 호출 (D2=B retry_queue 재사용)
+        # L1 PUT = 이미 atomic rename 완료된 파일 → local tmp copy 단계 불필요
+        # suppress_enqueue=False → NAS unreachable 시 retry_queue 흡수 (INV-4 보장)
+        nas_put_result = self._uploader.put_streaming(path, nas_key, sha256)
+
+        latency_ms = time.monotonic() * 1000 - start_ms
+
+        # PutResult.status → DualWriteResult.status 변환 (§6.7 Cross-module contract)
+        if nas_put_result.status in _COMMITTED_STATUSES:
+            dwr_status: Literal["committed", "local_only", "hard_floor_blocked"] = "committed"
+        elif nas_put_result.status == _QUEUED_STATUS:
+            dwr_status = "local_only"
+        elif nas_put_result.status == _HARD_FLOOR_STATUS:
+            dwr_status = "hard_floor_blocked"
+            log.error(
+                "[dual_writer] L1 NAS PUT hard_floor_blocked: %r — SOP MANUAL_GATE escalation 의무 (ADR-029 D2=B)",
+                nas_key,
+            )
+        else:
+            # Unknown status — defensive: local_only 처리 (INV-4 보장 우선)
+            log.error(
+                "[dual_writer] L1 NAS PUT unknown status %r → local_only fallback (INV-4). nas_key=%r",
+                nas_put_result.status, nas_key,
+            )
+            dwr_status = "local_only"
+
+        result = DualWriteResult(
+            status=dwr_status,
+            nas_put_result=nas_put_result,
+            local_path=path,
+            nas_key=nas_key,
+            sha256=sha256,
+            latency_ms=latency_ms,
+        )
+
+        # Prometheus emit (AC-6 + AC-8)
+        dual_write_result_total.labels(status=dwr_status, tier="L1").inc()
+        dual_write_l1_latency_seconds.observe(latency_ms / 1000.0)
+
+        log.info(
+            "[dual_writer] L1 NAS PUT %s: status=%s latency_ms=%.1f (ADR-029 D1=B)",
+            nas_key, dwr_status, latency_ms,
+        )
 
         return result

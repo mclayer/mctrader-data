@@ -7,6 +7,11 @@ Invariants enforced:
   INV-5  Schema       — output schema matches upstream storage module (tick.v1 for transaction)
   INV-6  Lineage      — lineage-{run_id}.json written alongside Parquet
 
+MCT-168 invariants (ADR-029 D1=B + D2=B):
+  INV-4  L1 local SSOT  — NAS PUT fail 시 segment 보존, compactor 정상 종료 (hard fail 금지)
+  INV-5  DualWriter status 3종 정확 반환 (committed/local_only/hard_floor_blocked)
+  INV-6  retry_queue replay idempotent (NAS versioning 의존, MCT-161 정합)
+
 Path layout (ADR-009 §D2 / ADR-017 — ALL components in key=value Hive format):
   <root>/market/<channel>/schema_version=<version>/tier=L1/
     exchange=<exchange>/symbol=<symbol>/date=<date>/
@@ -46,6 +51,10 @@ from mctrader_data.orderbook_snapshot_storage import (
 )
 from mctrader_data.metrics import compactor_writer_open_count
 import contextlib
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from mctrader_data.nas_storage.dual_writer import DualWriter
 
 # ADR-009 §D11.9.2 — orderbook_depth.v1 schema (11 column, per-level flat row)
 # raw_json = pa.large_string() (LargeUtf8, i64 offset) 의무 (§D11.9.6, i32 4GB overflow 차단)
@@ -101,10 +110,16 @@ class L1Compactor:
 
     Currently supports channel ``transaction`` (tick.v1 schema).
     Other channels raise ``NotImplementedError``.
+
+    MCT-168 (ADR-029 D1=B + D2=B):
+    - dual_writer inject 시 compact_segment() 완료 후 put_l1() 호출 (L1 NAS dual-write)
+    - NAS PUT fail → log warning + 정상 반환 (INV-4: L1 local SSOT 보존, compactor 중단 0)
+    - dual_writer=None 시 NAS PUT 0 (backward compat — test/local dev 호환)
     """
 
-    def __init__(self, *, root: Path) -> None:
+    def __init__(self, *, root: Path, dual_writer: DualWriter | None = None) -> None:
         self._root = root
+        self._dual_writer = dual_writer  # MCT-168: DualWriter inject (ADR-029 D1=B + D2=B)
 
     # ------------------------------------------------------------------ public
 
@@ -135,6 +150,11 @@ class L1Compactor:
             # Atomic write: tmp file → rename
             self._write_parquet_atomic(table, parquet_path, meta)
 
+        # MCT-168 (ADR-029 D1=B): L1 NAS dual-write hook — atomic rename 직후
+        # INV-4: NAS PUT fail → log warning + 정상 반환 (L1 local SSOT 보존, compactor 중단 0)
+        if self._dual_writer is not None:
+            self._put_l1_nas(parquet_path)
+
         # INV-6: write lineage JSON (idempotent overwrite)
         self._write_lineage(sealed, parquet_path, meta, run_id)
 
@@ -144,6 +164,37 @@ class L1Compactor:
             marker.touch()
 
         return parquet_path
+
+    def _put_l1_nas(self, parquet_path: Path) -> None:
+        """MCT-168: L1 NAS PUT hook — DualWriter.put_l1() 호출 (ADR-029 D1=B).
+
+        INV-4: NAS PUT fail → log warning + 정상 반환 (L1 local SSOT 보존).
+        본 method 는 compact_segment() 내 _write_parquet_atomic() 직후 호출.
+        """
+        try:
+            result = self._dual_writer.put_l1(parquet_path)  # type: ignore[union-attr]
+            if result.status == "committed":
+                pass  # log already in put_l1()
+            elif result.status == "local_only":
+                import logging
+                logging.getLogger(__name__).warning(
+                    "[L1Compactor] L1 NAS PUT local_only: %s (retry_queue enqueued, INV-4 local 보존)",
+                    parquet_path.name,
+                )
+            elif result.status == "hard_floor_blocked":
+                import logging
+                logging.getLogger(__name__).error(
+                    "[L1Compactor] L1 NAS PUT hard_floor_blocked: %s "
+                    "— SOP MANUAL_GATE escalation 의무 (INV-4 local 보존)",
+                    parquet_path.name,
+                )
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning(
+                "[L1Compactor] L1 NAS PUT raised exception (INV-4: local 보존, compactor 정상 종료): %s",
+                parquet_path.name,
+                exc_info=True,
+            )
 
     # ----------------------------------------------------------------- private
 
