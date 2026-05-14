@@ -96,3 +96,29 @@ MCT-156 Phase 2 LAND (`mctrader-data#47` dff8aa5) 후 hot pipeline NAS PUT 정�
 - L2/L3 backlog 8.85 GiB only (~4.8% of 전체 183 GiB)
 - L1 sealed backlog (76,200 file / ~115 GiB) + WAL (59 GiB) = MCT-160 책임 (sequential 의무)
 - bucket versioning 활성화 = MCT-161 책임
+
+### Data Health Framework (MCT-165, 2026-05-14)
+
+`src/mctrader_data/health/` 신규 모듈 — 4-layer data accumulation health verification.
+
+**INV-1 read-only**: fs walk만 (Path.glob, Path.rglob, Path.stat). write/수정/소급보정 절대 금지.
+**INV-2 cut-in**: `start_date` default = 2026-05-09 (50-sym universe 전환 시점, MCT-103).
+**INV-3 4 layer freeze**: volume / gap / file_count / lag (parity/schema/presence 후속 ADR).
+**INV-4 exit code**: 0=ALL PASS, 1=any FAIL, 2=tool error (NotImplementedError 포함).
+
+**실제 storage layout** (reconciled 2026-05-14):
+```
+<MCTRADER_DATA_ROOT>/market/orderbookdepth/schema_version=orderbook_depth.v1/
+  tier={L1|L2|L3}/exchange={exchange}/symbol={symbol}/
+  date={YYYY-MM-DD}/[hour={H}/][node={node}/]part-*.parquet
+WAL: <MCTRADER_DATA_ROOT>/wal/{exchange}/orderbookdepth/{symbol}/{YYYY-MM-DD}/segment-*.ndjson
+```
+
+**CLI 사용**:
+```bash
+mctrader-data health-check --target collector --window 5d --start-date 2026-05-09 --output markdown
+mctrader-data health-check --baseline rolling  # NotImplementedError (exit 2) — ADR-028 reserved
+```
+
+**테스트**: `tests/unit/health/` (6 unit) + `tests/integration/health/` (1 integration).
+**Cross-ref**: MCT-165 Story / ADR-028 Reserved / ADR-009 §D12.
