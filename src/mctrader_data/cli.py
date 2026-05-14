@@ -672,7 +672,8 @@ def compact_cmd(
     # have no scrape window). Port via env: MCTRADER_COMPACTOR_METRICS_PORT.
     log = logging.getLogger("mctrader-data.compact")
 
-    if not once:
+    # MCT-173 D1=B: --backfill is a one-shot mode — skip metrics server (no scrape window)
+    if not once and not backfill:
         metrics_port = int(os.environ.get("MCTRADER_COMPACTOR_METRICS_PORT", "8080"))
         start_metrics_server(port=metrics_port)
 

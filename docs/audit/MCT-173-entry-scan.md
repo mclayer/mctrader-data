@@ -120,6 +120,34 @@ segments_processed: 76
 segments_skipped: 0
 ```
 
-## Phase 2.4 verify 결과 (추후 append)
+## Phase 2.4 verify 결과
 
-_Phase 2.4 완료 후 append 예정_
+실행 일시: 2026-05-14T04:40 UTC (별 verify) + 2026-05-14T04:49 UTC (L1 집계 완료)
+
+### MCT-165 V2 forward-only loss verify
+
+| 항목 | 값 |
+|---|---|
+| WAL (sym/date) keys | 39 |
+| L1 (sym/date) keys | 39 |
+| V2 loss keys (WAL 있음, L1 없음) | 0 |
+| **V2 = 0** | **PASS (AC-5)** |
+
+### 별 verify partial loss (D8=C, AC-6)
+
+| 항목 | 값 |
+|---|---|
+| Total WAL lines (frames) | 1,785,551 |
+| Total L1 rows | 106,602,120 |
+| Pass (L1 > 0) | 38 |
+| Fail (L1 = 0, WAL > 0) | 0 |
+| Skip (WAL = 0, partial boundary) | 1 |
+| **INV-5 PASS** | **True** |
+| Fix trigger | False |
+
+**비고**: L1 rows / WAL frames = 106,602,120 / 1,785,551 ≈ 59.7 (orderbooksnapshot 1 frame → ~60 rows bid+ask flatten). Skip=1 = KRW-MATIC partial boundary (size=0 segments, 정상).
+
+### 결론 (INV-5 충족)
+
+INV-5: MCT-165 V2=0 AND 별 verify partial loss within threshold 양쪽 통과.
+§11 RETRO 진행 가능.

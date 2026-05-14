@@ -135,6 +135,48 @@ python scripts/verify_upbit_l1_fix.py --root <data_root> --date 2026-05-14
 - `docs/audit/MCT-164-parity-upbit-vs-bithumb.md` — D7=C parity 비교
 - `docs/audit/MCT-166-precondition-upbit-ws-capability.md` — upbit WS orderbook_delta 선결 결과 (D1=B, D2=B 결정)
 
+## backfill mode (MCT-173 D1=B, 2026-05-14)
+
+frozen WAL sealed segments → L1 parquet 일괄 생성 (historical materialization).
+
+```bash
+# One-shot backfill: uncompacted sealed WAL → L1
+# Python direct (컨테이너 내):
+python -c "
+from pathlib import Path
+from mctrader_data.compactor.runner import run_backfill
+result = run_backfill(root=Path('/var/lib/mctrader/data'), exchange='upbit', tier='L1', channel='orderbooksnapshot')
+print(f'processed={result.segments_processed} l1={result.l1_parquets_created}')
+"
+
+# CLI (--root는 절대경로 필수, Windows Git bash 경로 금지):
+mctrader-data compact --root /var/lib/mctrader/data \
+    --backfill --exchange upbit --tier L1 --channel orderbooksnapshot
+```
+
+**INV-1**: Source WAL immutable (PIT snapshot, D3=A).
+**INV-2**: `.compacted` sentinel → skip (D4=A, ADR-017 §D2). 재실행 safe.
+**INV-3**: `_ob_snapshot_dicts_to_arrow()` 재사용 (MCT-166 path B schema).
+**INV-4**: BackfillManifest YAML → `<root>/audit/backfill-manifest-<exchange>-<channel>.yaml` (D5=B).
+
+## verify gate (MCT-173 D8=C)
+
+```bash
+# 별 verify: WAL line count vs L1 row count
+python scripts/verify_backfill_partial_loss.py \
+    --root /var/lib/mctrader/data \
+    --exchange upbit \
+    --channel orderbooksnapshot \
+    --threshold 0.90
+
+# Phase 2.4 result (2026-05-14):
+# Total L1 rows: 106,602,120 / WAL frames: 1,785,551 (ratio ~59.7x, orderbooksnapshot flatten)
+# Pass=38, Fail=0, Skip=1 (KRW-MATIC partial boundary)
+# INV-5 PASS: True
+```
+
+INV-5: MCT-165 V2=0 AND 별 verify partial loss within threshold → 양쪽 통과 후 RETRO.
+
 ## 관련 ADR
 
 - ADR-017 Amendment 2 (compactor source 규약, channel matrix SSOT)
