@@ -42,8 +42,11 @@ class CompactorRunner:
         # MCT-168 (ADR-029 D1=B): dual_writer → L1Compactor pass-through
         # L1Compactor 가 compact_segment() 완료 후 put_l1() 직접 호출 (D1=B 정합)
         self._l1 = L1Compactor(root=root, dual_writer=dual_writer)
-        self._l2 = L2Compactor(root)
-        self._l3 = L3Compactor(root)
+        # MCT-169 (ADR-029 D3=C, INV-3): nas_uploader → L2/L3 NAS GET source pass-through
+        # dual_writer 가 있으면 내부 NASUploader 재사용, 없으면 None (local fallback)
+        _nas_uploader = dual_writer._uploader if dual_writer is not None else None  # type: ignore[union-attr]
+        self._l2 = L2Compactor(root, nas_uploader=_nas_uploader)
+        self._l3 = L3Compactor(root, nas_uploader=_nas_uploader)
         self._dual_writer = dual_writer  # MCT-156: DualWriter inject (ADR-027 D4/D5 amendment 정합, L2/L3 용)
         self._last_l2 = 0.0
         self._last_l3 = 0.0
