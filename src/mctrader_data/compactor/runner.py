@@ -18,6 +18,7 @@ from .l1 import L1Compactor
 from .l2 import L2Compactor
 from .l3 import L3Compactor
 from .gc import run_gc  # filesystem GC (24h grace deletion of .compacted sealed segments)
+from .backfill import iter_frozen_segments, BackfillManifest
 
 if TYPE_CHECKING:
     from mctrader_data.nas_storage.dual_writer import DualWriter
@@ -262,6 +263,138 @@ class CompactorRunner:
                 " — SOP MANUAL_GATE escalation 의무",
                 tier, nas_key,
             )
+
+
+def run_backfill(
+    root: Path,
+    *,
+    exchange: str = "upbit",
+    tier: str = "L1",
+    channel: str = "orderbooksnapshot",
+    manifest_path: Path | None = None,
+) -> BackfillManifest:
+    """MCT-173 D1=B: --backfill mode — process frozen WAL segments into L1 parquets.
+
+    Orchestrates a one-shot backfill pass using the PIT snapshot approach (D3=A):
+    1. iter_frozen_segments() snapshots uncompacted sealed segments (D3=A PIT, D4=A skip).
+    2. L1Compactor.compact_segment() processes each segment using existing path B logic
+       (INV-3 schema compat: _ob_snapshot_dicts_to_arrow() reused from MCT-166).
+    3. BackfillManifest emitted (D5=B, INV-4 partial boundary 박제).
+
+    Args:
+        root: Data root (e.g. /var/lib/mctrader/data)
+        exchange: Exchange to backfill (default: upbit)
+        tier: Tier to produce (currently only L1 supported)
+        channel: WAL channel to backfill (default: orderbooksnapshot)
+        manifest_path: Path to write the manifest YAML. Defaults to
+            <root>/audit/backfill-manifest-{exchange}-{channel}.yaml
+
+    Returns:
+        BackfillManifest with counts and boundary info.
+    """
+    if tier != "L1":
+        raise NotImplementedError(f"run_backfill: tier={tier!r} not supported (L1 only)")
+
+    log.info(
+        "[backfill] starting exchange=%s channel=%s tier=%s root=%s",
+        exchange, channel, tier, root,
+    )
+
+    wal_root = root / "wal"
+    segments = iter_frozen_segments(wal_root, exchange, channel)
+    log.info("[backfill] PIT snapshot: %d segments to process", len(segments))
+
+    if not segments:
+        log.info("[backfill] no uncompacted sealed segments — nothing to do")
+        manifest = BackfillManifest(
+            exchange=exchange,
+            channel=channel,
+            date_range_start="",
+            date_range_end="",
+            segment_count=0,
+            segments_processed=0,
+            segments_skipped=0,
+            l1_parquets_created=0,
+        )
+        if manifest_path:
+            manifest.write_manifest(manifest_path)
+        return manifest
+
+    # Determine date range from segment paths for INV-4 manifest
+    dates: list[str] = []
+    for seg in segments:
+        # WAL path: <wal_root>/<exchange>/<channel>/<symbol>/<date>/<file>
+        try:
+            rel = seg.relative_to(wal_root)
+            date_part = rel.parts[3] if len(rel.parts) >= 5 else ""
+            if date_part:
+                dates.append(date_part)
+        except ValueError:
+            pass
+    date_range_start = min(dates) if dates else ""
+    date_range_end = max(dates) if dates else ""
+
+    compactor = L1Compactor(root=root)
+    processed = 0
+    skipped = 0
+    errors = 0
+    l1_parquets_created = 0
+    partial_boundary_symbols: list[str] = []
+
+    for seg in segments:
+        try:
+            # Parse symbol/date for partial boundary detection
+            rel = seg.relative_to(wal_root)
+            symbol = rel.parts[2] if len(rel.parts) >= 5 else "unknown"
+            date_part = rel.parts[3] if len(rel.parts) >= 5 else "unknown"
+
+            parquet_path = compactor.compact_segment(seg)
+            log.info(
+                "[backfill] compacted %s → %s",
+                seg.name,
+                parquet_path.name,
+            )
+            l1_parquets_created += 1
+            processed += 1
+
+            # Detect partial boundary: segment size == 0 (empty WAL)
+            if seg.stat().st_size == 0:
+                key = f"{symbol}/{date_part}"
+                if key not in partial_boundary_symbols:
+                    partial_boundary_symbols.append(key)
+                    log.warning("[backfill] partial boundary detected: %s (empty segment)", key)
+
+        except Exception:
+            log.exception("[backfill] failed to compact segment %s", seg)
+            errors += 1
+
+    log.info(
+        "[backfill] complete: processed=%d skipped=%d errors=%d l1_parquets=%d "
+        "date_range=%s~%s",
+        processed, skipped, errors, l1_parquets_created,
+        date_range_start, date_range_end,
+    )
+
+    if manifest_path is None:
+        audit_dir = root / "audit"
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = audit_dir / f"backfill-manifest-{exchange}-{channel}.yaml"
+
+    manifest = BackfillManifest(
+        exchange=exchange,
+        channel=channel,
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+        segment_count=len(segments),
+        segments_processed=processed,
+        segments_skipped=skipped,
+        l1_parquets_created=l1_parquets_created,
+        partial_boundary_symbols=partial_boundary_symbols,
+    )
+    manifest.write_manifest(manifest_path)
+    log.info("[backfill] manifest written to %s", manifest_path)
+
+    return manifest
 
 
 def _extract_partition(path: Path, key: str) -> str:

@@ -79,7 +79,7 @@ def _check_health_framework_v2(root: Path, date: str) -> tuple[int, str]:
     """
     # Try to import health framework
     try:
-        from mctrader_data.health.report import HealthReport
+        from mctrader_data.health.report import HealthReport  # noqa: F401
     except ImportError:
         return -1, "mctrader_data.health.report not available -- AC-3 skipped (framework import failed)"
 
@@ -219,7 +219,7 @@ def main() -> None:
     result = run_verify(root=args.root, date=args.date, dry_run=args.dry_run)
 
     # Print summary
-    print(f"\n=== MCT-166 verify_upbit_l1_fix ===")
+    print("\n=== MCT-166 verify_upbit_l1_fix ===")
     print(f"root:    {result.root}")
     print(f"date:    {result.date}")
     print(f"dry_run: {result.dry_run}")
@@ -232,8 +232,10 @@ def main() -> None:
         if len(result.ac2_partition_paths) > 5:
             print(f"  ... ({len(result.ac2_partition_paths) - 5} more)")
     print()
-    print(f"AC-3 (health V2):    {'PASS' if result.ac3_health_v2_count == 0 else 'SKIPPED' if result.ac3_health_v2_count == -1 else 'FAIL'} "
-          f"(V2={result.ac3_health_v2_count})")
+    v2_status = "PASS" if result.ac3_health_v2_count == 0 else (
+        "SKIPPED" if result.ac3_health_v2_count == -1 else "FAIL"
+    )
+    print(f"AC-3 (health V2):    {v2_status} (V2={result.ac3_health_v2_count})")
     print(f"  {result.ac3_note}")
     print()
     print(f"AC-6 (WAL freeze):   {'REMOVED' if result.ac6_freeze_removed else 'SKIPPED'}")

@@ -305,8 +305,11 @@ def diagnose_channel_mismatch(src: Path, root: Path, exchange: str) -> Candidate
         upbit_channels_found = []
 
     # Check market L1 for upbit orderbookdepth
-    market_upbit_depth = root / "market" / "orderbookdepth" / "schema_version=orderbook_depth.v1" / "tier=L1" / f"exchange={exchange}"
-    market_upbit_snapshot = root / "market" / "orderbooksnapshot"
+    schema_ver = "orderbook_depth.v1"
+    market_upbit_depth = (
+        root / "market" / "orderbookdepth" / f"schema_version={schema_ver}"
+        / "tier=L1" / f"exchange={exchange}"
+    )
 
     l1_depth_upbit_exists = market_upbit_depth.exists()
     evidence.append(
@@ -321,7 +324,6 @@ def diagnose_channel_mismatch(src: Path, root: Path, exchange: str) -> Candidate
 
     # Check L1 runner.py scan_sealed — does it filter by channel?
     runner_py = src / "compactor" / "runner.py"
-    runner_filters_exchange = False
     if runner_py.exists():
         runner_content = runner_py.read_text(encoding="utf-8")
         # Check if runner has exchange-specific filter in L1 loop
@@ -381,16 +383,12 @@ def diagnose_discovery_skip(src: Path, root: Path, exchange: str) -> CandidateVe
     runner_content = runner_py.read_text(encoding="utf-8")
 
     # Check scan_sealed — does it filter by exchange?
-    has_exchange_filter_in_scan = False
     # scan_sealed is in segment.py — just returns all .ndjson.sealed
     segment_py = src / "wal" / "segment.py"
     if segment_py.exists():
-        seg_content = segment_py.read_text(encoding="utf-8")
-        # scan_sealed just rglobs — no exchange filter
-        has_exchange_filter_in_scan = "exchange" in seg_content and "filter" in seg_content.lower()
         evidence.append(
-            f"segment.py scan_sealed: exchange 필터 없음 (rglob '*.ndjson.sealed' only). "
-            f"upbit WAL 존재 시 100% scan 대상 포함."
+            "segment.py scan_sealed: exchange 필터 없음 (rglob '*.ndjson.sealed' only). "
+            "upbit WAL 존재 시 100% scan 대상 포함."
         )
         code_refs.append(f"{segment_py}::scan_sealed")
 

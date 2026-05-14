@@ -12,7 +12,6 @@ verdict: 미지원 → D2 = alternative path (Path B)
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 
