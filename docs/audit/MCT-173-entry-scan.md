@@ -81,9 +81,44 @@ uncompacted sealed (1,922개) → backfill 대상 (`.compacted` 없으면 처리
 4. PIT snapshot (D3=A): scan_sealed() 결과를 리스트로 freeze 후 처리
 5. manifest 박제 (D5=B): date range = 2026-05-13 ~ 2026-05-14, partial_boundary = KRW-MATIC/2026-05-13
 
-## Phase 2.3 backfill 실행 결과 (추후 append)
+## Phase 2.3 backfill 실행 결과
 
-_Phase 2.3 완료 후 append 예정_
+실행 일시: 2026-05-14T04:36:54 UTC
+
+| 항목 | 값 |
+|---|---|
+| segments_processed | 76 |
+| l1_parquets_created | 76 |
+| date_range | 2026-05-14 ~ 2026-05-14 |
+| partial_boundary_symbols | [] |
+| total L1 parquets (exchange=upbit) | 1,960 |
+| L1 parquets by date | 2026-05-13: 915 / 2026-05-14: 1,045 |
+| manifest path | `/var/lib/mctrader/data/audit/backfill-manifest-upbit-orderbooksnapshot.yaml` |
+
+**비고**: Phase 2.2 커밋 후 실시간 compactor가 2026-05-13 + 2026-05-14 대부분 segments를 선처리. 
+backfill 실행 시점 uncompacted = 76 (2026-05-14 최신). sentinel idempotency 정상 작동 (충돌 없음).
+
+**Idempotency 검증**: 2차 실행 → processed=0, l1_parquets=0 (PASS, INV-2 확인)
+
+### Manifest content
+
+```yaml
+channel: orderbooksnapshot
+created_at: '2026-05-14T04:36:54.341258+00:00'
+date_range_end: '2026-05-14'
+date_range_start: '2026-05-14'
+exchange: upbit
+inv1_source_wal_immutable: true
+inv2_idempotency: .compacted sentinel (ADR-017 §D2)
+inv3_schema_compat: _ob_snapshot_dicts_to_arrow() reused (MCT-166 path B)
+l1_parquets_created: 76
+mct166_land_date: '2026-05-14'
+mct_story: MCT-173
+partial_boundary_symbols: []
+segment_count: 76
+segments_processed: 76
+segments_skipped: 0
+```
 
 ## Phase 2.4 verify 결과 (추후 append)
 
