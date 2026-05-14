@@ -32,7 +32,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import NamedTuple
 
-import pytest
 
 
 # ─── D8 sunset policy constants (ADR-029 §D8 amendment, D8-4=C) ──────────────

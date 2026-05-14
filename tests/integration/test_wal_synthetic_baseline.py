@@ -32,7 +32,6 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-import pytest
 
 
 # ─── constants (ADR-029 D11 SSOT, MCT-171 LAND) ─────────────────────────────

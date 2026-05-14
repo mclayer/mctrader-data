@@ -42,7 +42,6 @@ from unittest.mock import MagicMock
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-import pytest
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
@@ -130,7 +129,6 @@ class TestVerifyNoAmbiguityRemoval:
 
         D8-5=A: InvariantHarness._check_ambiguity() = SSOT. promotion.py 측 동명 함수 제거.
         """
-        import importlib
         import mctrader_data.compactor.promotion as promotion_mod
 
         # verify_no_ambiguity 는 promotion 모듈 공개 심볼에 없어야 한다

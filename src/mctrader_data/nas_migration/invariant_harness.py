@@ -7,7 +7,7 @@ MCT-171 amendment (2026-05-14):
 - _INVARIANT_NAMES: 7개 → 8개 ('ambiguity' 마지막 위치 추가)
 - InvariantResult.status: 8 variant → 9 variant ('ambiguity_fail' 추가)
 - InvariantHarness._check_ambiguity(): 신규 method (D7-1=A)
-  logic = compactor/promotion.py verify_no_ambiguity 흡수 (SSOT 통합)
+  logic = compactor/promotion.py 측 ambiguity check 함수 흡수 (SSOT 통합)
   동일 logical entity (schema_version × tier × exchange × symbol × date × hour × node)
   NAS + local XOR violation 검출
 - InvariantHarness.verify(): 8번째 ambiguity check 추가 (sequential unconditional, §6.9 정합)
@@ -669,7 +669,7 @@ class InvariantHarness:
     ) -> PerInvariantResult:
         """8번째 invariant: ambiguity check (MCT-171 §5.1 D7-1=A).
 
-        ADR-029 §D10 SSOT 흡수 (compactor/promotion.py verify_no_ambiguity 로직 통합).
+        ADR-029 §D10 SSOT 흡수 (MCT-171 amendment, MCT-172 cleanup).
         INV-1 SoT exclusivity: nas_exists ⊕ local_exists = true (XOR).
         NAS+local 동시 존재 = 설계 위반 (ambiguity_fail).
 
@@ -680,8 +680,9 @@ class InvariantHarness:
           NAS HEAD 404 → nas_exists=False → no ambiguity
 
         Note: per-file 체크 아님 (partition-level NAS HEAD probe).
-              compactor/promotion.py 의 verify_no_ambiguity 는 segment-level (key 단위).
               본 method 는 partition-level (prefix 단위, 1회 HEAD probe).
+              MCT-171 이전 compactor/promotion.py 측 segment-level helper (key 단위) 는
+              MCT-172 cleanup 으로 제거 (SSOT = 본 method).
 
         Prometheus: ambiguity_fail 시 mctrader_invariant_violation_total{invariant_name=ambiguity}
         """
