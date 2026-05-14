@@ -113,7 +113,8 @@ mctrader_capacity_threshold_ratio = Gauge(
 mctrader_invariant_violation_total = Counter(
     "mctrader_invariant_violation_total",
     "Invariant violation count by invariant name (MCT-171 8종 통합)",
-    ["invariant_name"],  # 8 enum: sha256/object_count/row_count/column_count/column_order/dtype/schema_version/ambiguity
+    # 8 enum: sha256/object_count/row_count/column_count/column_order/dtype/schema_version/ambiguity
+    ["invariant_name"],
 )
 
 # mctrader_invariant_check_latency_ms Histogram (no label — latency distribution)

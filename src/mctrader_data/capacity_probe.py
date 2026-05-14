@@ -20,11 +20,11 @@ SecurityArch:
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import shutil
 import threading
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -267,10 +267,8 @@ class CapacityProbe:
         try:
             for p in root.rglob("*"):
                 if p.is_file():
-                    try:
+                    with contextlib.suppress(OSError):
                         total += p.stat().st_size
-                    except OSError:
-                        pass
         except Exception:
             log.warning("[capacity_probe] _probe_dir_bytes error for %s", root)
         return total

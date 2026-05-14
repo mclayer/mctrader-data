@@ -24,8 +24,6 @@ verified-via: Read docs/superpowers/specs/2026-05-14-MCT-171-dr-runbook-capacity
 """
 from __future__ import annotations
 
-import io
-import shutil
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -88,7 +86,7 @@ class TestCapacityReport:
 
     def test_capacity_report_layer_enum_names(self) -> None:
         """CapacityReport 의 layer 이름 = Prometheus label enum (WAL_local/L1_local/NAS_bucket/Host_disk)."""
-        from mctrader_data.capacity_probe import CapacityReport, LAYER_NAMES
+        from mctrader_data.capacity_probe import LAYER_NAMES
 
         expected = {"WAL_local", "L1_local", "NAS_bucket", "Host_disk"}
         assert set(LAYER_NAMES) == expected, (
@@ -228,8 +226,6 @@ class TestCapacityProbeOnce:
 
     def test_capacity_probe_no_hot_path_import(self) -> None:
         """capacity_probe.py는 collector.py 를 import 하지 않는다 (hot path 의존 0, sibling isolation)."""
-        import importlib
-        import importlib.util
         import ast
 
         # capacity_probe.py 소스 파싱
@@ -276,14 +272,13 @@ class TestCapacityProbeOnce:
 
         with patch("shutil.disk_usage") as mock_du:
             mock_du.return_value = MagicMock(total=100 * 1024**3, used=50 * 1024**3, free=50 * 1024**3)
-            result = probe.probe_once()
+            probe.probe_once()
 
         # shutil.disk_usage 가 host_mount 경로로 호출됐는지 확인
         assert mock_du.called, "probe_once() must call shutil.disk_usage for host_mount"
 
     def test_probe_loop_callable(self, tmp_path: Path) -> None:
         """probe_loop() callable 확인 (실제 루프 미실행 — API contract test)."""
-        from mctrader_data.capacity_probe import CapacityProbe
 
         probe = self._make_probe(tmp_path)
         assert callable(getattr(probe, "probe_loop", None)), (

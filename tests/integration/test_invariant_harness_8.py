@@ -14,7 +14,8 @@ Test Contract (MCT-171 §4 AC-1):
 - test_ambiguity_xor_only_local: local only → no ambiguity (pre-promotion state)
 - test_ambiguity_xor_only_nas: NAS only → no ambiguity (post-promotion state)
 - test_ambiguity_xor_neither: 둘 다 없음 → no ambiguity
-- test_ambiguity_violation_counter_emitted: violation 시 mctrader_invariant_violation_total{invariant_name=ambiguity} Counter emit
+- test_ambiguity_violation_counter_emitted: violation 시
+  mctrader_invariant_violation_total{invariant_name=ambiguity} Counter emit
 - test_mct169_d10_regression: verify_no_ambiguity (promotion.py) 기존 caller 회귀 0
 - test_verify_returns_ambiguity_fail_status: harness.verify() 가 ambiguity check 포함
 
@@ -26,11 +27,10 @@ verified-via: Read tests/integration/compactor/test_ambiguity_invariant.py (MCT-
 """
 from __future__ import annotations
 
-import hashlib
 import io
 from pathlib import Path
 from typing import get_args
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -49,7 +49,7 @@ def _make_parquet_bytes(schema: pa.Schema | None = None) -> bytes:
         ])
     table = pa.table(
         {name: pa.array(["v1" if pa.types.is_string(field.type) else [0]])
-         for name, field in zip(schema.names, schema)},
+         for name, field in zip(schema.names, schema, strict=True)},
     )
     buf = io.BytesIO()
     pq.write_table(table, buf)
@@ -57,7 +57,7 @@ def _make_parquet_bytes(schema: pa.Schema | None = None) -> bytes:
 
 
 def _make_tick_v1_parquet_bytes() -> bytes:
-    schema = pa.schema([
+    tick_schema = pa.schema([
         pa.field("ts_utc", pa.int64()),
         pa.field("received_at", pa.int64()),
         pa.field("exchange", pa.string()),
@@ -76,7 +76,7 @@ def _make_tick_v1_parquet_bytes() -> bytes:
         "quantity": pa.array(["0.001"]),
         "side": pa.array(["ask"]),
         "raw_json": pa.array(["null"]),
-    })
+    }, schema=tick_schema)
     buf = io.BytesIO()
     pq.write_table(table, buf)
     return buf.getvalue()
@@ -145,7 +145,10 @@ class TestInvariantNames8:
             f"Last invariant must be 'ambiguity', got: {_INVARIANT_NAMES[-1]}"
         )
         # 기존 7종 보존 확인 (MCT-151 backward compat)
-        expected_7 = ("sha256", "object_count", "row_count", "column_count", "column_order", "dtype", "schema_version")
+        expected_7 = (
+            "sha256", "object_count", "row_count", "column_count",
+            "column_order", "dtype", "schema_version",
+        )
         for name in expected_7:
             assert name in _INVARIANT_NAMES, f"Legacy invariant '{name}' must be preserved"
 
@@ -193,18 +196,23 @@ class TestInvariantHarness8AllPass:
 
         # Build tick.v1 parquet bytes
         pq_bytes = _make_tick_v1_parquet_bytes()
-        sha = hashlib.sha256(pq_bytes).hexdigest()
 
         # Partition dir (NAS only state — no local files)
-        partition_dir = tmp_path / "schema_version=tick.v1" / "tier=L1" / "exchange=bithumb" / "symbol=KRW-BTC" / "date=2026-05-14" / "hour=09"
+        partition_dir = (
+            tmp_path
+            / "schema_version=tick.v1" / "tier=L1"
+            / "exchange=bithumb" / "symbol=KRW-BTC"
+            / "date=2026-05-14" / "hour=09"
+        )
         partition_dir.mkdir(parents=True)
         local_file = partition_dir / "part-0001.parquet"
         local_file.write_bytes(pq_bytes)
 
+        _nas_pfx = "schema_version=tick.v1/tier=L1/exchange=bithumb/symbol=KRW-BTC"
         mock_uploader = _make_nas_uploader_mock(
             head_exists=False,  # NAS HEAD 404 → local only (no ambiguity)
             parquet_bytes=pq_bytes,
-            nas_objects=["schema_version=tick.v1/tier=L1/exchange=bithumb/symbol=KRW-BTC/date=2026-05-14/hour=09/part-0001.parquet"],
+            nas_objects=[_nas_pfx + "/date=2026-05-14/hour=09/part-0001.parquet"],
         )
 
         harness = InvariantHarness(
@@ -241,12 +249,18 @@ class TestAmbiguityFailSurface:
         pq_bytes = _make_tick_v1_parquet_bytes()
 
         # NAS+local 동시 존재 픽스처
-        partition_dir = tmp_path / "schema_version=tick.v1" / "tier=L1" / "exchange=bithumb" / "symbol=KRW-BTC" / "date=2026-05-14" / "hour=10"
+        partition_dir = (
+            tmp_path
+            / "schema_version=tick.v1" / "tier=L1"
+            / "exchange=bithumb" / "symbol=KRW-BTC"
+            / "date=2026-05-14" / "hour=10"
+        )
         partition_dir.mkdir(parents=True)
         local_file = partition_dir / "part-ambig.parquet"
         local_file.write_bytes(pq_bytes)
 
-        nas_key = "schema_version=tick.v1/tier=L1/exchange=bithumb/symbol=KRW-BTC/date=2026-05-14/hour=10/part-ambig.parquet"
+        _p = "schema_version=tick.v1/tier=L1/exchange=bithumb/symbol=KRW-BTC"
+        nas_key = _p + "/date=2026-05-14/hour=10/part-ambig.parquet"
 
         # NAS HEAD 200 (nas_exists=True) + local 존재 = ambiguity
         mock_uploader = _make_nas_uploader_mock(
@@ -276,11 +290,17 @@ class TestAmbiguityFailSurface:
         from mctrader_data.nas_migration.invariant_harness import InvariantHarness
 
         pq_bytes = _make_tick_v1_parquet_bytes()
-        partition_dir = tmp_path / "schema_version=tick.v1" / "tier=L1" / "exchange=bithumb" / "symbol=KRW-BTC" / "date=2026-05-14" / "hour=11"
+        partition_dir = (
+            tmp_path
+            / "schema_version=tick.v1" / "tier=L1"
+            / "exchange=bithumb" / "symbol=KRW-BTC"
+            / "date=2026-05-14" / "hour=11"
+        )
         partition_dir.mkdir(parents=True)
         (partition_dir / "part-local.parquet").write_bytes(pq_bytes)
 
-        nas_key = "schema_version=tick.v1/tier=L1/exchange=bithumb/symbol=KRW-BTC/date=2026-05-14/hour=11/part-local.parquet"
+        _p = "schema_version=tick.v1/tier=L1/exchange=bithumb/symbol=KRW-BTC"
+        nas_key = _p + "/date=2026-05-14/hour=11/part-local.parquet"
 
         mock_uploader = _make_nas_uploader_mock(
             head_exists=False,  # NAS HEAD 404 — local only
@@ -310,11 +330,17 @@ class TestAmbiguityFailSurface:
 
         pq_bytes = _make_tick_v1_parquet_bytes()
         # Empty local partition
-        partition_dir = tmp_path / "schema_version=tick.v1" / "tier=L1" / "exchange=bithumb" / "symbol=KRW-BTC" / "date=2026-05-14" / "hour=12"
+        partition_dir = (
+            tmp_path
+            / "schema_version=tick.v1" / "tier=L1"
+            / "exchange=bithumb" / "symbol=KRW-BTC"
+            / "date=2026-05-14" / "hour=12"
+        )
         partition_dir.mkdir(parents=True)
         # No local files
 
-        nas_key = "schema_version=tick.v1/tier=L1/exchange=bithumb/symbol=KRW-BTC/date=2026-05-14/hour=12/part-nas-only.parquet"
+        _p = "schema_version=tick.v1/tier=L1/exchange=bithumb/symbol=KRW-BTC"
+        nas_key = _p + "/date=2026-05-14/hour=12/part-nas-only.parquet"
 
         mock_uploader = _make_nas_uploader_mock(
             head_exists=True,  # NAS 존재
@@ -344,11 +370,17 @@ class TestAmbiguityFailSurface:
         from mctrader_data.nas_migration.invariant_harness import InvariantHarness
 
         pq_bytes = _make_tick_v1_parquet_bytes()
-        partition_dir = tmp_path / "schema_version=tick.v1" / "tier=L1" / "exchange=bithumb" / "symbol=KRW-BTC" / "date=2026-05-14" / "hour=13"
+        partition_dir = (
+            tmp_path
+            / "schema_version=tick.v1" / "tier=L1"
+            / "exchange=bithumb" / "symbol=KRW-BTC"
+            / "date=2026-05-14" / "hour=13"
+        )
         partition_dir.mkdir(parents=True)
         (partition_dir / "part-counter.parquet").write_bytes(pq_bytes)
 
-        nas_key = "schema_version=tick.v1/tier=L1/exchange=bithumb/symbol=KRW-BTC/date=2026-05-14/hour=13/part-counter.parquet"
+        _p = "schema_version=tick.v1/tier=L1/exchange=bithumb/symbol=KRW-BTC"
+        nas_key = _p + "/date=2026-05-14/hour=13/part-counter.parquet"
 
         mock_uploader = _make_nas_uploader_mock(
             head_exists=True,
@@ -375,7 +407,10 @@ class TestAmbiguityFailSurface:
         mock_metrics.emit_invariant_verify.assert_called_once()
         call_kwargs = mock_metrics.emit_invariant_verify.call_args
         # status should be ambiguity_fail
-        assert call_kwargs.kwargs.get("status") == "ambiguity_fail" or call_kwargs[0][0] == "ambiguity_fail" if call_kwargs[0] else call_kwargs.kwargs.get("status") == "ambiguity_fail"
+        if call_kwargs[0]:
+            assert call_kwargs[0][0] == "ambiguity_fail"
+        else:
+            assert call_kwargs.kwargs.get("status") == "ambiguity_fail"
 
 
 # ─── Test: backward compat 7종 API ──────────────────────────────────────────
@@ -389,11 +424,17 @@ class TestInvariantHarness8BackwardCompat:
         from mctrader_data.nas_migration.invariant_harness import InvariantHarness
 
         pq_bytes = _make_tick_v1_parquet_bytes()
-        partition_dir = tmp_path / "schema_version=tick.v1" / "tier=L1" / "exchange=bithumb" / "symbol=KRW-BTC" / "date=2026-05-14" / "hour=14"
+        partition_dir = (
+            tmp_path
+            / "schema_version=tick.v1" / "tier=L1"
+            / "exchange=bithumb" / "symbol=KRW-BTC"
+            / "date=2026-05-14" / "hour=14"
+        )
         partition_dir.mkdir(parents=True)
         (partition_dir / "part-compat.parquet").write_bytes(pq_bytes)
 
-        nas_key = "schema_version=tick.v1/tier=L1/exchange=bithumb/symbol=KRW-BTC/date=2026-05-14/hour=14/part-compat.parquet"
+        _p = "schema_version=tick.v1/tier=L1/exchange=bithumb/symbol=KRW-BTC"
+        nas_key = _p + "/date=2026-05-14/hour=14/part-compat.parquet"
 
         mock_uploader = _make_nas_uploader_mock(
             head_exists=False,
@@ -412,7 +453,10 @@ class TestInvariantHarness8BackwardCompat:
             nas_partition="schema_version=tick.v1/tier=L1/exchange=bithumb/symbol=KRW-BTC/date=2026-05-14/hour=14",
         )
 
-        legacy_7 = ("sha256", "object_count", "row_count", "column_count", "column_order", "dtype", "schema_version")
+        legacy_7 = (
+            "sha256", "object_count", "row_count", "column_count",
+            "column_order", "dtype", "schema_version",
+        )
         for key in legacy_7:
             assert key in result.per_invariant_results, (
                 f"Legacy invariant '{key}' must be present in per_invariant_results (INV-4 backward compat)"
@@ -429,7 +473,6 @@ class TestInvariantHarness8BackwardCompat:
         local_file = tmp_path / "part-regression.parquet"
         local_file.write_bytes(b"fake parquet")
 
-        from botocore.exceptions import ClientError
         mock_client = MagicMock()
         mock_client.head_object.return_value = {
             "ETag": '"etag123"',

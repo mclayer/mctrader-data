@@ -109,10 +109,7 @@ class IngestBlocker:
 
         # Extract thresholds from probe if available (guard against MagicMock in tests)
         thresholds_raw = getattr(self._probe, "_thresholds", None)
-        if isinstance(thresholds_raw, CapacityThresholds):
-            thresholds = thresholds_raw
-        else:
-            thresholds = CapacityThresholds()
+        thresholds = thresholds_raw if isinstance(thresholds_raw, CapacityThresholds) else CapacityThresholds()
 
         critical: float = float(thresholds.critical_ratio)  # 0.95
         warn: float = float(thresholds.warn_ratio)          # 0.80
@@ -137,8 +134,8 @@ class IngestBlocker:
 
         # Find max ratio and which layer is critical
         max_ratio = max(layer_ratios.values())
-        critical_layers = [l for l, r in layer_ratios.items() if r >= critical]
-        warn_layers = [l for l, r in layer_ratios.items() if r >= warn]
+        critical_layers = [layer for layer, r in layer_ratios.items() if r >= critical]
+        warn_layers = [layer for layer, r in layer_ratios.items() if r >= warn]
 
         if critical_layers:
             # Transition to BLOCKED
