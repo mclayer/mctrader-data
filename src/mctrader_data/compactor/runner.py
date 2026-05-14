@@ -39,10 +39,12 @@ class CompactorRunner:
         dual_writer: DualWriter | None = None,  # MCT-156: was minio_uploader (legacy MinioUploader removed)
     ) -> None:
         self._root = root
-        self._l1 = L1Compactor(root=root)
+        # MCT-168 (ADR-029 D1=B): dual_writer → L1Compactor pass-through
+        # L1Compactor 가 compact_segment() 완료 후 put_l1() 직접 호출 (D1=B 정합)
+        self._l1 = L1Compactor(root=root, dual_writer=dual_writer)
         self._l2 = L2Compactor(root)
         self._l3 = L3Compactor(root)
-        self._dual_writer = dual_writer  # MCT-156: DualWriter inject (ADR-027 D4/D5 amendment 정합)
+        self._dual_writer = dual_writer  # MCT-156: DualWriter inject (ADR-027 D4/D5 amendment 정합, L2/L3 용)
         self._last_l2 = 0.0
         self._last_l3 = 0.0
         self._last_gc = 0.0
@@ -152,7 +154,8 @@ class CompactorRunner:
 
         MCT-160 D2: date_utc + hour_utc 명시 전달 (KST→UTC roll silent skip 차단).
         ADR-027 D4 amendment 박제 — Stage 3 wiring obligation.
-        S3 invariant: L1 는 NAS upload 0 (hot path 무영향, ADR-017 / ADR-027 §D5 정합).
+        MCT-168: ADR-027 §D5 "L1 NAS upload 금지" invariant 폐기 (ADR-029 D1=B 채택).
+        L1 NAS dual-write = L1Compactor.compact_segment() 내부 put_l1() 직접 호출 (D1=B).
         """
         out = self._l2.compact_hour(
             exchange=exchange, symbol=symbol, channel=channel,
