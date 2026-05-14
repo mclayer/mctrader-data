@@ -29,10 +29,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pyarrow.parquet as pq
-import pytest
 
 from mctrader_data.compactor.l1 import L1Compactor
-from mctrader_data.wal.segment import compacted_path
 
 # ---------------------------------------------------------------------------
 # Helpers
