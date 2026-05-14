@@ -1,5 +1,12 @@
 # src/mctrader_data/compactor/l2.py
-"""L2Compactor: merge tier=L1 Parquet files for one UTC hour → tier=L2 Parquet."""
+"""L2Compactor: merge tier=L1 Parquet files for one UTC hour → tier=L2 Parquet.
+
+MCT-163 F6 (D4=A, D5=A):
+- pq.ParquetFile(f).read() → iter_batches(batch_size=1024) per-batch (D4=A)
+- writer.write_table → writer.write_batch per batch (D5=A, true streaming)
+- INV-4: peak RSS+tracemalloc delta ≤ 256 MB (1 GiB+ L1 input)
+- INV-5: iter_batches per-batch 산출물 schema == 기존 L2 schema (forward-only)
+"""
 from __future__ import annotations
 
 import contextlib
@@ -63,8 +70,10 @@ class L2Compactor:
         out_path = out_dir / f"part-{run_id}.parquet"
         tmp = out_dir / f"part-tmp-{os.getpid()}.tmp"
 
-        # D3: streaming chunk write with row_group_size=100_000
-        # D4: monotonic verify (chunk-level, no full-table sort in memory)
+        # MCT-163 F6: iter_batches per-batch streaming (D4=A batch_size=1024, D5=A write_batch)
+        # replaces: pq.ParquetFile(f).read() fully-load + write_table
+        # INV-4: peak ≤ 256 MB (per-batch, not full-table in memory)
+        # INV-5: schema preserved (first file schema propagated via pq.ParquetWriter)
         last_ts = None
         monotonic_violation = False
         try:
@@ -72,18 +81,23 @@ class L2Compactor:
             try:
                 with pq.ParquetWriter(str(tmp), schema, compression="snappy") as writer:
                     for f in l1_files:
-                        tbl = pq.ParquetFile(str(f)).read()
-                        # D4: monotonic verify per chunk
-                        ts_col = tbl.column("ts_utc")
-                        for i in range(tbl.num_rows):
-                            cur = ts_col[i].as_py()
-                            if last_ts is not None and cur < last_ts:
-                                monotonic_violation = True
+                        pf = pq.ParquetFile(str(f))
+                        # D4=A: iter_batches(batch_size=1024) — OLAP standard, per-batch memory
+                        for batch in pf.iter_batches(batch_size=1024):
+                            # D4 (MCT-160): monotonic verify per batch
+                            ts_col = batch.column("ts_utc")
+                            for i in range(len(ts_col)):
+                                cur = ts_col[i].as_py()
+                                if last_ts is not None and cur < last_ts:
+                                    monotonic_violation = True
+                                    break
+                                last_ts = cur
+                            if monotonic_violation:
                                 break
-                            last_ts = cur
+                            # D5=A: write_batch (true streaming, no full-table concat)
+                            writer.write_batch(batch)
                         if monotonic_violation:
                             break
-                        writer.write_table(tbl, row_group_size=100_000)
             finally:
                 compactor_writer_open_count.labels(tier="L2").dec()
 

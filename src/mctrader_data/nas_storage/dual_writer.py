@@ -151,41 +151,76 @@ class DualWriter:
         """
         start_ms = time.monotonic() * 1000
 
-        # ── resolve data bytes ─────────────────────────────────────────────────
+        # ── MCT-163 F3: streaming path (read_bytes 0, INV-4) ──────────────────
+        # data: Path → streaming sha256 verify (chunk-wise, no read_bytes) + put_streaming
+        # data: bytes → legacy path (caller already has bytes, put() backward compat)
         if isinstance(data, Path):
-            payload: bytes = data.read_bytes()
+            # Streaming sha256 verify — chunk-wise (read_bytes() 호출 0, INV-4)
+            _sha256_obj = hashlib.sha256()
+            with data.open("rb") as _fv:
+                for _chunk in iter(lambda: _fv.read(8 * 1024 * 1024), b""):
+                    _sha256_obj.update(_chunk)
+            actual_sha256 = _sha256_obj.hexdigest()
+            if actual_sha256 != sha256:
+                raise ValueError(
+                    f"sha256 mismatch: caller supplied {sha256!r}, "
+                    f"actual {actual_sha256!r}. NAS PUT aborted (§6.9 #1 unconditional)."
+                )
+
+            # ── Phase 1: local tmp write (atomic rename pattern, streaming copy) ──
+            tmp_path = local_path.with_suffix(local_path.suffix + ".tmp_dw")
+            try:
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                # Streaming copy via shutil (no full-load, read_bytes 0)
+                import shutil  # noqa: PLC0415
+                shutil.copy2(str(data), str(tmp_path))
+            except Exception:
+                tmp_path.unlink(missing_ok=True)
+                raise
+
+            # ── Phase 1: NAS streaming upload (F3: put_streaming, D1=B) ───────
+            try:
+                nas_put_result = self._uploader.put_streaming(
+                    data,       # Path → upload_fileobj (no read_bytes in NAS path)
+                    nas_key,
+                    sha256,
+                )
+            except Exception:
+                tmp_path.unlink(missing_ok=True)
+                raise
+
         else:
-            payload = data
+            # bytes path — backward compat (INV-2), unchanged
+            payload: bytes = data
 
-        # ── Phase 1 §6.9 #1: sha256 unconditional verify ──────────────────────
-        actual_sha256 = hashlib.sha256(payload).hexdigest()
-        if actual_sha256 != sha256:
-            raise ValueError(
-                f"sha256 mismatch: caller supplied {sha256!r}, "
-                f"actual {actual_sha256!r}. NAS PUT aborted (§6.9 #1 unconditional)."
-            )
+            # ── Phase 1 §6.9 #1: sha256 unconditional verify ─────────────────
+            actual_sha256 = hashlib.sha256(payload).hexdigest()
+            if actual_sha256 != sha256:
+                raise ValueError(
+                    f"sha256 mismatch: caller supplied {sha256!r}, "
+                    f"actual {actual_sha256!r}. NAS PUT aborted (§6.9 #1 unconditional)."
+                )
 
-        # ── Phase 1: local tmp write ───────────────────────────────────────────
-        tmp_path = local_path.with_suffix(local_path.suffix + ".tmp_dw")
-        try:
-            local_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path.write_bytes(payload)
-        except Exception:
-            tmp_path.unlink(missing_ok=True)
-            raise
+            # ── Phase 1: local tmp write ──────────────────────────────────────
+            tmp_path = local_path.with_suffix(local_path.suffix + ".tmp_dw")
+            try:
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp_path.write_bytes(payload)
+            except Exception:
+                tmp_path.unlink(missing_ok=True)
+                raise
 
-        # ── Phase 1: NAS PUT ───────────────────────────────────────────────────
-        try:
-            nas_put_result = self._uploader.put(
-                nas_key,
-                payload,
-                sha256=sha256,
-                suppress_enqueue=False,
-            )
-        except Exception:
-            # NAS PUT raised unexpectedly (should not happen per ADR-027 D5, but guard)
-            tmp_path.unlink(missing_ok=True)
-            raise
+            # ── Phase 1: NAS PUT (bytes path, legacy) ────────────────────────
+            try:
+                nas_put_result = self._uploader.put(
+                    nas_key,
+                    payload,
+                    sha256=sha256,
+                    suppress_enqueue=False,
+                )
+            except Exception:
+                tmp_path.unlink(missing_ok=True)
+                raise
 
         # ── Phase 2 §6.9 #2: PutResult.status switch (conditional) ───────────
         latency_ms = time.monotonic() * 1000 - start_ms

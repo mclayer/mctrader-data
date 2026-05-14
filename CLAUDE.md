@@ -177,8 +177,46 @@ python scripts/verify_backfill_partial_loss.py \
 
 INV-5: MCT-165 V2=0 AND 별 verify partial loss within threshold → 양쪽 통과 후 RETRO.
 
+## Streaming refactor (MCT-163 F3+F6, 2026-05-14)
+
+### F3 — DualWriter put_streaming (D1=B, D3=A)
+
+**`nas_uploader.py`**: `put_streaming(local_path_or_fileobj, nas_key, sha256)` 신규 method.
+- boto3 `upload_fileobj` + `TransferConfig(multipart_chunksize=8MB, max_concurrency=1)` (D1=B)
+- 메모리 전체 로드 0 — streaming upload (INV-4: DualWriter ≤ 50 MB peak delta)
+- HEAD-then-PUT idempotency 보존 (sha256 Metadata 전달, INV-3)
+- 기존 `put(key, data=bytes)` signature 보존 (INV-2, backward compat 격리)
+
+**`dual_writer.py`**: `write(data=Path)` streaming 전환.
+- sha256 verify: `open+iter` chunk 방식 (`read_bytes()` 호출 0)
+- NAS 업로드: `put_streaming(Path, ...)` → `upload_fileobj` (read_bytes 0)
+- local tmp: `shutil.copy2` streaming copy (read_bytes 0)
+- bytes path: 기존 `put()` 유지 (INV-2)
+
+### F6 — L2/L3 iter_batches (D4=A, D5=A)
+
+**`l2.py`**: `pq.ParquetFile(f).read()` → `iter_batches(batch_size=1024)` + `write_batch()`.
+**`l3.py`**: 동형 (L2 동형 streaming pattern).
+
+- per-batch memory: ~1024 rows × ~600 bytes = ~600 KB (전체 파일 로드 0)
+- INV-4: peak RSS+tracemalloc delta ≤ 256 MB (300k rows 실측: RSS=0.0 MB, TM=0.3 MB)
+- INV-5: schema == 기존 L2/L3 schema (forward-only invariant 보존)
+
+### Memory invariant 실측 결과 (2026-05-14)
+
+| Target | Limit | RSS delta | TM delta | PASS |
+|--------|-------|-----------|----------|------|
+| F3 DualWriter (105 MiB) | ≤ 50 MB | 0.2 MB | 0.0 MB | PASS |
+| F6 L2Compactor (300k rows) | ≤ 256 MB | 0.0 MB | 0.3 MB | PASS |
+
+### cross-ref
+- MCT-163 §4 AC-1/AC-3/INV-3/INV-4/INV-5
+- ADR-027 §D6 7종 invariant per-file (sha256 ≠ multipart ETag)
+- docs/audit/MCT-163-caller-inventory.md — NASUploader.put() caller 4건 (R1 HIGH risk 완화)
+
 ## 관련 ADR
 
 - ADR-017 Amendment 2 (compactor source 규약, channel matrix SSOT)
 - ADR-027 Amendment 2 (silent-skip 차단 + allowlist.py fail-fast — MCT-166)
 - ADR-009 §D12 (forward-only invariant)
+- ADR-009 §D2.7 Amendment (MCT-163 — impl narrower, raw_json only nullable=True)

@@ -70,3 +70,8 @@ markers = [
     "integration: marks tests as integration tests (deselect with '-m \"not integration\"')",
     "real_nas: marks tests that require real NAS MinIO endpoint (skip if NAS_MINIO_ENDPOINT not set)",
 ]
+
+[dependency-groups]
+dev = [
+    "psutil>=7.2.2",
+]
