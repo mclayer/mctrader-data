@@ -8,7 +8,6 @@ Layout: <root>/market/orderbookdepth/schema_version=orderbook_depth.v1/
 from datetime import date
 from pathlib import Path
 
-import pytest
 
 from mctrader_data.health.volume import measure_volume
 

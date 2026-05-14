@@ -971,7 +971,6 @@ def health_check(
     else:
         # Auto-discover from L1 bithumb
         symbols_list = []
-        import re
         l1_base = (
             root_resolved
             / "market"

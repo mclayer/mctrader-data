@@ -7,10 +7,8 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from datetime import date, timedelta
 from pathlib import Path
 
-import pytest
 
 
 def _run_health_check(*extra_args: str, root: Path | None = None) -> subprocess.CompletedProcess:

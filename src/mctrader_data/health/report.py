@@ -9,7 +9,7 @@ from __future__ import annotations
 import csv
 import io
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Literal
 

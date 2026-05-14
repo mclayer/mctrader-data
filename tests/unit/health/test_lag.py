@@ -4,8 +4,11 @@ Lag = now - max(WAL segment mtime) per exchange.
 WAL layout: <root>/wal/{exchange}/orderbookdepth/{symbol}/{YYYY-MM-DD}/segment-*.ndjson
 """
 
+import os
 from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 
 from mctrader_data.health.lag import measure_lag
 
@@ -19,7 +22,6 @@ def test_lag_returns_seconds_from_latest_wal(tmp_path: Path, monkeypatch):
     seg.write_bytes(b"data")
 
     # mtime을 2026-05-14T00:15:00 UTC로 설정
-    import os, time
     ts = datetime(2026, 5, 14, 0, 15, 0, tzinfo=timezone.utc).timestamp()
     os.utime(seg, (ts, ts))
 
@@ -44,6 +46,3 @@ def test_lag_no_wal_returns_none(tmp_path: Path):
         exchanges=["bithumb"],
     )
     assert result.per_exchange.get("bithumb") is None
-
-
-import pytest

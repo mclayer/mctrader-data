@@ -33,10 +33,7 @@ def static_volume_threshold(
     Returns:
         ThresholdResult with verdict PASS/FAIL.
     """
-    if expected == 0:
-        deviation = float("inf")
-    else:
-        deviation = abs(actual - expected) / expected
+    deviation = float("inf") if expected == 0 else abs(actual - expected) / expected
     if deviation <= tol:
         return ThresholdResult(
             actual=actual,
