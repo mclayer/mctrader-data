@@ -38,13 +38,12 @@ SecurityArch (§6.3):
 from __future__ import annotations
 
 import hashlib
-import io
 import logging
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Literal, Union
+from typing import IO, Literal
 
 import boto3
 from boto3.s3.transfer import TransferConfig
@@ -372,7 +371,7 @@ class NASUploader:
 
     def put_streaming(
         self,
-        local_path_or_fileobj: Union[Path, IO[bytes]],
+        local_path_or_fileobj: Path | IO[bytes],
         nas_key: str,
         sha256: str,
     ) -> PutResult:

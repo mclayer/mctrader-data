@@ -23,8 +23,6 @@ D6=C: psutil RSS + tracemalloc delta-based assert (절대값 기준 X, delta만)
 from __future__ import annotations
 
 import gc
-import hashlib
-import io
 import os
 import tracemalloc
 from datetime import date, datetime, timezone, timedelta
@@ -258,7 +256,7 @@ def test_l2_iter_batches_memory_invariant(tmp_root: Path) -> None:
 
     D6=C: delta-based assert (시작 전 baseline에서의 증분만).
     """
-    LIMIT_BYTES = 256 * 1024 * 1024  # 256 MB (INV-4)
+    limit_bytes = 256 * 1024 * 1024  # 256 MB (INV-4)
 
     # 300,000 rows × ~600 bytes raw_json ≈ ~180 MB table if fully loaded
     # With iter_batches(1024), peak per-batch ≈ 1024 × 600 bytes = ~600 KB
@@ -278,11 +276,11 @@ def test_l2_iter_batches_memory_invariant(tmp_root: Path) -> None:
 
     rss_delta, tm_delta = _measure_delta(run)
 
-    assert rss_delta <= LIMIT_BYTES, (
+    assert rss_delta <= limit_bytes, (
         f"INV-4 L2 RSS delta violation: {rss_delta / 1024 / 1024:.1f} MB > 256 MB. "
         f"L2Compactor must use iter_batches per-batch, not pq.ParquetFile.read()."
     )
-    assert tm_delta <= LIMIT_BYTES, (
+    assert tm_delta <= limit_bytes, (
         f"INV-4 L2 tracemalloc delta violation: {tm_delta / 1024 / 1024:.1f} MB > 256 MB. "
         f"L2Compactor must use iter_batches per-batch, not pq.ParquetFile.read()."
     )
@@ -294,7 +292,7 @@ def test_l3_iter_batches_memory_invariant(tmp_root: Path) -> None:
 
     L2 동형 (D4=A iter_batches + D5=A per-batch write_batch).
     """
-    LIMIT_BYTES = 256 * 1024 * 1024  # 256 MB (INV-4)
+    limit_bytes = 256 * 1024 * 1024  # 256 MB (INV-4)
 
     n_rows = 300_000
     _create_l2_file(tmp_root, n_rows=n_rows)
@@ -311,11 +309,11 @@ def test_l3_iter_batches_memory_invariant(tmp_root: Path) -> None:
 
     rss_delta, tm_delta = _measure_delta(run)
 
-    assert rss_delta <= LIMIT_BYTES, (
+    assert rss_delta <= limit_bytes, (
         f"INV-4 L3 RSS delta violation: {rss_delta / 1024 / 1024:.1f} MB > 256 MB. "
         f"L3Compactor must use iter_batches per-batch, not pq.ParquetFile.read()."
     )
-    assert tm_delta <= LIMIT_BYTES, (
+    assert tm_delta <= limit_bytes, (
         f"INV-4 L3 tracemalloc delta violation: {tm_delta / 1024 / 1024:.1f} MB > 256 MB. "
         f"L3Compactor must use iter_batches per-batch, not pq.ParquetFile.read()."
     )

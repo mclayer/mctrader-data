@@ -193,10 +193,10 @@ def test_dual_writer_streaming_memory_invariant(tmp_root: Path) -> None:
 
     put_streaming → upload_fileobj (boto3 TransferConfig, D1=B) → 메모리 전체 로드 0.
     """
-    TARGET_BYTES = 105 * 1024 * 1024  # 105 MiB
-    LIMIT_BYTES = 50 * 1024 * 1024    # 50 MB (INV-4)
+    target_bytes = 105 * 1024 * 1024  # 105 MiB
+    limit_bytes = 50 * 1024 * 1024    # 50 MB (INV-4)
 
-    payload = _make_parquet_bytes(TARGET_BYTES)
+    payload = _make_parquet_bytes(target_bytes)
     source_path = tmp_root / "large.parquet"
     source_path.write_bytes(payload)
     sha256_hex = hashlib.sha256(payload).hexdigest()
@@ -232,11 +232,11 @@ def test_dual_writer_streaming_memory_invariant(tmp_root: Path) -> None:
 
     # INV-4: both RSS delta and tracemalloc delta must be ≤ 50 MB
     # (delta-based: 시작 전 baseline에서의 증분만 측정)
-    assert rss_delta <= LIMIT_BYTES, (
+    assert rss_delta <= limit_bytes, (
         f"INV-4 RSS delta violation: {rss_delta / 1024 / 1024:.1f} MB > 50 MB. "
         f"DualWriter must use streaming (put_streaming + upload_fileobj), not read_bytes."
     )
-    assert tm_delta <= LIMIT_BYTES, (
+    assert tm_delta <= limit_bytes, (
         f"INV-4 tracemalloc delta violation: {tm_delta / 1024 / 1024:.1f} MB > 50 MB. "
         f"DualWriter must use streaming (put_streaming + upload_fileobj), not read_bytes."
     )
