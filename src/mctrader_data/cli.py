@@ -858,5 +858,195 @@ def query_cmd(
             print("  ".join(str(row[i]).ljust(col_widths[i]) for i in range(len(columns))))
 
 
+@main.command("health-check")
+@click.option("--target", type=click.Choice(["collector"]), required=True, help="검증 대상")
+@click.option("--window", default="5d", show_default=True, help="검증 window (예: 5d, 7d, 30d)")
+@click.option("--symbols", multiple=True, help="대상 symbols (omit = bithumb 전체)")
+@click.option(
+    "--exchanges",
+    multiple=True,
+    default=["bithumb"],
+    show_default=True,
+    help="대상 exchanges",
+)
+@click.option(
+    "--tiers",
+    multiple=True,
+    default=["L1"],
+    show_default=True,
+    help="대상 tiers (L1/L2/L3)",
+)
+@click.option(
+    "--start-date",
+    default="2026-05-09",
+    show_default=True,
+    help="INV-2 cut-in 기준일 (YYYY-MM-DD)",
+)
+@click.option(
+    "--output",
+    type=click.Choice(["json", "csv", "markdown"]),
+    default="markdown",
+    show_default=True,
+)
+@click.option(
+    "--baseline",
+    type=click.Choice(["static", "rolling"]),
+    default="static",
+    show_default=True,
+    help="rolling = NotImplementedError (ADR-028 reserved)",
+)
+@click.option("--root", type=click.Path(path_type=Path), default=None, help="MCTRADER_DATA_ROOT override")
+@click.option("--expected-gib", type=float, default=4.35, show_default=True, help="예상 volume (GiB)")
+def health_check(
+    target: str,
+    window: str,
+    symbols: tuple[str, ...],
+    exchanges: tuple[str, ...],
+    tiers: tuple[str, ...],
+    start_date: str,
+    output: str,
+    baseline: str,
+    root: Path | None,
+    expected_gib: float,
+) -> None:
+    """Data accumulation health verification — MCT-165.
+
+    4-layer MVP: volume / gap / file_count / lag.
+    INV-1: read-only fs walk (no writes).
+    INV-2: start_date = 2026-05-09 cut-in.
+    INV-4: exit code 0=ALL PASS, 1=any FAIL, 2=tool error.
+    """
+    import sys
+    from datetime import date as _date, timedelta
+
+    from mctrader_data.health import volume as _vol
+    from mctrader_data.health import gap as _gap
+    from mctrader_data.health import file_count as _fc
+    from mctrader_data.health import lag as _lag
+    from mctrader_data.health.report import build_report
+
+    # rolling baseline guard (AC-7 / INV-4 exit code 2)
+    if baseline == "rolling":
+        try:
+            from mctrader_data.health.thresholds import rolling_threshold
+            rolling_threshold(0.0)  # always raises
+        except NotImplementedError as e:
+            click.echo(f"[ERROR] {e}", err=True)
+            click.echo(
+                "[ERROR] rolling baseline reserved — see docs/adr/ADR-028-rolling-baseline-threshold.md",
+                err=True,
+            )
+            sys.exit(2)
+
+    # parse start_date / window → end_date
+    try:
+        sd = _date.fromisoformat(start_date)
+    except ValueError as e:
+        click.echo(f"[ERROR] invalid --start-date: {e}", err=True)
+        sys.exit(2)
+
+    try:
+        if not window.endswith("d"):
+            raise ValueError("window must be in Nd format (e.g., 5d)")
+        days = int(window[:-1])
+        if days <= 0:
+            raise ValueError("window days must be positive")
+    except ValueError as e:
+        click.echo(f"[ERROR] invalid --window: {e}", err=True)
+        sys.exit(2)
+
+    from datetime import date as _date2
+    end_date = _date2.today() - timedelta(days=1)  # yesterday (completed day)
+    # Clamp: don't go before start_date
+    if end_date < sd:
+        end_date = sd
+
+    root_resolved = resolve_data_root(root_override=root)
+    exchanges_list = list(exchanges)
+    tiers_list = list(tiers)
+
+    # Determine symbols: if not specified, discover from L1 bithumb
+    if symbols:
+        symbols_list = list(symbols)
+    else:
+        # Auto-discover from L1 bithumb
+        symbols_list = []
+        l1_base = (
+            root_resolved
+            / "market"
+            / "orderbookdepth"
+            / "schema_version=orderbook_depth.v1"
+            / "tier=L1"
+        )
+        for exch in exchanges_list:
+            exch_dir = l1_base / f"exchange={exch}"
+            if exch_dir.is_dir():
+                for sym_dir in sorted(exch_dir.iterdir()):
+                    if sym_dir.is_dir() and sym_dir.name.startswith("symbol="):
+                        sym_name = sym_dir.name[len("symbol="):]
+                        if sym_name not in symbols_list:
+                            symbols_list.append(sym_name)
+
+    if not symbols_list:
+        click.echo("[WARN] No symbols found — check MCTRADER_DATA_ROOT and --exchanges", err=True)
+
+    try:
+        vol_result = _vol.measure_volume(
+            root=root_resolved,
+            exchanges=exchanges_list,
+            symbols=symbols_list,
+            tiers=tiers_list,
+            start_date=sd,
+            end_date=end_date,
+        )
+        gap_result = _gap.measure_gap(
+            root=root_resolved,
+            exchanges=exchanges_list,
+            symbols=symbols_list,
+            tiers=tiers_list,
+            start_date=sd,
+            end_date=end_date,
+        )
+        fc_result = _fc.measure_file_count(
+            root=root_resolved,
+            exchanges=exchanges_list,
+            symbols=symbols_list,
+            tiers=tiers_list,
+            start_date=sd,
+            end_date=end_date,
+        )
+        lag_result = _lag.measure_lag(
+            root=root_resolved,
+            exchanges=exchanges_list,
+        )
+    except Exception as e:
+        click.echo(f"[ERROR] measurement failed: {e}", err=True)
+        sys.exit(2)
+
+    report = build_report(
+        volume_result=vol_result,
+        gap_result=gap_result,
+        file_count_result=fc_result,
+        lag_result=lag_result,
+        window_start=sd,
+        window_end=end_date,
+        expected_volume_gib=expected_gib,
+        volume_tol=0.20,
+        lag_slo_seconds=60.0,
+    )
+
+    if output == "json":
+        click.echo(report.to_json())
+    elif output == "csv":
+        click.echo(report.to_csv())
+    else:
+        click.echo(report.to_markdown())
+
+    # INV-4 exit code
+    if report.overall_verdict == "FAIL":
+        sys.exit(1)
+    sys.exit(0)
+
+
 if __name__ == "__main__":  # pragma: no cover
     main()

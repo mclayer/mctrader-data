@@ -68,9 +68,7 @@ ADR-027 D4 amendment: fail-fast invariant + Prometheus emit on unsupported chann
 
 from __future__ import annotations
 
-import contextlib
 import json
-import os
 import tempfile
 from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal
@@ -81,12 +79,10 @@ import hashlib
 import pytest
 import pyarrow as pa
 import pyarrow.parquet as pq
-import prometheus_client
 
 from mctrader_data.compactor.l1 import (
     L1Compactor,
     _ORDERBOOKDEPTH_SCHEMA,
-    _schema_version,
 )
 from mctrader_data.tick_storage import _TICK_SCHEMA as _TRANSACTION_SCHEMA
 from mctrader_data.orderbook_snapshot_storage import _OB_SNAPSHOT_SCHEMA as _ORDERBOOKSNAPSHOT_SCHEMA
@@ -100,7 +96,7 @@ from mctrader_data.compactor.runner import CompactorRunner
 # ============================================================================
 
 @pytest.fixture
-def tmp_data_root(tmp_path: Path) -> Path:
+def tmp_data_root(tmp_path: Path):  # type: ignore[override]
     """Temporary data root (market + wal subdirectories).
 
     Uses a short path to avoid Windows MAX_PATH=260 limit when deep partition
@@ -112,7 +108,6 @@ def tmp_data_root(tmp_path: Path) -> Path:
       date=<YYYY-MM-DD>/hour=<HH>/node=MERGED/part-<16hex>.parquet  ≈ 162 chars
     So data root must be ≤ 98 chars to stay within MAX_PATH=260.
     """
-    import tempfile
     # mkdtemp produces ~45-char path (e.g. C:\Users\...\AppData\Local\Temp\tmpXXXXXX)
     # which leaves ample room for deep partition sub-paths.
     base = Path(tempfile.mkdtemp())
@@ -226,7 +221,7 @@ def test_l2_compact_hour_date_utc_explicit(tmp_data_root: Path) -> None:
 
     l1_dir = (
         root / "market" / channel
-        / f"schema_version=orderbook_snapshot.v1" / "tier=L1"
+        / "schema_version=orderbook_snapshot.v1" / "tier=L1"
         / f"exchange={exchange}" / f"symbol={symbol}" / f"date={date_str}"
         / "node=node-1"
     )
@@ -307,7 +302,7 @@ def test_l3_compact_day_date_utc_explicit(tmp_data_root: Path) -> None:
 
     l2_dir = (
         root / "market" / channel
-        / f"schema_version=orderbook_snapshot.v1" / "tier=L2"
+        / "schema_version=orderbook_snapshot.v1" / "tier=L2"
         / f"exchange={exchange}" / f"symbol={symbol}" / f"date={date_str}"
         / "hour=10" / "node=MERGED"
     )
@@ -385,8 +380,8 @@ def test_l2_streaming_write_oom_safe(tmp_data_root: Path, sample_orderbookdepth_
     # Create L1 parquet with 60k rows
     l1_dir = (
         root / "market" / channel
-        / f"schema_version=orderbook_depth.v1" / "tier=L1"
-        / f"exchange={exchange}" / f"symbol={symbol}" / f"date=2026-05-10"
+        / "schema_version=orderbook_depth.v1" / "tier=L1"
+        / f"exchange={exchange}" / f"symbol={symbol}" / "date=2026-05-10"
         / "node=node-1"
     )
     l1_dir.mkdir(parents=True, exist_ok=True)
@@ -396,7 +391,6 @@ def test_l2_streaming_write_oom_safe(tmp_data_root: Path, sample_orderbookdepth_
 
     # Compact to L2
     l2_compactor = L2Compactor(root=root)
-    now = datetime(2026, 5, 10, 17, 55, tzinfo=timezone.utc)
 
     # MCT-160 D2: date_utc=date, hour_utc=int
     out_path = l2_compactor.compact_hour(
@@ -461,8 +455,8 @@ def test_post_write_monotonic_verify_quarantine(tmp_data_root: Path, sample_non_
     # Create L1 parquet with non-monotonic ts_utc
     l1_dir = (
         root / "market" / channel
-        / f"schema_version=orderbook_depth.v1" / "tier=L1"
-        / f"exchange={exchange}" / f"symbol={symbol}" / f"date=2026-05-10"
+        / "schema_version=orderbook_depth.v1" / "tier=L1"
+        / f"exchange={exchange}" / f"symbol={symbol}" / "date=2026-05-10"
         / "node=node-1"
     )
     l1_dir.mkdir(parents=True, exist_ok=True)
@@ -472,7 +466,6 @@ def test_post_write_monotonic_verify_quarantine(tmp_data_root: Path, sample_non_
 
     # Compact to L2 — should detect non-monotonic and quarantine (not raise)
     l2_compactor = L2Compactor(root=root)
-    now = datetime(2026, 5, 10, 17, 55, tzinfo=timezone.utc)
 
     # Reset prometheus counter for this test
     try:
@@ -484,7 +477,7 @@ def test_post_write_monotonic_verify_quarantine(tmp_data_root: Path, sample_non_
     # Call compact_hour — expect return (not raise)
     # In Phase 2 impl, if non-monotonic is detected, this should quarantine and return None
     # MCT-160 D2: date_utc=date, hour_utc=int
-    result = l2_compactor.compact_hour(
+    _result = l2_compactor.compact_hour(
         exchange=exchange,
         symbol=symbol,
         channel=channel,
@@ -531,8 +524,8 @@ def test_dispatch_dual_write_caller_sha256_streaming(tmp_data_root: Path) -> Non
 
     l2_dir = (
         root / "market" / channel
-        / f"schema_version=orderbook_depth.v1" / "tier=L2"
-        / f"exchange={exchange}" / f"symbol={symbol}" / f"date=2026-05-10"
+        / "schema_version=orderbook_depth.v1" / "tier=L2"
+        / f"exchange={exchange}" / f"symbol={symbol}" / "date=2026-05-10"
         / "hour=17" / "node=MERGED"
     )
     l2_dir.mkdir(parents=True, exist_ok=True)
@@ -562,7 +555,7 @@ def test_dispatch_dual_write_caller_sha256_streaming(tmp_data_root: Path) -> Non
     # D6 verify: caller-side sha256 streaming via 8192-byte chunks (not read_bytes)
     # DualWriter is TYPE_CHECKING-only import in runner.py — mock via mock_instance directly.
     mock_instance = mock.MagicMock()
-    runner = CompactorRunner(root=root, dual_writer=mock_instance)
+    _runner = CompactorRunner(root=root, dual_writer=mock_instance)
 
     # Calculate expected sha256 via streaming (D6 pattern: no full read_bytes)
     sha = hashlib.sha256()

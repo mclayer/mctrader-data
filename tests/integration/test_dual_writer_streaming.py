@@ -31,7 +31,6 @@ ADR-027 D6 amendment (R-EXTRA):
 from __future__ import annotations
 
 import hashlib
-import tempfile
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -44,7 +43,6 @@ import pyarrow.parquet as pq
 from mctrader_data.compactor.l1 import _ORDERBOOKDEPTH_SCHEMA
 from mctrader_data.nas_storage.dual_writer import DualWriter, DualWriteResult
 from mctrader_data.nas_storage.nas_uploader import NASUploader, PutResult
-from mctrader_data.nas_storage.retry_queue import RetryQueue
 
 
 # ============================================================================
