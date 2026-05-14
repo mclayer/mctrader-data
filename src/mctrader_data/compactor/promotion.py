@@ -2,11 +2,14 @@
 """promotion.py — L1 tier promotion: NAS HEAD verify + immediate local delete (D3=C).
 
 MCT-169 (EPIC-tier-promotion-single-source Story-3).
+MCT-172 (D8-5=A): ambiguity invariant check 함수 제거 — InvariantHarness SSOT 단일화.
+
 ADR-029:
   D3=C: Local delete = NAS HEAD verify + grace 0 (immediate after verify).
         version/etag 검증으로 24h grace 대체, ambiguity 즉시 차단.
   D10=A: ambiguity invariant violation enforcement.
          NAS+local 동시 존재 = AmbiguityViolation raise.
+         SSOT: InvariantHarness._check_ambiguity() (MCT-171 LAND, MCT-172 cleanup).
 
 Invariants:
   INV-1: ∀ segment, nas_exists ⊕ local_exists = true (XOR)
@@ -18,7 +21,6 @@ Invariants:
 AC coverage (MCT-169 §6):
   AC-1: s3.head_object → ETag + VersionId verify 시 promotion proceed
   AC-2: HEAD verify pass 즉시 Path.unlink(missing_ok=False), time.sleep 0
-  AC-3: verify_no_ambiguity — NAS+local 동시 존재 = AmbiguityViolation
   AC-7: HEAD 404 or non-404 ClientError = PromotionVerifyError, local delete 미실행
   R-2:  HEAD retry 1회 (50ms backoff) 후 fail → PromotionVerifyError
 
@@ -174,58 +176,6 @@ def promote_l1(
     )
 
 
-def verify_no_ambiguity(
-    *,
-    segment_id: str,
-    nas_uploader: NASUploader,
-    nas_key: str,
-    local_path: Path,
-) -> None:
-    """D10=A: ambiguity invariant check — NAS+local 동시 존재 = AmbiguityViolation (INV-1).
-
-    DEPRECATED (MCT-171): InvariantHarness._check_ambiguity() 에 SSOT 흡수됨.
-    본 함수는 backward compat 유지 목적으로 보존 (MCT-169 D10 caller 회귀 0, INV-4).
-    신규 caller는 InvariantHarness.verify() 경유 사용 의무 (D7-1=A).
-
-    Caller 목록 (MCT-169 D10 test):
-    - tests/integration/compactor/test_ambiguity_invariant.py (MCT-169 D10)
-
-    INV-1 SoT exclusivity: nas_exists ⊕ local_exists = true (XOR).
-    NAS HEAD success ∧ local_path.exists() → raise AmbiguityViolation.
-
-    Note: NAS HEAD 404 or HEAD fail = nas_exists=False (no ambiguity).
-    Note: local 부재 + NAS 존재 = valid (post-promotion state).
-    Note: local 존재 + NAS 부재 = valid (pre-promotion state).
-    Note: 둘 다 부재 = valid (empty/cleaned state).
-
-    Args:
-        segment_id: 논리적 segment ID (logging + audit)
-        nas_uploader: NASUploader 인스턴스 (head_object 접근용)
-        nas_key: NAS object key
-        local_path: local 파일 경로
-
-    Raises:
-        AmbiguityViolation: NAS+local 동시 존재 (D10=A, INV-1 파괴)
-    """
-    local_exists = local_path.exists()
-
-    # NAS HEAD 확인 (404 = NAS 없음, 그 외 오류 = 검증 불가 → ambiguity 아님으로 처리)
-    nas_exists = _check_nas_exists(nas_uploader=nas_uploader, nas_key=nas_key)
-
-    if nas_exists and local_exists:
-        raise AmbiguityViolation(
-            f"D10=A ambiguity violation: segment_id={segment_id!r} "
-            f"nas_key={nas_key!r} local_path={local_path!r} — "
-            f"NAS+local 동시 존재 = SoT exclusivity 파괴 (INV-1). "
-            f"promote_l1() 실행 후 재확인 의무."
-        )
-
-    log.debug(
-        "[promotion] verify_no_ambiguity OK: segment=%s nas_exists=%s local_exists=%s",
-        segment_id, nas_exists, local_exists,
-    )
-
-
 # ─── internal helpers ─────────────────────────────────────────────────────────
 
 
@@ -288,36 +238,3 @@ def _head_with_retry(
     )
 
 
-def _check_nas_exists(
-    *,
-    nas_uploader: NASUploader,
-    nas_key: str,
-) -> bool:
-    """NAS HEAD 존재 여부 확인 (verify_no_ambiguity 용).
-
-    Returns:
-        True: HEAD 200 (NAS에 오브젝트 존재)
-        False: HEAD 404 or any error (NAS 없음 또는 확인 불가 → ambiguity 아님으로 처리)
-    """
-    try:
-        client = nas_uploader._get_client()  # type: ignore[attr-defined]
-        bucket = nas_uploader.bucket
-        client.head_object(Bucket=bucket, Key=nas_key)
-        return True
-    except ClientError as exc:
-        code = exc.response.get("Error", {}).get("Code", "")
-        if code == "404":
-            return False
-        # non-404 → 확인 불가, 안전하게 False (ambiguity 검출 오탐 회피)
-        log.warning(
-            "[promotion] _check_nas_exists ClientError code=%s key=%s — treating as not exists",
-            code, nas_key,
-        )
-        return False
-    except Exception:
-        # 연결 오류 등 → 안전하게 False
-        log.warning(
-            "[promotion] _check_nas_exists unexpected error key=%s — treating as not exists",
-            nas_key, exc_info=True,
-        )
-        return False

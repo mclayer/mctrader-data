@@ -34,7 +34,6 @@ from unittest.mock import MagicMock
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-import pytest
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
@@ -462,31 +461,37 @@ class TestInvariantHarness8BackwardCompat:
             )
 
     def test_mct169_d10_regression(self, tmp_path: Path) -> None:
-        """MCT-169 D10: promotion.py verify_no_ambiguity() 기존 caller 회귀 0.
+        """MCT-169 D10 caller 회귀 0 — MCT-172 D8-5=A migrate.
 
-        verify_no_ambiguity는 promotion.py 에서 여전히 import 가능해야 한다.
-        Deprecate 이후에도 기존 caller (MCT-169 test) 가 동작해야 함.
+        MCT-172: verify_no_ambiguity 제거됨 (promotion.py). caller 는
+        InvariantHarness._check_ambiguity() SSOT 경유 의무.
+
+        NAS+local 동시 존재 → result.status == "fail" (= ambiguity_fail at verify() level).
         """
-        from mctrader_data.compactor.promotion import AmbiguityViolation, verify_no_ambiguity
+        from mctrader_data.nas_migration.invariant_harness import InvariantHarness
 
         local_file = tmp_path / "part-regression.parquet"
         local_file.write_bytes(b"fake parquet")
 
-        mock_client = MagicMock()
-        mock_client.head_object.return_value = {
-            "ETag": '"etag123"',
-            "VersionId": "v1",
-            "ContentLength": 12,
-        }
-        mock_uploader = MagicMock()
-        mock_uploader._get_client.return_value = mock_client
-        mock_uploader.bucket = "mctrader-market"
+        mock_uploader = _make_nas_uploader_mock(
+            head_exists=True,
+            nas_objects=["l1/market/part-regression.parquet"],
+        )
 
-        # NAS+local 동시 존재 → AmbiguityViolation (MCT-169 D10)
-        with pytest.raises(AmbiguityViolation):
-            verify_no_ambiguity(
-                segment_id="regression-test",
-                nas_uploader=mock_uploader,
-                nas_key="l1/market/part-regression.parquet",
-                local_path=local_file,
-            )
+        harness = InvariantHarness(
+            nas_uploader=mock_uploader,
+            local_root=tmp_path,
+            expected_schema_version=("ohlcv.v1", "v1"),
+        )
+
+        result = harness._check_ambiguity(
+            local_partition=tmp_path,
+            nas_partition="l1/market",
+            local_files=[local_file],
+        )
+
+        assert result.status == "fail", (
+            f"NAS+local 동시 존재 → ambiguity fail 기대. status={result.status!r}"
+        )
+        assert result.invariant_name == "ambiguity"
+        assert len(result.mismatch_files) > 0
