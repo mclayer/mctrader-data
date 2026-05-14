@@ -620,8 +620,42 @@ def collect(
 @click.option("--root", envvar="MCTRADER_DATA_ROOT", required=True, type=click.Path())
 @click.option("--once", is_flag=True, default=False, help="Run one scan cycle then exit.")
 @click.option("--log-level", default="INFO")
-def compact_cmd(root: str, once: bool, log_level: str) -> None:
-    """Run the WAL compactor (L1/L2/L3 tiered compaction)."""
+@click.option(
+    "--backfill",
+    is_flag=True,
+    default=False,
+    help="MCT-173 D1=B: One-shot backfill mode — process frozen WAL sealed segments into L1 parquets.",
+)
+@click.option(
+    "--exchange",
+    default="upbit",
+    help="Exchange to backfill (default: upbit, backfill mode only).",
+)
+@click.option(
+    "--tier",
+    default="L1",
+    help="Tier to produce in backfill mode (default: L1).",
+)
+@click.option(
+    "--channel",
+    default="orderbooksnapshot",
+    help="WAL channel to backfill (default: orderbooksnapshot).",
+)
+def compact_cmd(
+    root: str,
+    once: bool,
+    log_level: str,
+    backfill: bool,
+    exchange: str,
+    tier: str,
+    channel: str,
+) -> None:
+    """Run the WAL compactor (L1/L2/L3 tiered compaction).</p>
+
+    Use --backfill to run a one-shot historical materialization pass:
+    processes all frozen (sealed, not yet compacted) WAL segments into
+    L1 parquets. Idempotent: re-running skips already-compacted segments.
+    """
     import asyncio
     import logging
     from pathlib import Path
@@ -670,6 +704,34 @@ def compact_cmd(root: str, once: bool, log_level: str) -> None:
         log.warning(
             "[compactor] NAS_MINIO_ENDPOINT not set — L2/L3 NAS upload disabled (degraded mode)"
         )
+
+    # MCT-173 D1=B: --backfill mode — one-shot historical materialization
+    if backfill:
+        from mctrader_data.compactor.runner import run_backfill
+        log.info(
+            "[backfill] mode activated exchange=%s tier=%s channel=%s root=%s",
+            exchange, tier, channel, root,
+        )
+        result = run_backfill(
+            root=Path(root),
+            exchange=exchange,
+            tier=tier,
+            channel=channel,
+        )
+        log.info(
+            "[backfill] DONE processed=%d skipped=%d l1_parquets=%d date=%s~%s",
+            result.segments_processed,
+            result.segments_skipped,
+            result.l1_parquets_created,
+            result.date_range_start,
+            result.date_range_end,
+        )
+        click.echo(
+            f"[backfill] complete: {result.segments_processed} segments processed, "
+            f"{result.l1_parquets_created} L1 parquets created, "
+            f"date_range={result.date_range_start}~{result.date_range_end}"
+        )
+        return
 
     async def _run() -> None:
         runner = CompactorRunner(Path(root), dual_writer=dual_writer)
