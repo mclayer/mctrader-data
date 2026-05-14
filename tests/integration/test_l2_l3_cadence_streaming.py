@@ -96,7 +96,7 @@ from mctrader_data.compactor.runner import CompactorRunner
 # ============================================================================
 
 @pytest.fixture
-def tmp_data_root(tmp_path: Path) -> Path:
+def tmp_data_root(tmp_path: Path):  # type: ignore[override]
     """Temporary data root (market + wal subdirectories).
 
     Uses a short path to avoid Windows MAX_PATH=260 limit when deep partition
