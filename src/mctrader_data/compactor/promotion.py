@@ -183,6 +183,13 @@ def verify_no_ambiguity(
 ) -> None:
     """D10=A: ambiguity invariant check — NAS+local 동시 존재 = AmbiguityViolation (INV-1).
 
+    DEPRECATED (MCT-171): InvariantHarness._check_ambiguity() 에 SSOT 흡수됨.
+    본 함수는 backward compat 유지 목적으로 보존 (MCT-169 D10 caller 회귀 0, INV-4).
+    신규 caller는 InvariantHarness.verify() 경유 사용 의무 (D7-1=A).
+
+    Caller 목록 (MCT-169 D10 test):
+    - tests/integration/compactor/test_ambiguity_invariant.py (MCT-169 D10)
+
     INV-1 SoT exclusivity: nas_exists ⊕ local_exists = true (XOR).
     NAS HEAD success ∧ local_path.exists() → raise AmbiguityViolation.
 

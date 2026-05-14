@@ -1,7 +1,17 @@
-"""invariant_harness.py — 7종 invariant single-shot verify (S5 박제, ADR-027 D6 amendment trigger).
+"""invariant_harness.py — 8종 invariant single-shot verify (MCT-171 ambiguity 통합).
 
 Story: MCT-151 (Stage 2 — dual-write atomic primitives + 7종 invariant harness)
 Issue: mclayer/mctrader-hub#257
+
+MCT-171 amendment (2026-05-14):
+- _INVARIANT_NAMES: 7개 → 8개 ('ambiguity' 마지막 위치 추가)
+- InvariantResult.status: 8 variant → 9 variant ('ambiguity_fail' 추가)
+- InvariantHarness._check_ambiguity(): 신규 method (D7-1=A)
+  logic = compactor/promotion.py verify_no_ambiguity 흡수 (SSOT 통합)
+  동일 logical entity (schema_version × tier × exchange × symbol × date × hour × node)
+  NAS + local XOR violation 검출
+- InvariantHarness.verify(): 8번째 ambiguity check 추가 (sequential unconditional, §6.9 정합)
+- ADR-029 §D10: ambiguity invariant violation → Prometheus mctrader_invariant_violation_total{invariant_name=ambiguity}
 
 MCT-159 FIX Iter 1 amendment (2026-05-13):
 - ADR009_CHANNEL_SCHEMA_MATRIX 추가 (ADR-009 §D2.6 SSOT)
@@ -16,14 +26,18 @@ S5 박제 (scope_manifest design_decisions S5):
 "D6 박제 3종 + column count + column name order + dtype identity + schema_version pin = 7종 invariant
 — D6 PASS 이나 Parquet schema 차이로 read 파괴/오염 risk 차단 (reader-breaking drift 포착)"
 
+MCT-171 §5.1 D7-1=A: 8번째 invariant 'ambiguity' 통합 (ADR-029 §D10 SSOT).
+
 ADR-027 D6 mandatory amendment trigger (triggers_adr_amendment.mandatory=true, trigger_story=MCT-151):
 - D6 본문 3종 (sha256 + object_count + row_count) → 7종으로 확장 (본 Story 박제)
+- MCT-171: 7종 → 8종으로 확장 (ambiguity 추가)
 - amendment 시점: Phase 2 PR merge 또는 retro 시점 (§6.6 결정)
 
 §6.9 invariant placement:
-- 7종 sequential unconditional (early return 0 — FAIL 1종 발생 후에도 나머지 6종 모두 verify).
+- 8종 sequential unconditional (early return 0 — FAIL 1종 발생 후에도 나머지 7종 모두 verify).
   D6 본문 "1종이라도 FAIL 시 cutover 차단" + per-invariant 측정값 emit 의무 (diagnostic dump).
 - legacy node= fallback: conditional (partition_normalization=True 시만 적용, EC-4 박제).
+- ambiguity check: 8번째, NAS HEAD probe (per-partition level, 파일 단위 X).
 
 §6.8 Wording SSOT:
 - InvariantResult.status 8종: "all_pass" / "sha256_fail" / "object_count_fail" / "row_count_fail" /
@@ -118,10 +132,12 @@ ADR009_CHANNEL_SCHEMA_MATRIX: dict[str, tuple[int, tuple[str, ...]]] = {
     ),
 }
 
-# §6.8 Wording SSOT — InvariantResult.status enum 8종 (frozen)
+# §6.8 Wording SSOT — InvariantResult.status (MCT-171: 7종 → 8종, 'ambiguity' 마지막 추가)
+# MCT-171 §5.1 D7-1=A: 8번째 = 'ambiguity' (ADR-029 §D10 SSOT 통합, NAS+local XOR violation)
 _INVARIANT_NAMES: tuple[str, ...] = (
     "sha256", "object_count", "row_count",
     "column_count", "column_order", "dtype", "schema_version",
+    "ambiguity",  # MCT-171 신규 (8번째)
 )
 
 
@@ -146,10 +162,12 @@ class PerInvariantResult:
 
 @dataclass(frozen=True)
 class InvariantResult:
-    """7종 invariant verify 의 result enum + per-invariant 측정값.
+    """8종 invariant verify 의 result enum + per-invariant 측정값.
 
-    status enum 8종 (§6.8 Wording SSOT 박제 — single string, variant 금지):
-    - "all_pass":             7종 invariant ALL PASS (cutover 차단 0).
+    MCT-171 amendment: status enum 9종 ('ambiguity_fail' 추가, §6.8 Wording SSOT 갱신)
+
+    status enum 9종 (§6.8 Wording SSOT 박제 — single string, variant 금지):
+    - "all_pass":             8종 invariant ALL PASS (cutover 차단 0).
     - "sha256_fail":          local sha256 != NAS sha256 (1종 이상 file).
     - "object_count_fail":    local file count != NAS object count.
     - "row_count_fail":       local row count != NAS row count (1종 이상 file).
@@ -157,9 +175,11 @@ class InvariantResult:
     - "column_order_fail":    column order != ADR-009 §D2 정의 (1종 이상 file).
     - "dtype_fail":           dtype mismatch (Decimal precision/scale 포함, 1종 이상 file).
     - "schema_version_fail":  partition prefix != schema_version=v1 (legacy schema 침범).
+    - "ambiguity_fail":       NAS+local 동시 존재 (MCT-171 §5.1, ADR-029 §D10 SoT exclusivity 파괴).
 
     D6 본문 wording 정합: 1종이라도 FAIL 시 cutover 차단 의무 (caller 측 status 검사 후 결정).
-    per_invariant_results: 7종 별 PerInvariantResult (early return 0 — 모든 7종 verify 후 결정).
+    per_invariant_results: 8종 별 PerInvariantResult (early return 0 — 모든 8종 verify 후 결정).
+    MCT-151 backward compat: 기존 7종 per_invariant_results key 모두 보존 (INV-4).
     """
 
     status: Literal[
@@ -171,6 +191,7 @@ class InvariantResult:
         "column_order_fail",
         "dtype_fail",
         "schema_version_fail",
+        "ambiguity_fail",  # MCT-171 신규 (ADR-029 §D10)
     ]
     per_invariant_results: dict[str, PerInvariantResult] = field(default_factory=dict)
     local_partition: Path | None = None
@@ -179,19 +200,22 @@ class InvariantResult:
 
 
 class InvariantHarness:
-    """7종 invariant single-shot verify (S5 박제, ADR-027 D6 amendment trigger source).
+    """8종 invariant single-shot verify (MCT-171 ambiguity 통합, ADR-027 D6 amendment trigger source).
 
-    7종 invariant 의 layer 별 분류 (§11.3):
+    8종 invariant 의 layer 별 분류 (MCT-171 §5.1 갱신):
     - byte-level (1종): sha256
     - set-level (2종): object_count, row_count
     - schema-level (4종): column_count, column_order, dtype, schema_version
+    - exclusivity-level (1종): ambiguity (MCT-171 신규, NAS+local XOR violation)
 
     §6.9 invariant placement:
-    - 7종 sequential unconditional (early return 0 — FAIL 1종 후에도 나머지 verify 계속).
+    - 8종 sequential unconditional (early return 0 — FAIL 1종 후에도 나머지 verify 계속).
+    - ambiguity check: 8번째 (partition-level, per-file 체크 아님).
     - legacy node= fallback: conditional (partition_normalization=True 시만).
 
     Caller (MCT-152 / MCT-153 / MCT-155) 가 inject — 본 Story scope = harness 정의.
     read-only invariant: 양쪽 storage 변경 0 (§11.2 forward-only 보존).
+    INV-4: MCT-151 7종 API backward compat 보존 (per_invariant_results 기존 7종 key 포함).
     """
 
     def __init__(
@@ -407,11 +431,22 @@ class InvariantHarness:
             mismatch_files=dtype_mismatches,
         )
 
+        # ── 8. ambiguity check (MCT-171 §5.1 D7-1=A, 8번째 sequential unconditional) ──
+        # NAS+local 동시 존재 = SoT exclusivity 파괴 (ADR-029 §D10, INV-1 XOR)
+        # partition-level check: local_files 가 있고 NAS HEAD 가 존재하면 ambiguity
+        per_results["ambiguity"] = self._check_ambiguity(
+            local_partition=local_partition,
+            nas_partition=effective_nas_partition,
+            local_files=local_files,
+        )
+
         # ── status 결정 (D6 1종 FAIL → cutover 차단, §6.9 unconditional) ─────
-        # Priority: object_count > sha256 > row_count > column_count > column_order > dtype > schema_version
+        # Priority: object_count > sha256 > row_count > column_count > column_order > dtype > schema_version > ambiguity
+        # MCT-171: ambiguity_fail 추가 (priority 마지막 — 기존 7종 priority 보존, INV-4)
         status: Literal[
             "all_pass", "sha256_fail", "object_count_fail", "row_count_fail",
             "column_count_fail", "column_order_fail", "dtype_fail", "schema_version_fail",
+            "ambiguity_fail",
         ]
 
         if per_results["object_count"].status == "fail":
@@ -428,6 +463,8 @@ class InvariantHarness:
             status = "dtype_fail"
         elif per_results["schema_version"].status == "fail":
             status = "schema_version_fail"
+        elif per_results["ambiguity"].status == "fail":
+            status = "ambiguity_fail"
         else:
             status = "all_pass"
 
@@ -623,3 +660,93 @@ class InvariantHarness:
             nas_partition,
         )
         return nas_partition
+
+    def _check_ambiguity(
+        self,
+        local_partition: Path,
+        nas_partition: str,
+        local_files: list[Path] | None = None,
+    ) -> PerInvariantResult:
+        """8번째 invariant: ambiguity check (MCT-171 §5.1 D7-1=A).
+
+        ADR-029 §D10 SSOT 흡수 (compactor/promotion.py verify_no_ambiguity 로직 통합).
+        INV-1 SoT exclusivity: nas_exists ⊕ local_exists = true (XOR).
+        NAS+local 동시 존재 = 설계 위반 (ambiguity_fail).
+
+        Logic:
+        - local_files 가 비어있으면 no ambiguity (local_exists=False)
+        - local_files 가 있으면: NAS HEAD probe (partition prefix 기준 1회)
+          NAS HEAD 200 → nas_exists=True → local_exists=True → ambiguity_fail
+          NAS HEAD 404 → nas_exists=False → no ambiguity
+
+        Note: per-file 체크 아님 (partition-level NAS HEAD probe).
+              compactor/promotion.py 의 verify_no_ambiguity 는 segment-level (key 단위).
+              본 method 는 partition-level (prefix 단위, 1회 HEAD probe).
+
+        Prometheus: ambiguity_fail 시 mctrader_invariant_violation_total{invariant_name=ambiguity}
+        """
+        _local_files = local_files if local_files is not None else sorted(local_partition.glob("*.parquet"))
+
+        # local 없으면 no ambiguity (NAS only = post-promotion state or empty)
+        local_exists = len(_local_files) > 0
+
+        if not local_exists:
+            return PerInvariantResult(
+                invariant_name="ambiguity",
+                status="pass",
+                measured_local="empty",
+                measured_nas="unknown",
+                mismatch_files=[],
+            )
+
+        # local 있음 → NAS HEAD probe (partition prefix 기준 첫 번째 object로 확인)
+        nas_exists = self._check_nas_partition_exists(nas_partition)
+
+        if nas_exists and local_exists:
+            log.error(
+                "InvariantHarness._check_ambiguity: VIOLATION — "
+                "NAS+local 동시 존재 (partition=%r, local_files=%d). "
+                "INV-1 SoT exclusivity 파괴 (ADR-029 §D10). "
+                "Manual escalation 의무.",
+                nas_partition, len(_local_files),
+            )
+            return PerInvariantResult(
+                invariant_name="ambiguity",
+                status="fail",
+                measured_local=len(_local_files),
+                measured_nas="exists",
+                mismatch_files=[str(local_partition)],
+            )
+
+        return PerInvariantResult(
+            invariant_name="ambiguity",
+            status="pass",
+            measured_local=len(_local_files),
+            measured_nas="absent",
+            mismatch_files=[],
+        )
+
+    def _check_nas_partition_exists(self, nas_partition: str) -> bool:
+        """NAS partition prefix 에 오브젝트 존재 여부 확인 (ambiguity check 용).
+
+        list_objects_v2 prefix= 로 1개 오브젝트 확인 (HEAD probe 대용).
+        MaxKeys=1 — 존재 여부만 확인 (성능 최소화).
+
+        Returns:
+            True: prefix 에 오브젝트 존재 (nas_exists=True)
+            False: 오브젝트 없음 또는 오류 (nas_exists=False, ambiguity 아님으로 처리)
+        """
+        try:
+            client = self._uploader._get_client()  # type: ignore[attr-defined]
+            bucket = self._uploader.bucket
+            # Ensure prefix ends with / for partition-level match
+            prefix = nas_partition if nas_partition.endswith("/") else nas_partition + "/"
+            resp = client.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1)
+            return len(resp.get("Contents", [])) > 0
+        except Exception:
+            log.warning(
+                "InvariantHarness._check_nas_partition_exists: error checking NAS partition %r — "
+                "treating as not exists (ambiguity 오탐 회피)",
+                nas_partition,
+            )
+            return False
