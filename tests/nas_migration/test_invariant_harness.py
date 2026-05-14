@@ -311,7 +311,7 @@ class TestInvariantHarnessAllPass:
             f"Expected all_pass but got {result.status!r}. "
             f"per_invariant_results={result.per_invariant_results}"
         )
-        assert len(result.per_invariant_results) == 7
+        assert len(result.per_invariant_results) == 8  # MCT-171: 'ambiguity' 8th invariant added
         for inv_name, inv_result in result.per_invariant_results.items():
             assert inv_result.status == "pass", f"Invariant {inv_name!r} failed: {inv_result}"
 
@@ -340,8 +340,8 @@ class TestInvariantHarnessAllPass:
 
         # sha256 or object_count or row_count fail (NAS data is invalid parquet → expect some fail)
         assert result.status != "all_pass"
-        # per_invariant_results must contain all 7 keys (early return 0)
-        assert len(result.per_invariant_results) == 7
+        # per_invariant_results must contain all 8 keys (early return 0) — MCT-171: 'ambiguity' 8th
+        assert len(result.per_invariant_results) == 8
 
 
 # ─── sha256 invariant ─────────────────────────────────────────────────────────
@@ -610,8 +610,8 @@ class TestInvariantHarnessDtype:
 
         result = harness.verify(local_partition=part, nas_partition="schema_version=v1/p11")
 
-        # §6.9 early return 0: 7종 모두 verify → per_invariant_results["dtype"] 검증
-        assert len(result.per_invariant_results) == 7
+        # §6.9 early return 0: 8종 모두 verify → per_invariant_results["dtype"] 검증 (MCT-171: 'ambiguity' 8th)
+        assert len(result.per_invariant_results) == 8
         dt = result.per_invariant_results["dtype"]
         assert dt.status == "fail", (
             f"dtype invariant must be 'fail' for Decimal(38,9) vs Decimal(38,8) mismatch, "
@@ -704,7 +704,7 @@ class TestInvariantHarnessLegacyNodeFallback:
         # (actual pass/fail depends on sha256 + other invariants)
         # Key assertion: no crash + per_invariant_results returned
         assert result.per_invariant_results is not None
-        assert len(result.per_invariant_results) == 7
+        assert len(result.per_invariant_results) == 8  # MCT-171: 'ambiguity' 8th invariant added
 
 
 # ─── §8.5 active: verify idempotent ──────────────────────────────────────────

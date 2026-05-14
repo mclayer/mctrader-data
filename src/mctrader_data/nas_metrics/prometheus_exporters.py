@@ -90,6 +90,55 @@ ALLOWED_REASONS = frozenset(
     ["endpoint_unreachable", "auth_failed", "quota_exceeded", "unknown"]
 )
 
+# ─── MCT-171 신규 global metrics (capacity + invariant violation + ingest blocked) ─────
+# AC-5 cardinality 제한: label enum hardcoded, free-form label 금지
+
+# mctrader_capacity_usage_bytes{layer=<4 enum>} Gauge
+# layer enum = LAYER_NAMES from capacity_probe.py SSOT
+mctrader_capacity_usage_bytes = Gauge(
+    "mctrader_capacity_usage_bytes",
+    "4 layer capacity usage in bytes (MCT-171 D11 ADR-029)",
+    ["layer"],  # 4 enum: WAL_local / L1_local / NAS_bucket / Host_disk
+)
+
+# mctrader_capacity_threshold_ratio{layer=<4 enum>} Gauge
+mctrader_capacity_threshold_ratio = Gauge(
+    "mctrader_capacity_threshold_ratio",
+    "4 layer capacity threshold ratio 0.0-1.0 (MCT-171 D11)",
+    ["layer"],  # 4 enum: WAL_local / L1_local / NAS_bucket / Host_disk
+)
+
+# mctrader_invariant_violation_total{invariant_name=<8 enum>} Counter
+# invariant_name enum = _INVARIANT_NAMES from invariant_harness.py (8종)
+mctrader_invariant_violation_total = Counter(
+    "mctrader_invariant_violation_total",
+    "Invariant violation count by invariant name (MCT-171 8종 통합)",
+    ["invariant_name"],  # 8 enum: sha256/object_count/row_count/column_count/column_order/dtype/schema_version/ambiguity
+)
+
+# mctrader_invariant_check_latency_ms Histogram (no label — latency distribution)
+mctrader_invariant_check_latency_ms = Histogram(
+    "mctrader_invariant_check_latency_ms",
+    "InvariantHarness.verify() latency in ms (MCT-171 AC-1)",
+    buckets=[1, 5, 10, 50, 100, 500, 1000, 5000, 30000],
+)
+
+# mctrader_ingest_blocked_total{reason=<3 enum>} Counter
+# reason enum: wal_full / l1_full / nas_unreachable
+mctrader_ingest_blocked_total = Counter(
+    "mctrader_ingest_blocked_total",
+    "Ingest block count by reason (MCT-171 D5 + D7-5=B)",
+    ["reason"],  # 3 enum: wal_full / l1_full / nas_unreachable
+)
+
+# Cardinality 제한 enforce (AC-5 §D7-6)
+_ALLOWED_LAYERS = frozenset(["WAL_local", "L1_local", "NAS_bucket", "Host_disk"])
+_ALLOWED_INVARIANT_NAMES = frozenset([
+    "sha256", "object_count", "row_count", "column_count",
+    "column_order", "dtype", "schema_version", "ambiguity",
+])
+_ALLOWED_BLOCK_REASONS = frozenset(["wal_full", "l1_full", "nas_unreachable"])
+
 # §8.3: latency histogram buckets (0.05s=50ms ... 10s, §6.2.3 박제)
 _LATENCY_BUCKETS = (0.05, 0.1, 0.5, 1.0, 3.0, 10.0)
 
@@ -620,3 +669,72 @@ class PrometheusExporter:
         """
         self._ensure_backfill_metrics()
         self._bf_resumable.inc(count)
+
+    # ─── MCT-171 신규 method (capacity + invariant violation + ingest blocked) ──
+    # AC-5: Prometheus metric 4종 + cardinality 제한 enforce (D7-6)
+
+    def emit_capacity_usage(self, layer: str, bytes_val: int) -> None:
+        """mctrader_capacity_usage_bytes{layer} Gauge set (MCT-171 AC-5).
+
+        Args:
+            layer: LAYER_NAMES enum (WAL_local/L1_local/NAS_bucket/Host_disk)
+            bytes_val: usage in bytes
+
+        Cardinality 제한: layer ∉ _ALLOWED_LAYERS → fail-fast assertion (R4 mitigation).
+        """
+        assert layer in _ALLOWED_LAYERS, (
+            f"capacity_usage: invalid layer label '{layer}'. "
+            f"Allowed: {_ALLOWED_LAYERS} (cardinality limit enforce, AC-5)"
+        )
+        mctrader_capacity_usage_bytes.labels(layer=layer).set(bytes_val)
+
+    def emit_capacity_ratio(self, layer: str, ratio: float) -> None:
+        """mctrader_capacity_threshold_ratio{layer} Gauge set (MCT-171 AC-5).
+
+        Args:
+            layer: LAYER_NAMES enum
+            ratio: 0.0 ~ 1.0+ (usage / hard_limit)
+
+        Cardinality 제한: layer ∉ _ALLOWED_LAYERS → fail-fast.
+        """
+        assert layer in _ALLOWED_LAYERS, (
+            f"capacity_ratio: invalid layer label '{layer}'. "
+            f"Allowed: {_ALLOWED_LAYERS} (cardinality limit enforce, AC-5)"
+        )
+        mctrader_capacity_threshold_ratio.labels(layer=layer).set(ratio)
+
+    def emit_invariant_violation(self, invariant_name: str) -> None:
+        """mctrader_invariant_violation_total{invariant_name} Counter +1 (MCT-171 AC-1).
+
+        Args:
+            invariant_name: _INVARIANT_NAMES 8 enum
+
+        Cardinality 제한: invariant_name ∉ _ALLOWED_INVARIANT_NAMES → fail-fast.
+        """
+        assert invariant_name in _ALLOWED_INVARIANT_NAMES, (
+            f"invariant_violation: invalid invariant_name '{invariant_name}'. "
+            f"Allowed: {_ALLOWED_INVARIANT_NAMES} (cardinality limit enforce, AC-5)"
+        )
+        mctrader_invariant_violation_total.labels(invariant_name=invariant_name).inc()
+
+    def emit_invariant_check_latency(self, latency_ms: float) -> None:
+        """mctrader_invariant_check_latency_ms Histogram observe (MCT-171 AC-1).
+
+        Args:
+            latency_ms: InvariantHarness.verify() latency in ms
+        """
+        mctrader_invariant_check_latency_ms.observe(latency_ms)
+
+    def emit_ingest_blocked(self, reason: str) -> None:
+        """mctrader_ingest_blocked_total{reason} Counter +1 (MCT-171 AC-3).
+
+        Args:
+            reason: block reason enum (wal_full/l1_full/nas_unreachable)
+
+        Cardinality 제한: reason ∉ _ALLOWED_BLOCK_REASONS → fail-fast.
+        """
+        assert reason in _ALLOWED_BLOCK_REASONS, (
+            f"ingest_blocked: invalid reason '{reason}'. "
+            f"Allowed: {_ALLOWED_BLOCK_REASONS} (cardinality limit enforce, AC-5)"
+        )
+        mctrader_ingest_blocked_total.labels(reason=reason).inc()

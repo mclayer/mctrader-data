@@ -14,6 +14,11 @@ Symbol selection:
 
 * explicit ``--symbols KRW-BTC,KRW-ETH,...`` list
 * OR ``--top-n 10`` queries Bithumb public ticker at startup, sorts by 24h volume
+
+MCT-171 D5=A_modified: IngestBlocker hook (1 callsite, hot path 영향 0).
+- ingest_blocker 인자 주입 시 _emit_to_wal 진입 전 should_block() 호출
+- True 시 ingest reject (Counter emit은 IngestBlocker 내부)
+- None 시 기존 동작 보존 (backward compat)
 """
 
 from __future__ import annotations
@@ -27,12 +32,16 @@ import os
 import socket
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from mctrader_market.types import Symbol
 
 from mctrader_data import adapters
 from mctrader_data.manifest import CollectorManifest
 from mctrader_data.wal.ingester import WalIngester
+
+if TYPE_CHECKING:
+    from mctrader_data.ingest_blocker import IngestBlocker
 
 log = logging.getLogger(__name__)
 
@@ -55,6 +64,7 @@ class CollectorDaemon:
         heartbeat_writer: object | None = None,
         coverage_stats_writer: object | None = None,
         redis_publisher: object | None = None,
+        ingest_blocker: IngestBlocker | None = None,  # MCT-171 D5=A_modified hook
     ) -> None:
         self._root = root
         self._exchange = exchange
@@ -68,6 +78,7 @@ class CollectorDaemon:
         self._heartbeat_writer = heartbeat_writer
         self._coverage_stats_writer = coverage_stats_writer
         self._redis_publisher = redis_publisher
+        self._ingest_blocker = ingest_blocker  # MCT-171: None = backward compat (기존 동작)
         self._resolved_node_id = node_id or os.environ.get("MCTRADER_NODE_ID") or socket.gethostname()
         self._wal_ingesters: dict[str, WalIngester] = self._build_ingesters()
         self._cancel_event = asyncio.Event()
@@ -122,6 +133,41 @@ class CollectorDaemon:
         self._cancel_event.set()
 
     def _emit_to_wal(self, event) -> None:  # type: ignore[no-untyped-def]
+        # MCT-171 D5=A_modified: IngestBlocker hook (1 callsite, hot path 영향 0)
+        # ingest_blocker=None 시 기존 동작 완전 보존 (backward compat)
+        if self._ingest_blocker is not None:
+            try:
+                # probe_once()는 blocker 내부 상태 기반 (빈번 호출 최소화 — blocker가 state 유지)
+                from mctrader_data.capacity_probe import CapacityReport
+                # should_block()은 최근 probe 결과 기반 상태 머신 평가 (probe 1회 호출)
+                _probe = getattr(self._ingest_blocker, "_probe", None)
+                if _probe is not None:
+                    _report = _probe.probe_once()
+                    if self._ingest_blocker.should_block(_report):
+                        log.warning(
+                            "[collector] ingest BLOCKED (capacity limit reached): "
+                            "exchange=%s symbol=%s event_kind=%s",
+                            self._exchange, self._symbol, getattr(event, "kind", "unknown"),
+                        )
+                        return  # reject ingest (D5=A_modified)
+                else:
+                    # probe 없이 blocker 직접 호출 (test mock 등)
+                    _dummy_report = CapacityReport(
+                        wal_usage_bytes=0, l1_usage_bytes=0,
+                        nas_usage_bytes=0, host_usage_bytes=0,
+                        wal_hard_bytes=30*(1024**3), l1_hard_bytes=20*(1024**3),
+                        nas_hard_bytes=1024*(1024**3), host_hard_bytes=200*(1024**3),
+                    )
+                    if self._ingest_blocker.should_block(_dummy_report):
+                        log.warning(
+                            "[collector] ingest BLOCKED (force_blocked): exchange=%s symbol=%s",
+                            self._exchange, self._symbol,
+                        )
+                        return
+            except Exception:
+                # IngestBlocker 오류가 hot path 영향 0 의무 (D5 INV-2)
+                log.debug("[collector] IngestBlocker.should_block() error — proceeding with ingest", exc_info=True)
+
         raw = getattr(event, "raw", None)
         if event.kind == "transaction":
             ingester = self._wal_ingesters.get("transaction")
