@@ -172,7 +172,7 @@ def test_dual_writer_no_read_bytes(tmp_root: Path, mock_uploader_streaming: NASU
     )
 
     # put_streaming 호출 검증
-    assert mock_uploader_streaming.put_streaming.call_count >= 1, (
+    assert mock_uploader_streaming.put_streaming.call_count >= 1, (  # type: ignore[union-attr]
         "put_streaming() must be called at least once (F3 streaming path)."
     )
 
@@ -270,10 +270,10 @@ def test_dual_writer_caller_sha256_metadata(tmp_root: Path, mock_uploader_stream
     )
 
     # INV-3: put_streaming 호출 시 sha256 kwarg 전달 검증
-    assert mock_uploader_streaming.put_streaming.call_count >= 1, (
+    assert mock_uploader_streaming.put_streaming.call_count >= 1, (  # type: ignore[union-attr]
         "put_streaming() must be called (F3 streaming path)."
     )
-    call_args = mock_uploader_streaming.put_streaming.call_args
+    call_args = mock_uploader_streaming.put_streaming.call_args  # type: ignore[union-attr]
     # sha256 must be passed as kwarg or positional arg
     called_sha256 = (
         call_args.kwargs.get("sha256")
