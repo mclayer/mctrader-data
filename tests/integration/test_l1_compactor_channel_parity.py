@@ -63,16 +63,11 @@ from __future__ import annotations
 
 import json
 import pytest
-from datetime import datetime, timezone
-from decimal import Decimal
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-import prometheus_client
 
-from mctrader_data.wal.ingester import WalIngester
-from mctrader_data.wal.segment import scan_sealed
 from mctrader_data.compactor.l1 import L1Compactor, _schema_version
 
 
