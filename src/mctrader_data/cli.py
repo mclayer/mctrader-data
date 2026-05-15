@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
+import json
+import logging
 import os
+import signal
 import socket
 import sys
 from datetime import datetime, timedelta, timezone
@@ -14,7 +18,42 @@ from mctrader_market.types import Symbol, Timeframe
 
 from mctrader_data.path import derive_partition_path, resolve_data_root
 from mctrader_data.policy import PartialFailurePolicy
-import contextlib
+
+logger = logging.getLogger("mctrader-data.cli")
+
+# ---------------------------------------------------------------------------
+# SIGTERM / SIGINT graceful shutdown (MCT-176 D14 / ADR-030 §D4)
+# ---------------------------------------------------------------------------
+
+# TODO(MCT-177): wire `_register_signal_handlers()` into non-asyncio entrypoints
+# (backfill/compact one-shot CLI flows) and add `_SHUTDOWN_REQUESTED` polling
+# checks at chunk boundaries inside the collect loop.  The asyncio-based
+# ``collect`` command currently relies solely on `loop.add_signal_handler()`
+# (see `_amain` below) — graceful drain at flush boundary = MCT-177 본격 구현.
+# 본 Story (MCT-176) Phase 2 PR1 = stub only (Story §8 line 226 정합).
+_SHUTDOWN_REQUESTED = False
+
+
+def _sigterm_handler(signum: int, frame: object) -> None:
+    global _SHUTDOWN_REQUESTED
+    _SHUTDOWN_REQUESTED = True
+    logger.info("[cli] SIGTERM received — graceful shutdown initiated")
+
+
+def _register_signal_handlers() -> None:
+    """Register SIGTERM + SIGINT → _SHUTDOWN_REQUESTED flag.
+
+    Called at module level for non-asyncio entrypoints.  The asyncio-based
+    ``collect`` command installs its own loop.add_signal_handler().
+
+    .. note::
+       Currently un-wired (MCT-176 stub).  MCT-177 will: (a) call this from
+       backfill/compact entry points, and (b) poll ``_SHUTDOWN_REQUESTED``
+       at chunk boundaries inside the collect loop so the asyncio path can
+       cooperatively drain.
+    """
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+    signal.signal(signal.SIGINT, _sigterm_handler)
 
 
 def _parse_iso_utc(value: str) -> datetime:
@@ -1109,6 +1148,55 @@ def health_check(
     if report.overall_verdict == "FAIL":
         sys.exit(1)
     sys.exit(0)
+
+
+@main.command("effective-config")
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["json", "yaml"]),
+    default="json",
+    show_default=True,
+    help="Output format (json or yaml).",
+)
+def effective_config(fmt: str) -> None:
+    """Dump effective configuration (env override > built-in default).
+
+    MCT-176 D14 — operator verify hook: run inside container to confirm env
+    values are applied on top of built-in defaults.
+
+    .. note::
+       YAML default layer is **deferred to MCT-177** (Phase 2 PR1 = env + built-in
+       only).  ``source_order`` reflects the *currently implemented* layers,
+       not the future 3-tier chain.  When the YAML loader lands in MCT-177
+       the order will become ``["env", "yaml_default", "built_in"]`` and the
+       Story §6 AC-2 mirrors that.
+    """
+    config: dict = {
+        "nas_minio": {
+            "endpoint": os.environ.get("NAS_MINIO_ENDPOINT", "<unset>"),
+            "access_key_set": bool(os.environ.get("NAS_MINIO_ACCESS_KEY")),
+            "secret_key_set": bool(os.environ.get("NAS_MINIO_SECRET_KEY")),
+            "bucket": os.environ.get("NAS_MINIO_BUCKET", "mctrader-market"),
+        },
+        "wal": {
+            "root": os.environ.get("MCTRADER_DATA_ROOT", "/var/lib/mctrader/data"),
+            "capacity_gb": int(os.environ.get("WAL_CAPACITY_GB", "30")),
+        },
+        "ingestion": {
+            "top_n": int(os.environ.get("UNIVERSE_TOP_N", "10")),
+            "modes": os.environ.get("INGEST_MODES", "transactions,orderbook").split(","),
+        },
+        # TODO(MCT-177): insert "yaml_default" between "env" and "built_in"
+        # once the YAML config loader lands.  Until then, advertise only the
+        # layers that are actually consulted at runtime.
+        "source_order": ["env", "built_in"],
+    }
+    if fmt == "yaml":
+        import yaml  # optional dep — pyyaml
+        click.echo(yaml.safe_dump(config, sort_keys=False))
+    else:
+        click.echo(json.dumps(config, indent=2))
 
 
 if __name__ == "__main__":  # pragma: no cover
