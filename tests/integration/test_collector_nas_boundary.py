@@ -23,12 +23,11 @@ MCT-179 carry over metric emit verify (AC-5):
 """
 from __future__ import annotations
 
-from __future__ import annotations
-
 import asyncio
 import contextlib
 import hashlib
 import logging
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
@@ -40,6 +39,27 @@ if TYPE_CHECKING:
     from mctrader_data.collector import CollectorDaemon
 
 log = logging.getLogger(__name__)
+
+
+def _docker_unavailable_reason() -> str | None:
+    """Docker daemon / 플랫폼 미가용 사유 return (가용 시 None).
+
+    FIX-MCT-180 data#67 P1: pytest.importorskip("testcontainers") 는 패키지
+    설치만 검사 — Docker daemon / 플랫폼(Linux socket mount) 미검사로 CI
+    windows-latest 에서 `-m "not slow"` 가 integration 마커를 deselect 하지
+    않아 Docker socket mount 불가 FAIL. testcontainers Docker boundary 는
+    Linux runner 전용 (docstring "Skipped automatically if testcontainers
+    unavailable" 의도 정합).
+    """
+    if sys.platform == "win32":
+        return "testcontainers Docker boundary requires Linux runner (win32 skip)"
+    try:
+        import docker  # type: ignore[import-untyped]
+
+        docker.from_env().ping()
+    except Exception as exc:  # noqa: BLE001 — Docker 미가용 사유 무관 일괄 skip
+        return f"Docker daemon unavailable: {exc!r}"
+    return None
 
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
@@ -177,6 +197,9 @@ def test_put_streaming_boundary_minio(tmp_path: Path) -> None:
     AC-5 carrier: collector → put_streaming 경로 실 smoke (MCT-180 D11 testcontainers 2-layer).
     """
     pytest.importorskip("testcontainers", reason="testcontainers not installed — skip boundary test")
+    _docker_skip = _docker_unavailable_reason()
+    if _docker_skip is not None:
+        pytest.skip(_docker_skip)
 
     # import testcontainers MinIO support
     try:
