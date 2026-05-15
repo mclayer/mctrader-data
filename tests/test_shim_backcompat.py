@@ -206,3 +206,105 @@ class TestPyarrowWriterUnchanged:
         assert imports_market_tick, (
             "tick_storage.py must import TickRecord from mctrader_market.records"
         )
+
+
+# ---------------------------------------------------------------------------
+# INV-4: cold path SSOT — duckdb_resample / polars_fallback 검증 사각지대 해소
+# MCT-182 fix1 (CodeReview P1 F-2 resolution — ArchitectPL Option A 채택)
+# ---------------------------------------------------------------------------
+
+class TestColdPathUsesMctraderMarketSot:
+    """INV-4 — cold path 가 import 하는 Aggregator 가 market SSOT 와 is 동일.
+
+    duckdb_resample.py / polars_fallback.py 는 aggregation.__init__ shim 을
+    우회하고 aggregation.core 를 직접 import 할 수 있다. 해당 경로에서 얻은
+    Aggregator 클래스가 mctrader_market.aggregation 의 동일 객체인지 검증.
+    (Change Plan §8 INV-4 보강 명세 — ArchitectPL 판정 §4.2 정정 정합)
+    """
+
+    def test_duckdb_resample_dollar_bar_aggregator_is_market_sot(self) -> None:
+        """duckdb_resample 에서 사용하는 DollarBarAggregator is market SSOT."""
+        import ast
+        import inspect
+        import mctrader_data.cold.duckdb_resample as cold_mod
+        from mctrader_market.aggregation import DollarBarAggregator as MarketDollar
+
+        # AST 로 import 출처 검증 — market 에서 오는지 확인
+        src = inspect.getsource(cold_mod)
+        tree = ast.parse(src)
+        imports_data_core = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if "mctrader_data.aggregation.core" in module:
+                    imports_data_core = True
+        assert not imports_data_core, (
+            "duckdb_resample.py must NOT import from mctrader_data.aggregation.core "
+            "(shim bypass — use mctrader_market.aggregation directly, INV-4)"
+        )
+
+        # 런타임 is-동일성 — cold mod 의 DollarBarAggregator 가 market SSOT
+        cold_dollar = getattr(cold_mod, "DollarBarAggregator", None)
+        assert cold_dollar is not None, "DollarBarAggregator not found in duckdb_resample"
+        assert cold_dollar is MarketDollar, (
+            "duckdb_resample.DollarBarAggregator is not mctrader_market.aggregation.DollarBarAggregator "
+            "(SSOT 이중화 — INV-4 위반)"
+        )
+
+    def test_duckdb_resample_tick_bar_aggregator_is_market_sot(self) -> None:
+        """duckdb_resample 에서 사용하는 TickBarAggregator is market SSOT."""
+        import mctrader_data.cold.duckdb_resample as cold_mod
+        from mctrader_market.aggregation import TickBarAggregator as MarketTick
+        cold_tick = getattr(cold_mod, "TickBarAggregator", None)
+        assert cold_tick is not None, "TickBarAggregator not found in duckdb_resample"
+        assert cold_tick is MarketTick, (
+            "duckdb_resample.TickBarAggregator is not mctrader_market.aggregation.TickBarAggregator (INV-4)"
+        )
+
+    def test_duckdb_resample_time_bar_aggregator_is_market_sot(self) -> None:
+        """duckdb_resample 에서 사용하는 TimeBarAggregator is market SSOT."""
+        import mctrader_data.cold.duckdb_resample as cold_mod
+        from mctrader_market.aggregation import TimeBarAggregator as MarketTime
+        cold_time = getattr(cold_mod, "TimeBarAggregator", None)
+        assert cold_time is not None, "TimeBarAggregator not found in duckdb_resample"
+        assert cold_time is MarketTime, (
+            "duckdb_resample.TimeBarAggregator is not mctrader_market.aggregation.TimeBarAggregator (INV-4)"
+        )
+
+    def test_duckdb_resample_volume_bar_aggregator_is_market_sot(self) -> None:
+        """duckdb_resample 에서 사용하는 VolumeBarAggregator is market SSOT."""
+        import mctrader_data.cold.duckdb_resample as cold_mod
+        from mctrader_market.aggregation import VolumeBarAggregator as MarketVolume
+        cold_volume = getattr(cold_mod, "VolumeBarAggregator", None)
+        assert cold_volume is not None, "VolumeBarAggregator not found in duckdb_resample"
+        assert cold_volume is MarketVolume, (
+            "duckdb_resample.VolumeBarAggregator is not mctrader_market.aggregation.VolumeBarAggregator (INV-4)"
+        )
+
+    def test_polars_fallback_time_bar_aggregator_is_market_sot(self) -> None:
+        """polars_fallback 에서 사용하는 TimeBarAggregator is market SSOT."""
+        import ast
+        import inspect
+        import mctrader_data.cold.polars_fallback as fallback_mod
+        from mctrader_market.aggregation import TimeBarAggregator as MarketTime
+
+        # AST 로 import 출처 검증
+        src = inspect.getsource(fallback_mod)
+        tree = ast.parse(src)
+        imports_data_core = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if "mctrader_data.aggregation.core" in module:
+                    imports_data_core = True
+        assert not imports_data_core, (
+            "polars_fallback.py must NOT import from mctrader_data.aggregation.core "
+            "(shim bypass — use mctrader_market.aggregation directly, INV-4)"
+        )
+
+        # 런타임 is-동일성
+        fallback_time = getattr(fallback_mod, "TimeBarAggregator", None)
+        assert fallback_time is not None, "TimeBarAggregator not found in polars_fallback"
+        assert fallback_time is MarketTime, (
+            "polars_fallback.TimeBarAggregator is not mctrader_market.aggregation.TimeBarAggregator (INV-4)"
+        )
