@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import textwrap
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -24,7 +25,7 @@ def runner() -> CliRunner:
 # ---------------------------------------------------------------------------
 
 
-def test_load_yaml_config_absent_file(monkeypatch: pytest.MonkeyPatch, tmp_path: pytest.TempPathFactory) -> None:
+def test_load_yaml_config_absent_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Returns empty dict when YAML file does not exist."""
     nonexistent = str(tmp_path / "nope.yaml")
     monkeypatch.setenv("MCTRADER_CONFIG_PATH", nonexistent)
@@ -32,7 +33,7 @@ def test_load_yaml_config_absent_file(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert result == {}
 
 
-def test_load_yaml_config_valid_yaml(monkeypatch: pytest.MonkeyPatch, tmp_path: pytest.TempPathFactory) -> None:
+def test_load_yaml_config_valid_yaml(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Returns parsed dict when YAML file exists and is valid."""
     cfg = tmp_path / "config.yaml"
     cfg.write_text(
@@ -51,7 +52,7 @@ def test_load_yaml_config_valid_yaml(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     assert result["wal"]["capacity_gb"] == 50
 
 
-def test_load_yaml_config_empty_file(monkeypatch: pytest.MonkeyPatch, tmp_path: pytest.TempPathFactory) -> None:
+def test_load_yaml_config_empty_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Returns empty dict when YAML file is empty."""
     cfg = tmp_path / "config.yaml"
     cfg.write_text("", encoding="utf-8")
@@ -84,7 +85,7 @@ def test_source_order_is_three_tier(runner: CliRunner) -> None:
 def test_yaml_default_overrides_builtin(
     runner: CliRunner,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pytest.TempPathFactory,
+    tmp_path: Path,
 ) -> None:
     """YAML value beats built-in default when env is absent.
 
@@ -114,7 +115,7 @@ def test_yaml_default_overrides_builtin(
 def test_env_beats_yaml(
     runner: CliRunner,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pytest.TempPathFactory,
+    tmp_path: Path,
 ) -> None:
     """env value beats YAML default.
 
@@ -140,7 +141,7 @@ def test_env_beats_yaml(
 def test_builtin_fallback_when_yaml_absent(
     runner: CliRunner,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pytest.TempPathFactory,
+    tmp_path: Path,
 ) -> None:
     """Built-in default applies when YAML absent and env unset.
 

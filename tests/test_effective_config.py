@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 import yaml
@@ -100,7 +101,7 @@ def test_format_yaml(runner: CliRunner) -> None:
 def test_yaml_overrides_builtin(
     runner: CliRunner,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pytest.TempPathFactory,
+    tmp_path: Path,
 ) -> None:
     """MCT-177 CO-1: 3-tier chain ``env > yaml_default > built_in`` verified.
 
