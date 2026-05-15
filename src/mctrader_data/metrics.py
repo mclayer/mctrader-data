@@ -4,6 +4,21 @@ import time
 
 from prometheus_client import Counter, Gauge
 
+# MCT-180: collector ticks processed Counter (ingest 1 tick 당 inc)
+# labels: exchange, symbol — transaction kind 전용 (tick = transaction event SSOT)
+collector_ticks_total = Counter(
+    "mctrader_collector_ticks_total",
+    "Total transaction ticks ingested by collector daemon (MCT-180 AC-5)",
+    ["exchange", "symbol"],
+)
+
+# MCT-180: active symbol universe Gauge (현재 MultiSymbolCollector 활성 daemon 수)
+# label-free — 전체 universe 단일 값 (cardinality 제한)
+collector_active_symbols = Gauge(
+    "mctrader_collector_active_symbols",
+    "Current active symbol count in MultiSymbolCollector universe (MCT-180 AC-5)",
+)
+
 ingester_events_total = Counter(
     "mctrader_ingester_events_total",
     "Total events written to WAL",
@@ -205,3 +220,24 @@ def record_compactor_unsupported_source(*, tier: str, exchange: str, channel: st
     """
     from mctrader_data.allowlist import compactor_unsupported_source_total
     compactor_unsupported_source_total.labels(tier=tier, exchange=exchange, channel=channel).inc()
+
+
+# ---------------------------------------------------------------------------
+# MCT-180: collector metric helpers
+# ---------------------------------------------------------------------------
+
+def record_collector_tick(*, exchange: str, symbol: str) -> None:
+    """Increment mctrader_collector_ticks_total (MCT-180 AC-5).
+
+    Called inside CollectorDaemon._emit_to_wal() for each transaction kind event
+    after WAL ingester.append() succeeds.
+    """
+    collector_ticks_total.labels(exchange=exchange, symbol=symbol).inc()
+
+
+def set_collector_active_symbols(count: int) -> None:
+    """Set mctrader_collector_active_symbols Gauge (MCT-180 AC-5).
+
+    Called by MultiSymbolCollector.run() on startup with len(self._daemons).
+    """
+    collector_active_symbols.set(count)
