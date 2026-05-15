@@ -33,7 +33,7 @@ from mctrader_market.protocols.information_bar import InformationBarModel
 from mctrader_market.schemas.tick import TickRowV1_1
 from mctrader_market.types import Symbol
 
-from mctrader_data.aggregation.core import TimeBarAggregator
+from mctrader_market.aggregation import TimeBarAggregator  # market SSOT (MCT-182 fix1, ADR-031 §D1 INV-4)
 from mctrader_data.cold.duckdb_resample import (
     _LEGACY_TRADE_ID_TEMPLATE,
     _SECONDS_BY_TIMEFRAME,

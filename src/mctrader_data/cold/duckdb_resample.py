@@ -50,7 +50,7 @@ from mctrader_market.protocols.information_bar import InformationBarModel
 from mctrader_market.schemas.tick import TickRowV1_1
 from mctrader_market.types import Symbol, Timeframe
 
-from mctrader_data.aggregation.core import (
+from mctrader_market.aggregation import (  # noqa: E402 — market SSOT (MCT-182 fix1, ADR-031 §D1 INV-4)
     DollarBarAggregator,
     TickBarAggregator,
     TimeBarAggregator,
