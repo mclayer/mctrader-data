@@ -1,36 +1,37 @@
-"""Aggregation Core Lib — Hot/Cold shared pure-Python core (ADR-025).
+"""Aggregation shim (MCT-182, ADR-031 §D1) — DEPRECATED, use mctrader_market.aggregation.
 
-Story scope (MCT-137 / Epic MCT-112 Story-3):
-- 4 bar 알고리즘 SSOT — time / volume / tick / dollar.
-- per-symbol state machine + immutable contract metadata + SHA256 contract_id.
-- KRW scaled-int boundary helper — Decimal drift 방지.
+Layer 0 contract code relocated to mctrader_market (DAG 최하위 FOUNDATION).
+This module re-exports from mctrader_market.aggregation for backward compatibility.
+DeprecationWarning is emitted on import to signal migration path.
 
-Public API (Hot/Cold consumer import target):
-    from mctrader_data.aggregation import (
-        TimeBarAggregator,
-        VolumeBarAggregator,
-        TickBarAggregator,
-        DollarBarAggregator,
-        ContractMetadata,
-        compute_contract_id,
-        to_scaled,
-        from_scaled,
-    )
+Migrate callers:
+    # Before
+    from mctrader_data.aggregation import ContractMetadata
+    # After
+    from mctrader_market.aggregation import ContractMetadata
 """
 
 from __future__ import annotations
 
-from mctrader_data.aggregation.contract_metadata import (
-    ContractMetadata,
-    compute_contract_id,
+import warnings
+
+warnings.warn(
+    "mctrader_data.aggregation is deprecated (MCT-182, ADR-031 §D1). "
+    "Use mctrader_market.aggregation instead.",
+    DeprecationWarning,
+    stacklevel=2,
 )
-from mctrader_data.aggregation.core import (
+
+from mctrader_market.aggregation import (  # noqa: E402
+    ContractMetadata,
     DollarBarAggregator,
     TickBarAggregator,
     TimeBarAggregator,
     VolumeBarAggregator,
+    compute_contract_id,
+    from_scaled,
+    to_scaled,
 )
-from mctrader_data.aggregation.scaled_int import from_scaled, to_scaled
 
 __all__ = [
     "ContractMetadata",

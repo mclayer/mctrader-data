@@ -23,15 +23,14 @@ import json
 import threading
 import warnings
 from collections.abc import Iterable
-from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from mctrader_market.records import TickRecord  # noqa: F401 (re-export, INV-4)
 
 TICK_SCHEMA_VERSION = "tick.v1"
 
@@ -45,24 +44,6 @@ _TICK_SCHEMA = pa.schema([
     pa.field("side", pa.string(), nullable=False),
     pa.field("raw_json", pa.string(), nullable=True),
 ])
-
-
-@dataclass
-class TickRecord:
-    ts_utc: datetime
-    received_at: datetime
-    exchange: str
-    symbol: str
-    price: Decimal
-    quantity: Decimal
-    side: str
-    raw_json: str | None = None
-
-    def __post_init__(self) -> None:
-        if isinstance(self.price, float):
-            raise TypeError("float not allowed for price; use Decimal or str")
-        if isinstance(self.quantity, float):
-            raise TypeError("float not allowed for quantity; use Decimal or str")
 
 
 class TickWriter:
