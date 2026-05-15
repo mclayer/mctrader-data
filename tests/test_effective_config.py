@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import pytest
+import yaml
 from click.testing import CliRunner
 
 from mctrader_data.cli import main
@@ -23,7 +24,9 @@ def test_effective_config_json_format(runner: CliRunner) -> None:
     assert "nas_minio" in data
     assert "wal" in data
     assert "ingestion" in data
-    assert data["source_order"] == ["env", "yaml_default", "built_in"]
+    # MCT-176 Phase 2 PR1 = env + built-in only (YAML deferred to MCT-177).
+    # CodeReviewPL #331 FIX iter 1 Issue 2: source_order downgrade.
+    assert data["source_order"] == ["env", "built_in"]
 
 
 def test_effective_config_default_format_is_json(runner: CliRunner) -> None:
@@ -72,3 +75,53 @@ def test_effective_config_access_key_set_flag(runner: CliRunner, monkeypatch: py
     result2 = runner.invoke(main, ["effective-config"])
     data2 = json.loads(result2.output)
     assert data2["nas_minio"]["access_key_set"] is True
+
+
+def test_format_yaml(runner: CliRunner) -> None:
+    """AC-2 / Story §8 test contract — ``--format yaml`` emits valid YAML.
+
+    CodeReviewPL #331 FIX iter 1 Issue 1: `--format yaml` codepath previously
+    untested.  Verify exit 0 + ``yaml.safe_load`` round-trips into the same
+    keys exposed by the JSON output (nas_minio / wal / ingestion / source_order).
+    """
+    result = runner.invoke(main, ["effective-config", "--format", "yaml"])
+    assert result.exit_code == 0, result.output
+    data = yaml.safe_load(result.output)
+    assert isinstance(data, dict)
+    assert "nas_minio" in data
+    assert "wal" in data
+    assert "ingestion" in data
+    # source_order must match the downgraded MCT-176 chain (Issue 2).
+    assert data["source_order"] == ["env", "built_in"]
+    # nested key sanity (round-trip preserves builtin defaults).
+    assert data["wal"]["capacity_gb"] == 30
+    assert isinstance(data["ingestion"]["modes"], list)
+
+
+def test_yaml_overrides_builtin(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue 2 (option B accepted): YAML loader is deferred → only [env, built_in].
+
+    Verifies the *current* contract: env override beats built-in default with
+    no intermediate YAML layer.  When MCT-177 lands the YAML loader, this test
+    will be amended to verify the 3-tier chain ``env > yaml_default > built_in``.
+
+    Concretely:
+      * Without env, ``ingestion.top_n`` falls back to built-in ``10``.
+      * With ``UNIVERSE_TOP_N=42`` set, env value wins over built-in.
+      * ``source_order`` advertises exactly ``["env", "built_in"]`` (no
+        ``yaml_default`` entry, since the loader is absent — false-claim fix).
+    """
+    monkeypatch.delenv("UNIVERSE_TOP_N", raising=False)
+    result_default = runner.invoke(main, ["effective-config"])
+    assert result_default.exit_code == 0, result_default.output
+    data_default = json.loads(result_default.output)
+    assert data_default["ingestion"]["top_n"] == 10  # built-in
+    assert data_default["source_order"] == ["env", "built_in"]
+    assert "yaml_default" not in data_default["source_order"]
+
+    monkeypatch.setenv("UNIVERSE_TOP_N", "42")
+    result_env = runner.invoke(main, ["effective-config"])
+    assert result_env.exit_code == 0, result_env.output
+    data_env = json.loads(result_env.output)
+    assert data_env["ingestion"]["top_n"] == 42  # env override
+    assert data_env["source_order"] == ["env", "built_in"]

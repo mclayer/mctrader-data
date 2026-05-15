@@ -25,6 +25,12 @@ logger = logging.getLogger("mctrader-data.cli")
 # SIGTERM / SIGINT graceful shutdown (MCT-176 D14 / ADR-030 §D4)
 # ---------------------------------------------------------------------------
 
+# TODO(MCT-177): wire `_register_signal_handlers()` into non-asyncio entrypoints
+# (backfill/compact one-shot CLI flows) and add `_SHUTDOWN_REQUESTED` polling
+# checks at chunk boundaries inside the collect loop.  The asyncio-based
+# ``collect`` command currently relies solely on `loop.add_signal_handler()`
+# (see `_amain` below) — graceful drain at flush boundary = MCT-177 본격 구현.
+# 본 Story (MCT-176) Phase 2 PR1 = stub only (Story §8 line 226 정합).
 _SHUTDOWN_REQUESTED = False
 
 
@@ -39,6 +45,12 @@ def _register_signal_handlers() -> None:
 
     Called at module level for non-asyncio entrypoints.  The asyncio-based
     ``collect`` command installs its own loop.add_signal_handler().
+
+    .. note::
+       Currently un-wired (MCT-176 stub).  MCT-177 will: (a) call this from
+       backfill/compact entry points, and (b) poll ``_SHUTDOWN_REQUESTED``
+       at chunk boundaries inside the collect loop so the asyncio path can
+       cooperatively drain.
     """
     signal.signal(signal.SIGTERM, _sigterm_handler)
     signal.signal(signal.SIGINT, _sigterm_handler)
@@ -1148,10 +1160,17 @@ def health_check(
     help="Output format (json or yaml).",
 )
 def effective_config(fmt: str) -> None:
-    """Dump effective configuration (env override > YAML default > built-in).
+    """Dump effective configuration (env override > built-in default).
 
     MCT-176 D14 — operator verify hook: run inside container to confirm env
-    values and YAML defaults are applied in the correct priority order.
+    values are applied on top of built-in defaults.
+
+    .. note::
+       YAML default layer is **deferred to MCT-177** (Phase 2 PR1 = env + built-in
+       only).  ``source_order`` reflects the *currently implemented* layers,
+       not the future 3-tier chain.  When the YAML loader lands in MCT-177
+       the order will become ``["env", "yaml_default", "built_in"]`` and the
+       Story §6 AC-2 mirrors that.
     """
     config: dict = {
         "nas_minio": {
@@ -1168,7 +1187,10 @@ def effective_config(fmt: str) -> None:
             "top_n": int(os.environ.get("UNIVERSE_TOP_N", "10")),
             "modes": os.environ.get("INGEST_MODES", "transactions,orderbook").split(","),
         },
-        "source_order": ["env", "yaml_default", "built_in"],
+        # TODO(MCT-177): insert "yaml_default" between "env" and "built_in"
+        # once the YAML config loader lands.  Until then, advertise only the
+        # layers that are actually consulted at runtime.
+        "source_order": ["env", "built_in"],
     }
     if fmt == "yaml":
         import yaml  # optional dep — pyyaml
