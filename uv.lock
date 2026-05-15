@@ -524,7 +524,7 @@ dev = [{ name = "psutil", specifier = ">=7.2.2" }]
 [[package]]
 name = "mctrader-market"
 version = "0.1.0"
-source = { git = "https://github.com/mclayer/mctrader-market.git?rev=main#536d25e13a06403e4e33b74c07f3976045005c83" }
+source = { git = "https://github.com/mclayer/mctrader-market.git?rev=main#4902b53c4226ef27d3962c997d2b166972990298" }
 dependencies = [
     { name = "alembic" },
     { name = "psycopg", extra = ["binary"] },

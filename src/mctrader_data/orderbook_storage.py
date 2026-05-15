@@ -29,14 +29,14 @@ import json
 import threading
 import warnings
 from collections.abc import Iterable
-from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+from mctrader_market.records import OrderbookEventRecord  # noqa: F401 (re-export, INV-4)
 
 ORDERBOOK_SCHEMA_VERSION = "orderbook.v1"
 
@@ -52,26 +52,6 @@ _OB_SCHEMA = pa.schema([
     pa.field("quantity", pa.decimal128(38, 18), nullable=False),
     pa.field("raw_json", pa.string(), nullable=True),
 ])
-
-
-@dataclass
-class OrderbookEventRecord:
-    ts_utc: datetime
-    received_at: datetime
-    exchange: str
-    symbol: str
-    event_type: str  # "snapshot" or "delta"
-    side: str  # "bid" or "ask"
-    level: int  # 0-N for snapshot, -1 for delta
-    price: Decimal
-    quantity: Decimal
-    raw_json: str | None = None
-
-    def __post_init__(self) -> None:
-        if isinstance(self.price, float):
-            raise TypeError("float not allowed for price; use Decimal or str")
-        if isinstance(self.quantity, float):
-            raise TypeError("float not allowed for quantity; use Decimal or str")
 
 
 class OrderbookWriter:
