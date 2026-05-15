@@ -39,13 +39,13 @@
 codeforge plugin 최신 버전 (hub `mctrader-hub/.claude/_overlay/CLAUDE.md` mirror — 자세한 carrier 링크는 hub 참조):
 
 ```
-codeforge@mclayer               # 5.23.0 — CFP-423 Python script-writing convention / CFP-436 marketplace/plugin.json atomic invariant / CFP-455 evidence-check-registry v1.1 current_tier / CFP-445/449 decision-principle lint / CFP-448/490 selective Sonnet rollback + lane-evidence guard
-codeforge-requirements@mclayer  # 0.5.1 — codex-proactive-check worker + semantic divergence 3 criteria; CFP-448 ChangeImpactAgent Opus→Sonnet rollback
-codeforge-design@mclayer        # 0.8.0 — ADR template is_transitional + 해소 기준 schema; CFP-448 CodebaseMapperAgent/RefactorAgent Opus→Sonnet rollback + mandate boundary text
-codeforge-develop@mclayer       # 0.5.1 — CFP-448 DeveloperPLAgent Opus→Sonnet rollback (ADR-042 Amendment 5 §결정 1 (b))
-codeforge-test@mclayer          # 1.1.1 (REVIVED) — test-verdict-v2.2 story_keys[] + attribution_confidence; IntegrationTestAgent active; TestAgent/StatefulTestAgent deprecated
-codeforge-review@mclayer        # 1.3.0 — review-pl-base §3.0~§3.3 debate-protocol-v1 dispatch SOP + review-verdict v4.1 (findings[].anchor_id)
-codeforge-pmo@mclayer           # 0.1.0
+codeforge@mclayer               # 5.75.0 — CFP-743 upgrade CLI+UpgradeAgent(ADR-076) / CFP-707 ADR-038 Amd4 TodoWrite 4-marker(⬜⏳✅🔄) / CFP-702 ADR-027 Amd3 §7 D4 wrapper-managed-block CI / CFP-660 workflow version-drift / ADR-053 hook SSOT plugin-root hooks.json
+codeforge-requirements@mclayer  # 0.6.0 — CFP-510 divergence 4 영역(3 semantic + 1 fact-check) + PL fact marker 5종
+codeforge-design@mclayer        # 0.12.0 — design-output-v2 v2.3 / CFP-582 ArchitectPL Blanket Debate Trigger / CFP-597 §5.7 marketplace-sync self-check
+codeforge-develop@mclayer       # 0.7.0 — CFP-507 DeveloperPL Phase 2 PR body convention / CFP-609 자율 병렬 결정 tree
+codeforge-test@mclayer          # 1.1.2 (REVIVED) — review-verdict-v4 sync; IntegrationTestAgent active; TestAgent/StatefulTestAgent deprecated
+codeforge-review@mclayer        # 1.6.0 — review-verdict v4 cutover(v3 Archived) + marketplace_sync_declared field
+codeforge-pmo@mclayer           # 0.1.3 — GitOpsAgent §3.5/§3.6 marketplace-sync proactive PR dispatch; ADR-045 Amd5 retro Cross-Story
 ```
 
 ### Adversarial Debate auto-trigger (CFP-391/411)
