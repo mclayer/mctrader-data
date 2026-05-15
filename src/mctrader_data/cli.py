@@ -645,6 +645,77 @@ def collect(
             coverage_stats_writer=coverage_writer,
         )
 
+        # MCT-179 D17 — startup InvariantHarness 8종 scan hook (AC-4)
+        # ambiguity invariant (D10) container restart race 방지:
+        #   - NAS 없으면 (NAS_MINIO_ENDPOINT 미설정) scan skip (graceful)
+        #   - ambiguity fail 시 log.warning (raise 금지 — false positive 방지 per plan §2.1)
+        _nas_endpoint = os.environ.get("NAS_MINIO_ENDPOINT")
+        if _nas_endpoint:
+            try:
+                from mctrader_data.nas_storage.nas_uploader import NASUploader as _NASUploader
+                from mctrader_data.nas_migration.invariant_harness import (  # noqa: N814
+                    InvariantHarness as _InvariantHarness,
+                )
+
+                _wal_root = root_resolved / "wal"
+                _startup_nas = _NASUploader(
+                    endpoint=_nas_endpoint,
+                    access_key=os.environ.get("NAS_MINIO_ACCESS_KEY", ""),
+                    secret_key=os.environ.get("NAS_MINIO_SECRET_KEY", ""),
+                    bucket=os.environ.get("NAS_MINIO_BUCKET", "mctrader-market"),
+                    retry_queue=None,  # type: ignore[arg-type]
+                )
+                _startup_harness = _InvariantHarness(
+                    nas_uploader=_startup_nas,
+                    local_root=_wal_root,
+                )
+                # scan: WAL root 하위 partition 디렉터리를 discovery 해 per-partition verify
+                # 비어있으면 (wal_root 없거나 partition 0) 스캔 없이 정상 진행
+                _scan_partitions: list = []
+                if _wal_root.exists():
+                    # 2-level depth: wal/{schema_version=*}/{tier=*}/{exchange=*}/{symbol=*}/...
+                    # 최하위 parquet dir 탐색 대신 top-level partition (date dir) 기준
+                    for _part_dir in sorted(_wal_root.rglob("*.parquet")):
+                        _pdir = _part_dir.parent
+                        if _pdir not in _scan_partitions:
+                            _scan_partitions.append(_pdir)
+                if _scan_partitions:
+                    _scan_fail_count = 0
+                    for _part in _scan_partitions[:20]:  # 최대 20 partition 스캔 (startup latency 제한)
+                        try:
+                            _nas_prefix = str(_part.relative_to(_wal_root)).replace("\\", "/")
+                            _inv_result = _startup_harness.verify(
+                                local_partition=_part,
+                                nas_partition=_nas_prefix,
+                            )
+                            if _inv_result.status == "ambiguity_fail":
+                                # ambiguity = D10 container restart race 가능성 — log.warning 만 (raise 금지)
+                                log.warning(
+                                    "[startup-scan] D10 ambiguity invariant WARN "
+                                    "(partition=%r) — container restart race 가능성. "
+                                    "Manual escalation 권고 (ADR-029 §D10).",
+                                    _nas_prefix,
+                                )
+                                _scan_fail_count += 1
+                            elif _inv_result.status != "all_pass":
+                                log.info(
+                                    "[startup-scan] invariant %s (partition=%r)",
+                                    _inv_result.status, _nas_prefix,
+                                )
+                        except Exception:
+                            log.debug("[startup-scan] partition scan error (skipped)", exc_info=True)
+                    log.info(
+                        "[startup-scan] InvariantHarness 8종 scan 완료: "
+                        "scanned=%d ambiguity_warn=%d",
+                        min(len(_scan_partitions), 20), _scan_fail_count,
+                    )
+                else:
+                    log.info("[startup-scan] WAL partitions 없음 — startup scan skip")
+            except Exception:
+                log.warning("[startup-scan] InvariantHarness import/scan 실패 — skip (graceful)", exc_info=True)
+        else:
+            log.info("[startup-scan] NAS_MINIO_ENDPOINT 미설정 — startup InvariantHarness scan skip")
+
         # MCT-104 — MetadataRefreshScheduler (daily §D13 refresh, separate task)
         # Only bithumb supports MetadataRefreshScheduler (Upbit has no equivalent endpoint)
         import contextlib as _ctx

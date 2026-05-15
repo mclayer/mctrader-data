@@ -306,6 +306,37 @@ class CapacityProbe:
             log.warning("[capacity_probe] _probe_host_bytes shutil.disk_usage failed — returning 0")
             return 0
 
+    def measure_wal_bytes(self) -> int:
+        """WAL root directory 재귀 bytes 합산 편의 메서드 (MCT-179 D5).
+
+        measure_wal_baseline.py 및 Prometheus Gauge expose 에 사용.
+        NAS / L1 / Host 의존 없이 WAL bytes만 단독 측정.
+
+        Returns:
+            WAL directory 내 총 파일 bytes (directory 없으면 0).
+        """
+        return self._probe_dir_bytes(self._wal_root)
+
+    def emit_wal_capacity_gauge(self) -> None:
+        """WAL bytes Prometheus Gauge emit (MCT-179 D5 — wal_capacity_bytes Gauge expose).
+
+        mctrader_capacity_usage_bytes{layer=WAL_local} Gauge 갱신.
+        metrics=None 시 skip (graceful degradation).
+
+        패턴: PrometheusExporter.emit_capacity_usage(layer="WAL_local", bytes_val=N)
+        (MCT-171 LAND prometheus_exporters.py 확장 — emit_capacity_usage SSOT)
+        """
+        if self._metrics is None:
+            return
+        wal_bytes = self.measure_wal_bytes()
+        wal_hard = self._thresholds.wal_hard_bytes()
+        wal_ratio = wal_bytes / wal_hard if wal_hard > 0 else 0.0
+        try:
+            self._metrics.emit_capacity_usage(layer="WAL_local", bytes_val=wal_bytes)
+            self._metrics.emit_capacity_ratio(layer="WAL_local", ratio=wal_ratio)
+        except Exception:
+            log.warning("[capacity_probe] emit_wal_capacity_gauge: metrics emit failed (graceful skip)")
+
     def _emit_metrics(self, report: CapacityReport) -> None:
         """Prometheus Gauge emit (AC-5).
 
