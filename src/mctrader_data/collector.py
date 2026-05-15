@@ -184,8 +184,9 @@ class CollectorDaemon:
                     "channel": "transaction",
                 }
                 ingester.append(record)
-                from mctrader_data.metrics import record_ingester_event
+                from mctrader_data.metrics import record_ingester_event, record_collector_tick
                 record_ingester_event(exchange=self._exchange, symbol=str(event.symbol), channel="transaction")
+                record_collector_tick(exchange=self._exchange, symbol=str(event.symbol))
                 if self._redis_publisher is not None:
                     self._redis_publisher.publish_transaction(  # type: ignore[attr-defined]
                         exchange=self._exchange,
@@ -305,6 +306,10 @@ class MultiSymbolCollector:
                 self._manifest.collector_run_id,
                 len(self._manifest.selected_symbols),
             )
+
+        # MCT-180 AC-5: emit active symbol universe Gauge at startup
+        from mctrader_data.metrics import set_collector_active_symbols
+        set_collector_active_symbols(len(self._daemons))
 
         # MCT-91 — heartbeat task spawn
         heartbeat_task: asyncio.Task[None] | None = None
