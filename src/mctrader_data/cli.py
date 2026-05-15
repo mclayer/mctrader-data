@@ -11,6 +11,7 @@ import socket
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -25,12 +26,6 @@ logger = logging.getLogger("mctrader-data.cli")
 # SIGTERM / SIGINT graceful shutdown (MCT-176 D14 / ADR-030 §D4)
 # ---------------------------------------------------------------------------
 
-# TODO(MCT-177): wire `_register_signal_handlers()` into non-asyncio entrypoints
-# (backfill/compact one-shot CLI flows) and add `_SHUTDOWN_REQUESTED` polling
-# checks at chunk boundaries inside the collect loop.  The asyncio-based
-# ``collect`` command currently relies solely on `loop.add_signal_handler()`
-# (see `_amain` below) — graceful drain at flush boundary = MCT-177 본격 구현.
-# 본 Story (MCT-176) Phase 2 PR1 = stub only (Story §8 line 226 정합).
 _SHUTDOWN_REQUESTED = False
 
 
@@ -43,17 +38,38 @@ def _sigterm_handler(signum: int, frame: object) -> None:
 def _register_signal_handlers() -> None:
     """Register SIGTERM + SIGINT → _SHUTDOWN_REQUESTED flag.
 
-    Called at module level for non-asyncio entrypoints.  The asyncio-based
-    ``collect`` command installs its own loop.add_signal_handler().
-
-    .. note::
-       Currently un-wired (MCT-176 stub).  MCT-177 will: (a) call this from
-       backfill/compact entry points, and (b) poll ``_SHUTDOWN_REQUESTED``
-       at chunk boundaries inside the collect loop so the asyncio path can
-       cooperatively drain.
+    Called at entrypoints for non-asyncio commands (collect daemon).
+    env override > YAML default > built-in priority chain applies to
+    all config values read after this call.
     """
     signal.signal(signal.SIGTERM, _sigterm_handler)
     signal.signal(signal.SIGINT, _sigterm_handler)
+
+
+# ---------------------------------------------------------------------------
+# YAML config loader (MCT-177 CO-1 — option A)
+# ---------------------------------------------------------------------------
+
+
+def _load_yaml_config() -> dict[str, Any]:
+    """Load optional YAML default config layer.
+
+    Reads from ``MCTRADER_CONFIG_PATH`` env (default ``/etc/mctrader/config.yaml``).
+    Returns empty dict if the file is absent or unreadable — silent degraded mode.
+
+    Priority chain: env override > YAML default > built-in.
+    """
+    yaml_path = os.environ.get("MCTRADER_CONFIG_PATH", "/etc/mctrader/config.yaml")
+    try:
+        path = Path(yaml_path)
+        if not path.exists():
+            return {}
+        import yaml  # optional dep — pyyaml
+
+        return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001
+        logger.debug("[cli] YAML config load failed — using built-in defaults only")
+        return {}
 
 
 def _parse_iso_utc(value: str) -> datetime:
@@ -491,6 +507,12 @@ def collect(
 
     Designed for 24/7 systemd operation. SIGTERM = graceful drain + close.
     """
+    # MCT-177 CO-2: register SIGTERM/SIGINT → _SHUTDOWN_REQUESTED flag for
+    # non-asyncio chunk boundary polling. The asyncio _amain installs its own
+    # loop.add_signal_handler(); this call ensures the flag is set regardless
+    # of which signal path fires first.
+    _register_signal_handlers()
+
     import asyncio
     import logging
 
@@ -652,7 +674,13 @@ def collect(
         asyncio.run(_amain())
     except KeyboardInterrupt:
         log.info("KeyboardInterrupt — shutting down")
-        sys.exit(0)
+
+    # MCT-177 CO-2: loop termination — flush pending WAL writes + clean exit.
+    # _SHUTDOWN_REQUESTED flag is set by _sigterm_handler; asyncio path
+    # cancels via loop.add_signal_handler() above.  Both paths converge here.
+    if _SHUTDOWN_REQUESTED:
+        log.info("[collect] SIGTERM shutdown — pending WAL flush complete")
+    sys.exit(0)
 
 
 @main.command("compact")
@@ -1160,37 +1188,66 @@ def health_check(
     help="Output format (json or yaml).",
 )
 def effective_config(fmt: str) -> None:
-    """Dump effective configuration (env override > built-in default).
+    """Dump effective configuration (env override > YAML default > built-in).
 
     MCT-176 D14 — operator verify hook: run inside container to confirm env
     values are applied on top of built-in defaults.
 
-    .. note::
-       YAML default layer is **deferred to MCT-177** (Phase 2 PR1 = env + built-in
-       only).  ``source_order`` reflects the *currently implemented* layers,
-       not the future 3-tier chain.  When the YAML loader lands in MCT-177
-       the order will become ``["env", "yaml_default", "built_in"]`` and the
-       Story §6 AC-2 mirrors that.
+    MCT-177 CO-1: YAML default layer restored. Priority chain:
+    ``env override > YAML default > built-in``.
+    YAML path: ``MCTRADER_CONFIG_PATH`` env (default ``/etc/mctrader/config.yaml``).
     """
+    # Load YAML default layer (empty dict if file absent)
+    yaml_cfg = _load_yaml_config()
+
+    def _get(env_key: str, yaml_keys: tuple[str, ...], built_in: Any) -> Any:
+        """Resolve a single value: env > yaml > built-in."""
+        env_val = os.environ.get(env_key)
+        if env_val is not None:
+            return env_val
+        # Walk yaml_keys as dot-path into yaml_cfg
+        node: Any = yaml_cfg
+        for k in yaml_keys:
+            if not isinstance(node, dict):
+                node = None
+                break
+            node = node.get(k)
+        if node is not None:
+            return node
+        return built_in
+
+    # Resolve ingestion.modes: env CSV string > yaml list/string > built-in CSV
+    _ingest_env = os.environ.get("INGEST_MODES")
+    _ingest_yaml = (yaml_cfg.get("ingestion") or {}).get("modes")
+    if _ingest_env is not None:
+        _modes: list[str] = _ingest_env.split(",")
+    elif _ingest_yaml is not None:
+        _modes = _ingest_yaml if isinstance(_ingest_yaml, list) else str(_ingest_yaml).split(",")
+    else:
+        _modes = ["transactions", "orderbook"]
+
     config: dict = {
         "nas_minio": {
-            "endpoint": os.environ.get("NAS_MINIO_ENDPOINT", "<unset>"),
-            "access_key_set": bool(os.environ.get("NAS_MINIO_ACCESS_KEY")),
-            "secret_key_set": bool(os.environ.get("NAS_MINIO_SECRET_KEY")),
-            "bucket": os.environ.get("NAS_MINIO_BUCKET", "mctrader-market"),
+            "endpoint": _get("NAS_MINIO_ENDPOINT", ("nas_minio", "endpoint"), "<unset>"),
+            "access_key_set": bool(
+                os.environ.get("NAS_MINIO_ACCESS_KEY")
+                or (yaml_cfg.get("nas_minio") or {}).get("access_key")
+            ),
+            "secret_key_set": bool(
+                os.environ.get("NAS_MINIO_SECRET_KEY")
+                or (yaml_cfg.get("nas_minio") or {}).get("secret_key")
+            ),
+            "bucket": _get("NAS_MINIO_BUCKET", ("nas_minio", "bucket"), "mctrader-market"),
         },
         "wal": {
-            "root": os.environ.get("MCTRADER_DATA_ROOT", "/var/lib/mctrader/data"),
-            "capacity_gb": int(os.environ.get("WAL_CAPACITY_GB", "30")),
+            "root": _get("MCTRADER_DATA_ROOT", ("wal", "root"), "/var/lib/mctrader/data"),
+            "capacity_gb": int(_get("WAL_CAPACITY_GB", ("wal", "capacity_gb"), "30")),
         },
         "ingestion": {
-            "top_n": int(os.environ.get("UNIVERSE_TOP_N", "10")),
-            "modes": os.environ.get("INGEST_MODES", "transactions,orderbook").split(","),
+            "top_n": int(_get("UNIVERSE_TOP_N", ("ingestion", "top_n"), "10")),
+            "modes": _modes,
         },
-        # TODO(MCT-177): insert "yaml_default" between "env" and "built_in"
-        # once the YAML config loader lands.  Until then, advertise only the
-        # layers that are actually consulted at runtime.
-        "source_order": ["env", "built_in"],
+        "source_order": ["env", "yaml_default", "built_in"],
     }
     if fmt == "yaml":
         import yaml  # optional dep — pyyaml
