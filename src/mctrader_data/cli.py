@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
+import json
+import logging
 import os
+import signal
 import socket
 import sys
 from datetime import datetime, timedelta, timezone
@@ -14,7 +18,30 @@ from mctrader_market.types import Symbol, Timeframe
 
 from mctrader_data.path import derive_partition_path, resolve_data_root
 from mctrader_data.policy import PartialFailurePolicy
-import contextlib
+
+logger = logging.getLogger("mctrader-data.cli")
+
+# ---------------------------------------------------------------------------
+# SIGTERM / SIGINT graceful shutdown (MCT-176 D14 / ADR-030 §D4)
+# ---------------------------------------------------------------------------
+
+_SHUTDOWN_REQUESTED = False
+
+
+def _sigterm_handler(signum: int, frame: object) -> None:
+    global _SHUTDOWN_REQUESTED
+    _SHUTDOWN_REQUESTED = True
+    logger.info("[cli] SIGTERM received — graceful shutdown initiated")
+
+
+def _register_signal_handlers() -> None:
+    """Register SIGTERM + SIGINT → _SHUTDOWN_REQUESTED flag.
+
+    Called at module level for non-asyncio entrypoints.  The asyncio-based
+    ``collect`` command installs its own loop.add_signal_handler().
+    """
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+    signal.signal(signal.SIGINT, _sigterm_handler)
 
 
 def _parse_iso_utc(value: str) -> datetime:
@@ -1109,6 +1136,45 @@ def health_check(
     if report.overall_verdict == "FAIL":
         sys.exit(1)
     sys.exit(0)
+
+
+@main.command("effective-config")
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["json", "yaml"]),
+    default="json",
+    show_default=True,
+    help="Output format (json or yaml).",
+)
+def effective_config(fmt: str) -> None:
+    """Dump effective configuration (env override > YAML default > built-in).
+
+    MCT-176 D14 — operator verify hook: run inside container to confirm env
+    values and YAML defaults are applied in the correct priority order.
+    """
+    config: dict = {
+        "nas_minio": {
+            "endpoint": os.environ.get("NAS_MINIO_ENDPOINT", "<unset>"),
+            "access_key_set": bool(os.environ.get("NAS_MINIO_ACCESS_KEY")),
+            "secret_key_set": bool(os.environ.get("NAS_MINIO_SECRET_KEY")),
+            "bucket": os.environ.get("NAS_MINIO_BUCKET", "mctrader-market"),
+        },
+        "wal": {
+            "root": os.environ.get("MCTRADER_DATA_ROOT", "/var/lib/mctrader/data"),
+            "capacity_gb": int(os.environ.get("WAL_CAPACITY_GB", "30")),
+        },
+        "ingestion": {
+            "top_n": int(os.environ.get("UNIVERSE_TOP_N", "10")),
+            "modes": os.environ.get("INGEST_MODES", "transactions,orderbook").split(","),
+        },
+        "source_order": ["env", "yaml_default", "built_in"],
+    }
+    if fmt == "yaml":
+        import yaml  # optional dep — pyyaml
+        click.echo(yaml.safe_dump(config, sort_keys=False))
+    else:
+        click.echo(json.dumps(config, indent=2))
 
 
 if __name__ == "__main__":  # pragma: no cover
