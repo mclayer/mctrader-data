@@ -83,15 +83,30 @@ def _date_range(start: datetime, end: datetime) -> Iterator[str]:
         cur = (datetime.combine(cur, datetime.min.time()) + timedelta(days=1)).date()
 
 
+def _safe_path_component(value: str, name: str) -> str:
+    """Path traversal 방어 — exchange/symbol/date_str 등 path component sanitization.
+
+    '..' 또는 절대경로 문자 포함 시 ValueError raise.
+    허용 문자: A-Z a-z 0-9 _ - . (Parquet partition 명명 규칙 정합).
+    """
+    import re as _re  # noqa: PLC0415
+
+    if ".." in value or value.startswith("/") or value.startswith("\\"):
+        raise ValueError(f"Invalid {name}: path traversal detected ({value!r})")
+    if not _re.match(r"^[A-Za-z0-9_.=\-]+$", value):
+        raise ValueError(f"Invalid {name}: forbidden characters ({value!r})")
+    return value
+
+
 def _tick_partition_dir(root: Path, exchange: str, symbol: str, date_str: str) -> Path:
     return (
         root
         / "market"
         / "ticks"
         / f"schema_version={TICK_SCHEMA_VERSION}"
-        / f"exchange={exchange}"
-        / f"symbol={symbol}"
-        / f"date={date_str}"
+        / f"exchange={_safe_path_component(exchange, 'exchange')}"
+        / f"symbol={_safe_path_component(symbol, 'symbol')}"
+        / f"date={_safe_path_component(date_str, 'date_str')}"
     )
 
 
@@ -101,9 +116,9 @@ def _orderbook_partition_dir(root: Path, exchange: str, symbol: str, date_str: s
         / "market"
         / "orderbook"
         / f"schema_version={ORDERBOOK_SCHEMA_VERSION}"
-        / f"exchange={exchange}"
-        / f"symbol={symbol}"
-        / f"date={date_str}"
+        / f"exchange={_safe_path_component(exchange, 'exchange')}"
+        / f"symbol={_safe_path_component(symbol, 'symbol')}"
+        / f"date={_safe_path_component(date_str, 'date_str')}"
     )
 
 
