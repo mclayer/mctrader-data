@@ -240,6 +240,7 @@ class DualWriter:
             tmp_path.rename(local_path)
             # MCT-189 D-2 A: DualWriter self-delete (caller 0건 재발 차단)
             # source(data as Path) 를 promote_l1() 4중 verify 후 삭제
+            dwr_status: Literal["committed", "local_only", "hard_floor_blocked"] = "committed"
             if isinstance(data, Path) and data != local_path:
                 from mctrader_data.compactor.promotion import (  # noqa: PLC0415
                     promote_l1,
@@ -253,11 +254,23 @@ class DualWriter:
                         segment_id=nas_key,
                     )
                 except PromotionVerifyError as e:
+                    # P0-1 (MCT-189 spec D-2 A + plan Task 14 Step 1):
+                    # verify-fail → retry_queue enqueue + status=local_only (not "committed")
+                    # retry_queue.enqueue(key, data, sha256) — RetryQueue API 시그니처 정합
+                    # NAS PUT 성공했으나 HEAD verify 불일치 → source 영구 orphan 방지
                     log.warning(
-                        "[dual_writer] promote_l1 verify failed — source preserved, manual cleanup required: %s",
+                        "[dual_writer] promote_l1 verify failed — enqueue retry_queue, status=local_only: %s",
                         e,
                     )
-            dwr_status: Literal["committed", "local_only", "hard_floor_blocked"] = "committed"
+                    rq = getattr(self._uploader, "_retry_queue", None)
+                    if rq is not None:
+                        rq.enqueue(key=nas_key, data=data, sha256=sha256)
+                    dwr_status = "local_only"
+                except FileNotFoundError:
+                    # P1 (MCT-189 spec D-7 A): concurrent double-unlink ENOENT graceful
+                    # 선행 thread 가 이미 삭제 → INV-1 XOR 만족, idempotent no-op
+                    log.debug("[dual_writer] promote_l1 ENOENT — concurrent unlink (D-7 A)")
+                    # dwr_status remains "committed"
 
         elif nas_put_result.status == _QUEUED_STATUS:
             # NAS queued (retry_queue persistent) → local visible, caller source safe to delete
@@ -371,6 +384,7 @@ class DualWriter:
                 promote_l1,
                 PromotionVerifyError,
             )
+            dwr_status: Literal["committed", "local_only", "hard_floor_blocked"] = "committed"
             try:
                 promote_l1(
                     local_path=path,
@@ -379,11 +393,21 @@ class DualWriter:
                     segment_id=nas_key,
                 )
             except PromotionVerifyError as e:
+                # P0-1 (MCT-189 spec D-2 A + plan Task 14 Step 1):
+                # verify-fail → retry_queue enqueue + status=local_only (not "committed")
+                # retry_queue.enqueue(key, data, sha256) — RetryQueue API 시그니처 정합
                 log.warning(
-                    "[dual_writer] put_l1 promote_l1 verify failed — local preserved, manual cleanup required: %s",
+                    "[dual_writer] put_l1 promote_l1 verify failed — enqueue retry_queue, status=local_only: %s",
                     e,
                 )
-            dwr_status: Literal["committed", "local_only", "hard_floor_blocked"] = "committed"
+                rq = getattr(self._uploader, "_retry_queue", None)
+                if rq is not None:
+                    rq.enqueue(key=nas_key, data=path, sha256=sha256)
+                dwr_status = "local_only"
+            except FileNotFoundError:
+                # P1 (MCT-189 spec D-7 A): concurrent double-unlink ENOENT graceful
+                log.debug("[dual_writer] put_l1 promote_l1 ENOENT — concurrent unlink (D-7 A)")
+                # dwr_status remains "committed"
         elif nas_put_result.status == _QUEUED_STATUS:
             dwr_status = "local_only"
         elif nas_put_result.status == _HARD_FLOOR_STATUS:

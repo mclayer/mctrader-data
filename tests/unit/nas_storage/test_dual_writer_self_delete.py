@@ -109,8 +109,14 @@ class TestDualWriterSelfDelete:
         assert result.status == "committed"
         assert local_path.exists()  # bytes path → local_path 존재
 
-    def test_write_promote_verify_fail_source_preserved(self, tmp_path: Path) -> None:
-        """promote_l1 verify 실패 시 source 파일은 보존돼야 한다."""
+    def test_write_promote_verify_fail_local_only_and_enqueue(self, tmp_path: Path) -> None:
+        """P0-1: promote_l1 verify 실패 시 → status=local_only + retry_queue.enqueue() + source 보존.
+
+        MCT-189 spec D-2 A + plan Task 14 Step 1:
+        - verify-fail = NAS PUT 성공했으나 HEAD 불일치 → source 영구 orphan 방지
+        - retry_queue.enqueue(key, data, sha256) 호출 의무
+        - "committed" 반환 금지 — 거짓 신호 차단
+        """
         content = b"verify fail scenario"
         source = tmp_path / "src_verify_fail.parquet"
         source.write_bytes(content)
@@ -118,6 +124,9 @@ class TestDualWriterSelfDelete:
         local_root = tmp_path / "local"
         local_root.mkdir()
         local_dest = local_root / "dest_vf.parquet"
+
+        mock_retry_queue = MagicMock()
+        mock_retry_queue.enqueue.return_value = MagicMock(status="ok")
 
         mock_uploader = MagicMock(spec=NASUploader)
         mock_uploader.put_streaming.return_value = PutResult(
@@ -130,6 +139,8 @@ class TestDualWriterSelfDelete:
             "sha256": "0" * 64,  # wrong sha256
             "ContentLength": len(content),
         }
+        # P0-1: retry_queue 접근 (NASUploader._retry_queue)
+        mock_uploader._retry_queue = mock_retry_queue  # noqa: SLF001
 
         writer = DualWriter(nas_uploader=mock_uploader, local_root=local_root)
         result = writer.write(
@@ -139,9 +150,12 @@ class TestDualWriterSelfDelete:
             sha256=_sha256(content),
         )
 
-        # verify 실패해도 committed 반환 (warning + local 보존)
-        assert result.status == "committed"
-        assert source.exists(), "promote verify 실패 시 source 보존 의무"
+        # P0-1: verify-fail → local_only (not "committed"), source 보존, retry_queue enqueue
+        assert result.status == "local_only", "verify-fail 시 local_only 반환 의무 (committed 반환 금지)"
+        assert source.exists(), "promote verify 실패 시 source 보존 의무 (INV-4)"
+        mock_retry_queue.enqueue.assert_called_once_with(
+            key="dest_vf.parquet", data=source, sha256=_sha256(content)
+        )
 
     def test_write_local_only_source_not_deleted(self, tmp_path: Path) -> None:
         """write() local_only 시 source 삭제 미실행 (D-2 A는 committed만 해당)."""
