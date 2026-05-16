@@ -79,6 +79,5 @@ dev = [
     "psutil>=7.2.2",
     "pyright>=1.1.409",
     "pytest-benchmark>=4.0",
-    "ruff>=0.15.12",
     "testcontainers[minio]>=4.14.2",
 ]

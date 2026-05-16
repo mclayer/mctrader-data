@@ -7,9 +7,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 from mctrader_data.nas_storage.dual_writer import DualWriter
 from mctrader_data.nas_storage.nas_uploader import NASUploader, PutResult

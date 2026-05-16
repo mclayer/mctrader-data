@@ -543,7 +543,6 @@ dev = [
     { name = "psutil" },
     { name = "pyright" },
     { name = "pytest-benchmark" },
-    { name = "ruff" },
     { name = "testcontainers", extra = ["minio"] },
 ]
 
@@ -578,7 +577,6 @@ dev = [
     { name = "psutil", specifier = ">=7.2.2" },
     { name = "pyright", specifier = ">=1.1.409" },
     { name = "pytest-benchmark", specifier = ">=4.0" },
-    { name = "ruff", specifier = ">=0.15.12" },
     { name = "testcontainers", extras = ["minio"], specifier = ">=4.14.2" },
 ]
 
