@@ -493,6 +493,7 @@ dev = [
 dev = [
     { name = "psutil" },
     { name = "pytest-benchmark" },
+    { name = "testcontainers", extra = ["minio"] },
 ]
 
 [package.metadata]
@@ -523,6 +524,7 @@ provides-extras = ["dev"]
 dev = [
     { name = "psutil", specifier = ">=7.2.2" },
     { name = "pytest-benchmark", specifier = ">=4.0" },
+    { name = "testcontainers", extras = ["minio"], specifier = ">=4.14.2" },
 ]
 
 [[package]]

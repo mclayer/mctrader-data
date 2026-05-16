@@ -305,18 +305,21 @@ class TestCallerAPIRegression:
         """
         from mctrader_data.compactor.promotion import promote_l1, PromotionResult
 
+        import hashlib as _hashlib
+        content = b"fake parquet data"
         local_file = tmp_path / "part-regression.parquet"
-        local_file.write_bytes(b"fake parquet data")
+        local_file.write_bytes(content)
+        local_sha256 = _hashlib.sha256(content).hexdigest()
 
-        mock_client = MagicMock()
-        mock_client.head_object.return_value = {
-            "ETag": '"etag_regression"',
-            "VersionId": "v-reg-1",
-            "ContentLength": 16,
-        }
+        # MCT-189: head_object() 4-tuple dict 직접 mock (ETag already stripped)
         mock_uploader = MagicMock()
-        mock_uploader._get_client.return_value = mock_client
         mock_uploader.bucket = "mctrader-market"
+        mock_uploader.head_object.return_value = {
+            "ETag": "etag_regression",
+            "VersionId": "v-reg-1",
+            "sha256": local_sha256,
+            "ContentLength": len(content),
+        }
 
         result = promote_l1(
             local_path=local_file,
