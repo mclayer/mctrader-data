@@ -369,6 +369,30 @@ class NASUploader:
 
         return PutResult(status="uploaded", object_etag=etag)
 
+    def head_object(self, key: str) -> dict:
+        """4-tuple verify primitive (MCT-189 D-4 C).
+
+        Returns:
+            dict with keys:
+            - "ETag": str — S3 ETag stripped of surrounding quotes
+            - "VersionId": str | None — bucket versioning (None if not versioned)
+            - "sha256": str | None — Metadata sha256 (None if absent / legacy object)
+            - "ContentLength": int — object size in bytes
+
+        Raises:
+            botocore.exceptions.ClientError: HEAD 404 or non-404 S3 error
+            botocore.exceptions.EndpointConnectionError: NAS unreachable
+        """
+        client = self._get_client()
+        response = client.head_object(Bucket=self.bucket, Key=key)
+        metadata = response.get("Metadata", {}) or {}
+        return {
+            "ETag": response.get("ETag", "").strip('"'),
+            "VersionId": response.get("VersionId"),
+            "sha256": metadata.get("sha256"),
+            "ContentLength": int(response.get("ContentLength", 0)),
+        }
+
     def put_streaming(
         self,
         local_path_or_fileobj: Path | IO[bytes],
