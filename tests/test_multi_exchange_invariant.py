@@ -11,9 +11,6 @@ Runbook: docs/runbooks/add-new-exchange.md
 
 from __future__ import annotations
 
-import subprocess
-import sys
-import types
 from unittest.mock import MagicMock
 
 import pytest
@@ -44,8 +41,8 @@ def test_known_exchanges_registered():
     upbit_provider = get_candle_provider("upbit")
     assert upbit_provider is not None, "upbit CandleProvider 미등록"
 
-    # 두 provider 는 서로 다른 type
-    assert type(bithumb_provider) != type(upbit_provider), "bithumb/upbit provider 동일 type (오등록 의심)"
+    # 두 provider 는 서로 다른 type (isinstance 비교)
+    assert not isinstance(bithumb_provider, type(upbit_provider)), "bithumb/upbit provider 동일 type (오등록 의심)"
 
 
 # --------------------------------------------------------------------------- #
@@ -90,7 +87,6 @@ def test_new_exchange_activation_requires_only_adapters_registration(monkeypatch
     """
     # Mock 어댑터 클래스 (Layer 1 어댑터 최소 구현)
     mock_provider_instance = MagicMock(name="MockCandleProvider")
-    mock_ws_instance = MagicMock(name="MockWebSocketStream")
 
     # adapters.get_candle_provider 를 monkey-patch — "mock" exchange 추가
     original_get_candle = get_candle_provider
