@@ -20,7 +20,6 @@ Prometheus metrics (prometheus_client):
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import threading
 import time
@@ -147,8 +146,10 @@ class DRMode:
             if state == "UNKNOWN_TIER":
                 self._ambiguity_count += 1
                 if self._prom_ambiguity_counter is not None:
-                    with contextlib.suppress(Exception):
+                    try:
                         self._prom_ambiguity_counter.inc()
+                    except Exception:
+                        pass
             if state == "OPEN":
                 self._open_started_at = time.monotonic()
             logger.info(
@@ -240,16 +241,20 @@ class DRMode:
     def _emit_state_metric(self) -> None:
         """nas_reader_dr_state Gauge emit."""
         if self._prom_state_gauge is not None:
-            with contextlib.suppress(Exception):
+            try:
                 self._prom_state_gauge.set(_STATE_NUMERIC.get(self._state, -1))
+            except Exception:
+                pass
 
     def _emit_transition_metric(self, from_state: str, to_state: str) -> None:
         """nas_reader_dr_transitions_total Counter inc."""
         if self._prom_transitions_counter is not None:
-            with contextlib.suppress(Exception):
+            try:
                 self._prom_transitions_counter.labels(
                     from_state=from_state, to_state=to_state
                 ).inc()
+            except Exception:
+                pass
 
     def _get_state_numeric(self, state: str) -> int:
         """state → numeric mapping (test helper)."""
