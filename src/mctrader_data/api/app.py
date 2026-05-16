@@ -24,6 +24,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from mctrader_data.api.deps import initialize_readers
+from mctrader_data.api.realtime_stream import initialize_publisher, get_publisher
 from mctrader_data.api.routes_v1 import router as v1_router
 
 logger = logging.getLogger(__name__)
@@ -33,19 +34,30 @@ _PROFILE = os.environ.get("MCTRADER_PROFILE", "dev")  # dev|prod
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """ASGI lifespan: startup → io/ reader 싱글턴 초기화, shutdown → graceful drain."""
-    logger.info("MCT-184 data api startup (profile=%s) — consumer=MCT-185 dead-in-data", _PROFILE)
+    """ASGI lifespan: startup → io/ reader + realtime publisher 초기화, shutdown → drain."""
+    logger.info("MCT-185 data api startup (profile=%s)", _PROFILE)
+
+    # io/ reader 싱글턴 초기화
     try:
         initialize_readers()
     except Exception as e:
-        # NAS 미연결 환경 (dev/test) — startup 실패 시 warning only (dead-in-data)
-        logger.warning("MCT-184 data api: reader init warning (dead-in-data env) — %s", e)
+        logger.warning("MCT-185 data api: reader init warning — %s", e)
+
+    # MCT-185: realtime publisher startup (Redis Stream publisher)
+    publisher = initialize_publisher()
+    try:
+        await publisher.startup()
+    except Exception as e:
+        logger.warning("MCT-185 data api: realtime publisher startup warning — %s", e)
 
     yield  # 서비스 중 — FastAPI handles in-flight requests
 
-    # shutdown: SIGTERM graceful drain (in-flight Arrow IPC streaming 완료 후 종료)
-    # uvicorn --timeout-graceful-shutdown=60 으로 drain (§7.4 설계 확정)
-    logger.info("MCT-184 data api shutdown — graceful drain complete")
+    # shutdown: realtime publisher drain + SIGTERM graceful drain
+    publisher_inst = get_publisher()
+    if publisher_inst is not None:
+        await publisher_inst.shutdown()
+
+    logger.info("MCT-185 data api shutdown — graceful drain complete")
 
 
 def create_app(*, docs_enabled: bool | None = None) -> FastAPI:

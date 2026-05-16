@@ -935,3 +935,228 @@ def test_perf_baseline_idempotent_skip_latency() -> None:
     print(f"\n[Perf Baseline] idempotent skip ({n_iter} samples): mean={mean_ms:.2f}ms p99={p99:.2f}ms")
     # Sanity: idempotent skip (no write) should be fast
     assert mean_ms < 100, f"idempotent skip latency too high: {mean_ms:.2f}ms"
+
+
+# =============================================================================
+# MCT-185 tests — TC-185-1 ~ TC-185-4
+# =============================================================================
+
+
+# ---------- TC-185-1: RealtimeStreamPublisher import + startup ----------
+
+
+def test_tc185_1a_publisher_import() -> None:
+    """TC-185-1a: RealtimeStreamPublisher import 성공."""
+    from mctrader_data.api.realtime_stream import RealtimeStreamPublisher  # noqa: PLC0415
+
+    pub = RealtimeStreamPublisher()
+    assert pub is not None
+    assert pub.local_mode is False
+    assert pub.local_queue_size == 0
+    assert pub.publish_failures == 0
+
+
+def test_tc185_1b_stream_key_naming() -> None:
+    """TC-185-1b: Redis Stream key naming 정합 (ADR-030 §D15 prefix)."""
+    from mctrader_data.api.realtime_stream import _stream_key  # noqa: PLC0415
+    import os  # noqa: PLC0415
+
+    # default prefix = market
+    key = _stream_key("bithumb", "BTC_KRW")
+    assert key == "market:tick:bithumb:BTC_KRW", f"Unexpected key: {key}"
+
+    # env override
+    old = os.environ.get("REDIS_KEY_PREFIX_MARKET")
+    try:
+        os.environ["REDIS_KEY_PREFIX_MARKET"] = "testprefix"
+        key2 = _stream_key("upbit", "KRW-BTC")
+        assert key2 == "testprefix:tick:upbit:KRW-BTC", f"Unexpected env-override key: {key2}"
+    finally:
+        if old is None:
+            os.environ.pop("REDIS_KEY_PREFIX_MARKET", None)
+        else:
+            os.environ["REDIS_KEY_PREFIX_MARKET"] = old
+
+
+def test_tc185_1c_publisher_local_mode_on_redis_failure() -> None:
+    """TC-185-1c: Redis 연결 실패 시 local-only mode 전환 + publish → local queue."""
+    import asyncio  # noqa: PLC0415
+    from mctrader_data.api.realtime_stream import RealtimeStreamPublisher  # noqa: PLC0415
+
+    pub = RealtimeStreamPublisher()
+
+    # startup 실패 시나리오 (Redis 미배선)
+    async def run():
+        with patch("redis.asyncio.from_url") as mock_redis_factory:
+            mock_client = MagicMock()
+            mock_client.ping = MagicMock(side_effect=ConnectionRefusedError("Redis not available"))
+            mock_redis_factory.return_value = mock_client
+            await pub.startup()
+
+        assert pub.local_mode is True, "Should be local_mode after Redis connect fail"
+
+        # publish in local mode → goes to local queue
+        tick = MagicMock()
+        tick.exchange = "bithumb"
+        tick.symbol = "BTC_KRW"
+        tick.model_dump_json = MagicMock(return_value='{"ts_utc":"2026-05-17T09:00:00+00:00","price":"100000000"}')
+        await pub.publish_tick(tick)
+        assert pub.local_queue_size == 1, "Tick should be in local queue"
+
+    asyncio.run(run())
+
+
+def test_tc185_1d_publisher_xadd_retry_and_local_mode() -> None:
+    """TC-185-1d: XADD 5회 실패 → local-only mode 전환 (DR 완화)."""
+    import asyncio  # noqa: PLC0415
+    from mctrader_data.api.realtime_stream import RealtimeStreamPublisher  # noqa: PLC0415
+
+    pub = RealtimeStreamPublisher()
+    pub._local_mode = False  # simulate connected
+
+    async def run():
+        mock_redis = MagicMock()
+        mock_redis.xadd = MagicMock(side_effect=ConnectionRefusedError("Redis gone"))
+        pub._redis = mock_redis
+
+        tick = MagicMock()
+        tick.exchange = "bithumb"
+        tick.symbol = "BTC_KRW"
+        tick.model_dump_json = MagicMock(return_value='{"price":"100"}')
+
+        with (
+            patch.object(pub, "_emit_failure_counter"),
+            # asyncio.sleep 을 no-op으로 patch (테스트 속도)
+            patch("mctrader_data.api.realtime_stream.asyncio.sleep"),
+        ):
+            await pub.publish_tick(tick)
+
+        # After exhausting retries → local mode + queue
+        assert pub.local_mode is True
+        assert pub.publish_failures == 1
+        assert pub.local_queue_size == 1  # tick saved in local queue
+
+    asyncio.run(run())
+
+
+# ---------- TC-185-2: OpenAPI에 orderbook endpoint 등록 확인 ----------
+
+
+def test_tc185_2_orderbook_endpoints_registered() -> None:
+    """TC-185-2: /v1/historical/orderbook/snapshots + /ticks 경로 OpenAPI 등록."""
+    client = _make_client()
+    schema = client.get("/openapi.json").json()
+    paths = set(schema.get("paths", {}).keys())
+    assert "/v1/historical/orderbook/snapshots" in paths, f"Missing snapshots. Got: {paths}"
+    assert "/v1/historical/orderbook/ticks" in paths, f"Missing ticks. Got: {paths}"
+
+
+# ---------- TC-185-3: orderbook endpoint validation ----------
+
+
+def test_tc185_3a_orderbook_snapshots_invalid_exchange() -> None:
+    """TC-185-3a: snapshots — invalid exchange (uppercase) → 422."""
+    client = _make_client()
+    resp = client.get(
+        "/v1/historical/orderbook/snapshots",
+        params={
+            "exchange": "BITHUMB",  # must be lowercase
+            "symbol": "BTC_KRW",
+            "date": "2026-05-17",
+            "start_ts": "2026-05-17T09:00:00+00:00",
+            "end_ts": "2026-05-17T10:00:00+00:00",
+        },
+    )
+    assert resp.status_code == 422, f"Expected 422 for invalid exchange, got {resp.status_code}"
+
+
+def test_tc185_3b_orderbook_ticks_24h_range_exceeded() -> None:
+    """TC-185-3b: ticks — >24h range → 422."""
+    client = _make_client()
+    resp = client.get(
+        "/v1/historical/orderbook/ticks",
+        params={
+            "exchange": "bithumb",
+            "symbol": "BTC_KRW",
+            "date": "2026-05-17",
+            "start_ts": "2026-05-17T00:00:00+00:00",
+            "end_ts": "2026-05-18T01:00:00+00:00",  # 25h range
+        },
+    )
+    assert resp.status_code == 422, f"Expected 422 for >24h range, got {resp.status_code}"
+
+
+def test_tc185_3c_orderbook_ticks_invalid_timestamp() -> None:
+    """TC-185-3c: ticks — malformed timestamp → 422."""
+    client = _make_client()
+    resp = client.get(
+        "/v1/historical/orderbook/ticks",
+        params={
+            "exchange": "bithumb",
+            "symbol": "BTC_KRW",
+            "date": "2026-05-17",
+            "start_ts": "not-a-timestamp",
+            "end_ts": "2026-05-17T10:00:00+00:00",
+        },
+    )
+    assert resp.status_code == 422, f"Expected 422 for invalid timestamp, got {resp.status_code}"
+
+
+# ---------- TC-185-4: orderbook snapshot endpoint returns empty Arrow IPC ----------
+
+
+def test_tc185_4_orderbook_snapshots_empty_result() -> None:
+    """TC-185-4: scan_orderbook_events 0건 → 200 + empty Arrow IPC stream."""
+    client = _make_client()
+    with patch(
+        "mctrader_data.api.routes_v1.resolve_data_root",
+        return_value=Path("/nonexistent"),
+    ), patch(
+        "mctrader_data.orderbook_replay.scan_orderbook_events",
+        return_value=iter([]),
+    ):
+        resp = client.get(
+            "/v1/historical/orderbook/snapshots",
+            params={
+                "exchange": "bithumb",
+                "symbol": "BTC_KRW",
+                "date": "2026-05-17",
+                "start_ts": "2026-05-17T09:00:00+00:00",
+                "end_ts": "2026-05-17T10:00:00+00:00",
+            },
+        )
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    assert resp.headers["content-type"].startswith("application/vnd.apache.arrow.stream")
+    # valid Arrow IPC stream (empty)
+    buf = io.BytesIO(resp.content)
+    reader = pa.ipc.open_stream(buf)
+    table = reader.read_all()
+    assert len(table) == 0, f"Expected empty table, got {len(table)} rows"
+
+
+def test_tc185_4b_orderbook_ticks_empty_result() -> None:
+    """TC-185-4b: scan_ticks 0건 → 200 + empty Arrow IPC stream."""
+    client = _make_client()
+    with patch(
+        "mctrader_data.api.routes_v1.resolve_data_root",
+        return_value=Path("/nonexistent"),
+    ), patch(
+        "mctrader_data.orderbook_replay.scan_ticks",
+        return_value=iter([]),
+    ):
+        resp = client.get(
+            "/v1/historical/orderbook/ticks",
+            params={
+                "exchange": "bithumb",
+                "symbol": "BTC_KRW",
+                "date": "2026-05-17",
+                "start_ts": "2026-05-17T09:00:00+00:00",
+                "end_ts": "2026-05-17T10:00:00+00:00",
+            },
+        )
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    assert resp.headers["content-type"].startswith("application/vnd.apache.arrow.stream")
+    buf = io.BytesIO(resp.content)
+    reader = pa.ipc.open_stream(buf)
+    table = reader.read_all()
+    assert len(table) == 0

@@ -359,6 +359,203 @@ async def post_reverse_write_backtest_artifact(
     return BacktestArtifactResponse(synced=False, idempotent_skip=False)
 
 
+# ---------- historical orderbook (MCT-185 신설) ----------
+
+
+@router.get(
+    "/historical/orderbook/snapshots",
+    summary="Historical orderbook snapshots Arrow IPC stream (MCT-185)",
+    description=(
+        "orderbook_replay.scan_orderbook_events wrap. "
+        "응답 = Arrow IPC stream (application/vnd.apache.arrow.stream). "
+        "engine executor/tick_replay.py:26 cold-read cutover 대상 endpoint (§3.3). "
+        "24h max range per request. INV-2 bytes-level. T6 NAS 비노출."
+    ),
+    response_class=Response,
+    responses={
+        200: {"content": {ARROW_IPC_CONTENT_TYPE: {}}, "description": "Arrow IPC stream"},
+        422: {"description": "Validation error"},
+        503: {"description": "io/ reader not initialized"},
+    },
+)
+async def get_historical_orderbook_snapshots(
+    exchange: str = Query(description="Exchange identifier (e.g. bithumb, upbit)", max_length=32),
+    symbol: str = Query(description="Symbol (e.g. BTC_KRW, KRW-BTC)", max_length=64),
+    date: str = Query(description="ISO date YYYY-MM-DD"),
+    start_ts: str = Query(description="ISO8601 UTC start timestamp"),
+    end_ts: str = Query(description="ISO8601 UTC end timestamp (max 24h range)"),
+) -> Response:
+    """GET /v1/historical/orderbook/snapshots — scan_orderbook_events wrap.
+
+    executor/tick_replay.py:26 cutover scope (D2 cold-read cutover — engine#N).
+    INV-2: Arrow IPC bytes-level (serialize-only, 데이터 변형 0).
+    T6: NAS object layout 비노출 (Arrow IPC stream only).
+    """
+    import io as _io  # noqa: PLC0415
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    # exchange/symbol validation (T1 path traversal 차단)
+    if not re.match(r"^[a-z0-9_\-]+$", exchange):
+        raise HTTPException(status_code=422, detail=f"Invalid exchange: {exchange!r}")
+    if not re.match(r"^[A-Z0-9_/\-]+$", symbol):
+        raise HTTPException(status_code=422, detail=f"Invalid symbol: {symbol!r}")
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+        raise HTTPException(status_code=422, detail=f"Invalid date: {date!r}")
+
+    # parse timestamps
+    try:
+        start_dt = datetime.fromisoformat(start_ts.replace("Z", "+00:00"))
+        end_dt = datetime.fromisoformat(end_ts.replace("Z", "+00:00"))
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=timezone.utc)
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=422, detail=f"Invalid timestamp: {e}") from e
+
+    # 24h max range guard
+    delta = (end_dt - start_dt).total_seconds()
+    if delta <= 0:
+        raise HTTPException(status_code=422, detail="end_ts must be after start_ts")
+    if delta > 86400:
+        raise HTTPException(status_code=422, detail="Time range exceeds 24h maximum")
+
+    # data root resolution (NAS object layout 내부 — T6)
+    try:
+        root = resolve_data_root(root_override=None)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Data root unavailable: {e}") from e
+
+    try:
+        from mctrader_data.orderbook_replay import scan_orderbook_events  # noqa: PLC0415
+        from mctrader_market.records import OrderbookEventRecord  # noqa: PLC0415, F401
+        import pyarrow as pa  # noqa: PLC0415
+        import pyarrow.ipc  # noqa: PLC0415
+
+        events = list(scan_orderbook_events(
+            root=root,
+            exchange=exchange,
+            symbol=symbol,
+            start=start_dt,
+            end=end_dt,
+        ))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("historical/orderbook/snapshots error: %s", e)
+        raise HTTPException(status_code=503, detail=f"orderbook scan error: {e}") from e
+
+    # Serialize to Arrow IPC (INV-2: bytes-level, T6 NAS 비노출)
+    try:
+        import dataclasses  # noqa: PLC0415
+        rows = [dataclasses.asdict(ev) for ev in events]
+        table = pa.Table.from_pylist(rows) if rows else pa.table({})
+        buf = _io.BytesIO()
+        with pa.ipc.new_stream(buf, table.schema) as writer:
+            writer.write_table(table)
+        ipc_bytes = buf.getvalue()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Arrow IPC serialization error: {e}") from e
+
+    return Response(content=ipc_bytes, media_type=ARROW_IPC_CONTENT_TYPE)
+
+
+@router.get(
+    "/historical/orderbook/ticks",
+    summary="Historical orderbook ticks Arrow IPC stream (MCT-185)",
+    description=(
+        "orderbook_replay.scan_ticks wrap. "
+        "응답 = Arrow IPC stream (application/vnd.apache.arrow.stream). "
+        "engine executor/tick_replay.py:559 cold-read cutover 대상 endpoint (§3.3). "
+        "24h max range per request. INV-2 bytes-level. T6 NAS 비노출."
+    ),
+    response_class=Response,
+    responses={
+        200: {"content": {ARROW_IPC_CONTENT_TYPE: {}}, "description": "Arrow IPC stream"},
+        422: {"description": "Validation error"},
+        503: {"description": "io/ reader not initialized"},
+    },
+)
+async def get_historical_orderbook_ticks(
+    exchange: str = Query(description="Exchange identifier", max_length=32),
+    symbol: str = Query(description="Symbol", max_length=64),
+    date: str = Query(description="ISO date YYYY-MM-DD"),
+    start_ts: str = Query(description="ISO8601 UTC start timestamp"),
+    end_ts: str = Query(description="ISO8601 UTC end timestamp (max 24h range)"),
+) -> Response:
+    """GET /v1/historical/orderbook/ticks — scan_ticks wrap.
+
+    executor/tick_replay.py:559 cutover scope (D2 cold-read cutover — engine#N).
+    TickRecord payload → Arrow IPC stream (INV-2 bytes-level, T6 NAS 비노출).
+    """
+    import io as _io  # noqa: PLC0415
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    # exchange/symbol/date validation (T1 path traversal 차단)
+    if not re.match(r"^[a-z0-9_\-]+$", exchange):
+        raise HTTPException(status_code=422, detail=f"Invalid exchange: {exchange!r}")
+    if not re.match(r"^[A-Z0-9_/\-]+$", symbol):
+        raise HTTPException(status_code=422, detail=f"Invalid symbol: {symbol!r}")
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+        raise HTTPException(status_code=422, detail=f"Invalid date: {date!r}")
+
+    # parse timestamps
+    try:
+        start_dt = datetime.fromisoformat(start_ts.replace("Z", "+00:00"))
+        end_dt = datetime.fromisoformat(end_ts.replace("Z", "+00:00"))
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=timezone.utc)
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=422, detail=f"Invalid timestamp: {e}") from e
+
+    # 24h max range guard
+    delta = (end_dt - start_dt).total_seconds()
+    if delta <= 0:
+        raise HTTPException(status_code=422, detail="end_ts must be after start_ts")
+    if delta > 86400:
+        raise HTTPException(status_code=422, detail="Time range exceeds 24h maximum")
+
+    # data root resolution
+    try:
+        root = resolve_data_root(root_override=None)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Data root unavailable: {e}") from e
+
+    try:
+        from mctrader_data.orderbook_replay import scan_ticks  # noqa: PLC0415
+        import pyarrow as pa  # noqa: PLC0415
+        import pyarrow.ipc  # noqa: PLC0415
+
+        ticks = list(scan_ticks(
+            root=root,
+            exchange=exchange,
+            symbol=symbol,
+            start=start_dt,
+            end=end_dt,
+        ))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("historical/orderbook/ticks error: %s", e)
+        raise HTTPException(status_code=503, detail=f"tick scan error: {e}") from e
+
+    # Serialize to Arrow IPC (INV-2: bytes-level, T6 NAS 비노출)
+    try:
+        import dataclasses  # noqa: PLC0415
+        rows = [dataclasses.asdict(t) for t in ticks]
+        table = pa.Table.from_pylist(rows) if rows else pa.table({})
+        buf = _io.BytesIO()
+        with pa.ipc.new_stream(buf, table.schema) as writer:
+            writer.write_table(table)
+        ipc_bytes = buf.getvalue()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Arrow IPC serialization error: {e}") from e
+
+    return Response(content=ipc_bytes, media_type=ARROW_IPC_CONTENT_TYPE)
+
+
 # ---------- health ----------
 
 
