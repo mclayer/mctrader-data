@@ -119,3 +119,14 @@ def get_l1_reader() -> Any:
 TierReaderDep = Annotated[Any, Depends(get_tier_reader)]
 ColdReaderDep = Annotated[Any, Depends(get_cold_reader)]
 L1ReaderDep = Annotated[Any, Depends(get_l1_reader)]
+
+
+# MCT-185: RealtimeStreamPublisher DI provider
+def get_realtime_publisher() -> Any:
+    """FastAPI Depends: RealtimeStreamPublisher 싱글턴 반환 (None = local-only env)."""
+    from mctrader_data.api.realtime_stream import get_publisher  # noqa: PLC0415
+
+    return get_publisher()  # None = dev/test 환경 (publisher not started)
+
+
+RealtimePublisherDep = Annotated[Any, Depends(get_realtime_publisher)]

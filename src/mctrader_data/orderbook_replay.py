@@ -83,8 +83,43 @@ def _date_range(start: datetime, end: datetime) -> Iterator[str]:
         cur = (datetime.combine(cur, datetime.min.time()) + timedelta(days=1)).date()
 
 
+def _safe_path_component(value: str, name: str) -> str:
+    """Path traversal 방어 — exchange/symbol/date_str 등 path component sanitization.
+
+    '..' 또는 절대경로 문자 포함 시 ValueError raise.
+    허용 문자: A-Z a-z 0-9 _ - . (Parquet partition 명명 규칙 정합).
+    """
+    import re as _re  # noqa: PLC0415
+
+    if ".." in value or value.startswith("/") or value.startswith("\\"):
+        raise ValueError(f"Invalid {name}: path traversal detected ({value!r})")
+    if not _re.match(r"^[A-Za-z0-9_.=\-]+$", value):
+        raise ValueError(f"Invalid {name}: forbidden characters ({value!r})")
+    return value
+
+
+def _assert_within_root(root: Path, candidate: Path) -> Path:
+    """Boundary check — constructed path must be within root (CWE-22 guard).
+
+    Resolves both paths to absolute form and verifies candidate is a descendant.
+    Raises ValueError on violation (defense-in-depth after _safe_path_component).
+    """
+    root_resolved = root.resolve()
+    candidate_resolved = candidate.resolve()
+    try:
+        candidate_resolved.relative_to(root_resolved)
+    except ValueError:
+        raise ValueError(
+            f"Path traversal detected: {candidate_resolved!r} is outside root {root_resolved!r}"
+        ) from None
+    return candidate
+
+
 def _tick_partition_dir(root: Path, exchange: str, symbol: str, date_str: str) -> Path:
-    return (
+    _safe_path_component(exchange, "exchange")
+    _safe_path_component(symbol, "symbol")
+    _safe_path_component(date_str, "date_str")
+    candidate = (
         root
         / "market"
         / "ticks"
@@ -93,10 +128,14 @@ def _tick_partition_dir(root: Path, exchange: str, symbol: str, date_str: str) -
         / f"symbol={symbol}"
         / f"date={date_str}"
     )
+    return _assert_within_root(root, candidate)
 
 
 def _orderbook_partition_dir(root: Path, exchange: str, symbol: str, date_str: str) -> Path:
-    return (
+    _safe_path_component(exchange, "exchange")
+    _safe_path_component(symbol, "symbol")
+    _safe_path_component(date_str, "date_str")
+    candidate = (
         root
         / "market"
         / "orderbook"
@@ -105,6 +144,7 @@ def _orderbook_partition_dir(root: Path, exchange: str, symbol: str, date_str: s
         / f"symbol={symbol}"
         / f"date={date_str}"
     )
+    return _assert_within_root(root, candidate)
 
 
 def _row_to_tick(row: dict) -> TickRecord:
