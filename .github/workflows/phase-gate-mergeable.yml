@@ -1,4 +1,5 @@
 name: Phase Gate Mergeable (cross-repo)
+# Security: third-party actions are SHA-pinned per CFP-300 policy.
 
 on:
   pull_request:
@@ -9,17 +10,27 @@ permissions:
   issues: read
   checks: write
 
+env:
+  # CFP-795 / ADR-026 Amendment 4 §결정 6 — ALLOWED_HUB_REPOS hub repo 화이트리스트 (zero-trust anchor).
+  # story_uri (PR-body self-declared) 의 host+owner/repo 를 이 목록과 strict match.
+  # consumer overlay: .claude/_overlay/project.yaml phase_gate.allowed_hub_repos[] 로 확장 가능 (ADR-057 정합 — 축소 불가).
+  # 화이트리스트 미일치 시 즉시 cond2=false (fail-closed). PR body derive 절대 금지 (zero-trust).
+  # consumer overlay (mctrader-data): mctrader-hub 가 본 repo 의 Story SSOT 보유 — MCT-NNN.md §10 FIX Ledger binding source.
+  # dogfood default codeforge-internal-docs 유지 + mctrader-hub 확장 (ADR-057 정합 — 축소 불가, 확장 only).
+  ALLOWED_HUB_REPOS: "github.com/mclayer/codeforge-internal-docs,github.com/mclayer/mctrader-hub"
+
 jobs:
   check-gate:
     runs-on: ubuntu-latest
     steps:
       - name: Evaluate phase gate (cross-repo Story fetch)
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           # Cross-repo PAT for fetching Story file from any external repo via story_uri PR-body marker.
           # Falls back to GITHUB_TOKEN if PAT not configured (degraded: PR-label-only mode).
           # Story repo coordinate is parsed from story_uri URL itself (no hardcode — F3 fix CFP-63).
           CROSS_REPO_TOKEN: ${{ secrets.CODEFORGE_CROSS_REPO_PAT }}
+          ALLOWED_HUB_REPOS: ${{ env.ALLOWED_HUB_REPOS }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -34,7 +45,14 @@ jobs:
 
             let phaseLabel = null;
             let gateLabel = null;
+            let liveTouching = false;  // CFP-123 / ADR-030 — Live Epic lane-entry policy
             let sourceNote = '';
+
+            // CFP-123: Detect live_touching marker from PR body (Phase 1 explicit declare)
+            //   Story frontmatter `live_touching: true` will be parsed below from cross-repo Story fetch.
+            //   PR body marker form: `live_touching: true` (case-insensitive)
+            const prBodyLiveMatch = body.match(/live_touching:\s*true/i);
+            if (prBodyLiveMatch) liveTouching = true;
 
             // 2. Cross-repo Story fetch path (preferred — CFP-45 binding)
             if (storyUriMatch) {
@@ -50,11 +68,18 @@ jobs:
                   sourceNote = `story_uri found but CODEFORGE_CROSS_REPO_PAT secret missing (degraded)`;
                 } else {
                   try {
-                    const { Octokit } = require('@octokit/rest');
-                    const crossOcto = new Octokit({ auth: token });
-                    const { data: file } = await crossOcto.repos.getContent({
-                      owner: sOwner, repo: sRepo, path: sPath, ref: sRef
+                    // CFP-113 fix: @octokit/rest not bundled in github-script v7.
+                    // Use fetch directly with Authorization header.
+                    const url = `https://api.github.com/repos/${sOwner}/${sRepo}/contents/${sPath}?ref=${sRef}`;
+                    const resp = await fetch(url, {
+                      headers: {
+                        'Authorization': `token ${token}`,
+                        'Accept': 'application/vnd.github.v3+json',
+                        'User-Agent': 'phase-gate-mergeable-action'
+                      }
                     });
+                    if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+                    const file = await resp.json();
                     const content = Buffer.from(file.content, 'base64').toString('utf-8');
                     // Parse YAML frontmatter (simple regex — phase + gate fields)
                     const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
@@ -62,8 +87,10 @@ jobs:
                       const fm = fmMatch[1];
                       const phaseM = fm.match(/^phase:\s*(\S+)/m);
                       const gateM = fm.match(/^gate:\s*(\S+)/m);
+                      const liveM = fm.match(/^live_touching:\s*(true|false)/im);
                       if (phaseM) phaseLabel = phaseM[1].replace(/["']/g, '');
                       if (gateM) gateLabel = gateM[1].replace(/["']/g, '');
+                      if (liveM && liveM[1].toLowerCase() === 'true') liveTouching = true;
                       sourceNote = `Story ${sOwner}/${sRepo}#${sPath} frontmatter`;
                     } else {
                       sourceNote = `Story file fetched but no frontmatter found`;
@@ -96,16 +123,24 @@ jobs:
             }
 
             // 4. Last resort: PR labels
-            if (!phaseLabel) {
+            // CFP-113 fix: also supplement missing gate from PR labels even if Story
+            // provided phase. Story frontmatter typically has `phase:` but not `gate:`
+            // (gate is iteration-driven, not Story-fixed).
+            // CFP-123 fix: collect ALL gate:* labels (membership-style), not first-only —
+            //   Live touching Story can carry multiple gates (e.g. gate:security-test-pass + gate:live-entry-pass).
+            let prGateLabels = [];
+            if (!phaseLabel || !gateLabel) {
               const { data: prFull } = await github.rest.pulls.get({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 pull_number: pr.number
               });
               const prLabels = prFull.labels.map(l => l.name);
-              phaseLabel = prLabels.find(l => l.startsWith('phase:'));
-              gateLabel = prLabels.find(l => l.startsWith('gate:'));
-              sourceNote = sourceNote ? `${sourceNote}; PR labels last-resort` : 'PR labels (no Story binding)';
+              if (!phaseLabel) phaseLabel = prLabels.find(l => l.startsWith('phase:'));
+              prGateLabels = prLabels.filter(l => l.startsWith('gate:'));
+              if (!gateLabel) gateLabel = prGateLabels[0];  // legacy single-gate display
+              const supplementNote = sourceNote ? `${sourceNote}; PR labels supplement` : 'PR labels (no Story binding)';
+              sourceNote = supplementNote;
             }
 
             // 5. Determine required gate by file change scope
@@ -132,18 +167,166 @@ jobs:
             });
             const allLabels = prFullForEpic.data.labels.map(l => l.name);
             const isEpicLabel = allLabels.includes('type:epic');
+            // CFP-499 / ADR-010 Amendment 4 — sibling-pr label fast-pass.
+            //   wrapper Story 가 sibling repo 에 mechanical mirror sync PR 생성 시,
+            //   sibling PR 은 자체 설계리뷰 evidence 없음 (wrapper Story 의 PASS 결과는 wrapper PR 에 박제).
+            //   Orchestrator 가 sibling-pr label 부착 시 fast-pass — sibling PR 의 design review 정합성 은
+            //   wrapper Story PR 의 design review PASS 가 보증.
+            const isSiblingPr = allLabels.includes('sibling-pr');
+            // CFP-260 / CFP-261 / CFP-262 — scripts/ + CONTRIBUTING.md 추가 (operational tooling, not src code).
+            // Bootstrap script entries / drift check script / version bump CI helper 등 wrapper 운영 도구.
             const isDocOnly = !hasCode && files.every(f =>
               f.filename.endsWith('.md') ||
               f.filename.startsWith('docs/') ||
               f.filename.startsWith('wrapper/') ||
               f.filename.startsWith('.github/') ||
+              f.filename.startsWith('templates/') ||
+              f.filename.startsWith('scripts/') ||
+              f.filename.startsWith('.claude-plugin/') ||
+              f.filename.startsWith('.claude/_overlay/') ||   // CFP-758 #758 — consumer overlay SSOT (state-only)
+              f.filename.startsWith('.codeforge/') ||          // CFP-758 #503/#723 — counter reservation (non-executable state)
+              f.filename.startsWith('scope_manifests/') ||     // CFP-758 #503/#723 — Epic scope manifest (governance state)
               f.filename === 'CHANGELOG.md' ||
-              f.filename === 'README.md'
+              f.filename === 'README.md' ||
+              f.filename === 'CONTRIBUTING.md'
             );
-            if (isEpicLabel || isDocOnly) {
+
+            // CFP-795 / ADR-026 Amendment 4 §결정 6 — 4번째 fast-pass source: isPostMergeFix (3-조건 AND)
+            //
+            // 보안 설계 요약 (Change Plan §7 / §3 verbatim):
+            //   조건 1 (label) = PR author 영역 (단독 불충분 — self-declare 위조 attack surface)
+            //   조건 2 (hub Story §10 binding) = Orchestrator monopoly 영역 (fix-event-v1, CFP-32)
+            //   조건 3 (원 MERGED PR §7 보안 non-touch 양면) = 객관 파일 set 검사 (PR author 위조 불가)
+            //   3-조건 AND = single point of forgery 제거. fail-closed (판정 불가 시 BLOCK 유지).
+            //
+            // Helper 함수 2종:
+            //   checkHubStorySection10Binding(body, pr, token): 조건 2 — §10 FIX Ledger row binding
+            //   checkSecurityNonTouch(body, pr, files, github, context): 조건 3 — 양면 SECURITY_PATHS non-match
+
+            // SECURITY_PATHS: 조건 3 보안 경로 패턴 (§3.3 verbatim, Change Plan §7.2 STRIDE T1/T2 차단)
+            //   (a) 보안 분류 ADR — docs/adr/ADR-*.md (category:security 또는 title /security/i best-effort)
+            //   (b) docs/security/ — 보안 문서
+            //   consumer overlay 가 SECURITY_PATHS 확장 가능 (축소 불가 — ADR-057 정합)
+            const SECURITY_PATHS = [
+              /^docs\/adr\/ADR-.*\.md$/,   // (a) ADR 파일 (보안 분류 frontmatter best-effort — 파일명 패턴 1차 match)
+              /^docs\/security\//           // (b) 보안 문서
+            ];
+
+            // 조건 2 helper: hub Story §10 FIX Ledger row binding (cross-repo read)
+            // 기존 cross-repo fetch 메커니즘 (L48-90 패턴) 재사용 — 별도 API call 0
+            async function checkHubStorySection10Binding(body, pr, token) {
+              try {
+                // 2.1 story_uri: marker 파싱 (기존 L34 regex 재사용)
+                const storyUriMatch2 = body.match(/story_uri:\s*(\S+)/);
+                if (!storyUriMatch2) return false;  // marker 부재 → fail-closed
+                const uri2 = storyUriMatch2[1];
+                const m2 = uri2.match(/github\.com\/([^\/]+)\/([^\/]+)\/blob\/([^\/]+)\/(.+)/);
+                if (!m2) return false;
+                const [, sOwner2, sRepo2, sRef2, sPath2] = m2;
+
+                // 2.5 ALLOWED_HUB_REPOS 화이트리스트 strict match (Codex TP#2 P1 inline FIX, ADR-052 Amd4)
+                //     zero-trust anchor: story_uri 는 PR author self-declare → 화이트리스트가 신뢰 경계
+                //     public repo 는 PAT 없이도 readable → PAT scope 만으론 hub trust 입증 불가
+                const allowedHubs = (process.env.ALLOWED_HUB_REPOS || '')
+                  .split(',').map(h => h.trim()).filter(Boolean);
+                const hubKey = `github.com/${sOwner2}/${sRepo2}`;
+                if (!allowedHubs.some(h => h === hubKey)) return false;  // 화이트리스트 미일치 → fail-closed
+
+                // 2.2 PAT 확인 (degraded 시 fail-closed)
+                if (!token) return false;
+
+                // 2.3 기존 fetch 메커니즘 재사용 (L63-73 패턴)
+                const url2 = `https://api.github.com/repos/${sOwner2}/${sRepo2}/contents/${sPath2}?ref=${sRef2}`;
+                const resp2 = await fetch(url2, {
+                  headers: {
+                    'Authorization': `token ${token}`,
+                    'Accept': 'application/vnd.github.v3+json',
+                    'User-Agent': 'phase-gate-mergeable-action'
+                  }
+                });
+                if (!resp2.ok) return false;
+                const file2 = await resp2.json();
+                const content2 = Buffer.from(file2.content, 'base64').toString('utf-8');
+
+                // 2.4 §10 FIX Ledger 표 파싱 — §10. FIX Ledger 헤딩 이후 현재 PR 식별자 substring match
+                const section10Match = content2.match(/##\s*§10[.\s].*FIX Ledger([\s\S]*?)(?=\n##\s*§|\n##\s*[A-Z§]|$)/i);
+                if (!section10Match) return false;
+                const section10 = section10Match[1];
+
+                // EC-1: §10 row chain depth > 2 → escalate (재귀 hotfix 차단, §3.4)
+                //   corrects_pr 역참조 depth 추적: PR body 안 corrects_pr 로 이전 hotfix 참조 깊이 계산
+                const correctsPrMatch = body.match(/corrects_pr:\s*(\S+)/);
+                if (correctsPrMatch) {
+                  // F-003 (CodeReview iter 1, verified-true P1): depth count 가 §10 row 단위가 아닌 keyword 출현 substring count였음 (legitimate hotfix prose 안 키워드 3+ 시 false BLOCK 회귀). row split + per-line match로 정정 — Change Plan §3.4 "§10 row chain depth count" semantic 정합.
+                  const depthRows = section10.split(/\n/).filter(r => /(\bcorrects_pr\b|\bpost-merge-fix\b)/i.test(r)).length;
+                  if (depthRows > 2) return false;  // depth > 2 → escalate (BLOCK)
+                }
+
+                // 2.5 PR 식별자 substring match — 현재 PR 의 owner/repo#number 또는 URL
+                const prId = `${context.repo.owner}/${context.repo.repo}#${pr.number}`;
+                const prUrl = pr.html_url || '';
+                // F-002 (CodeReview iter 1, verified-true P1): PR identifier substring boundary 강제 — PR #80 vs §10 row #800 sub-prefix collision 차단
+                const prIdEscaped = prId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const prIdRegex = new RegExp(`(^|[^0-9])${prIdEscaped}([^0-9]|$)`);
+                return prIdRegex.test(section10) || (prUrl && section10.includes(prUrl));
+              } catch (e) {
+                return false;  // fetch 실패 → fail-closed
+              }
+            }
+
+            // 조건 3 helper: 원 MERGED PR §7 보안 non-touch 양면 (§3.3 verbatim)
+            //   (3a) 원 PR pulls.listFiles → SECURITY_PATHS non-match
+            //   (3b) 현재 hotfix PR 자체 files → SECURITY_PATHS non-match
+            //   cond3 = (3a) && (3b)
+            async function checkSecurityNonTouch(body, pr, files, github, context) {
+              try {
+                // (3b) hotfix PR 자체 보안 non-touch (현재 files 재사용)
+                const cond3b = files.every(f => !SECURITY_PATHS.some(p => p.test(f.filename)));
+                if (!cond3b) return false;  // short-circuit: hotfix 자체 보안 touch → BLOCK
+
+                // (3a) 원 MERGED PR §7 보안 non-touch
+                //   corrects_pr: <owner>/<repo>#<N> marker 파싱
+                const correctsPrMatch2 = body.match(/corrects_pr:\s*([^\s/]+\/[^\s#]+)#(\d+)/);
+                if (!correctsPrMatch2) return false;  // marker 부재 → fail-closed
+                const [, corrOwnerRepo, corrNum] = correctsPrMatch2;
+                const [corrOwner, corrRepo] = corrOwnerRepo.split('/');
+                if (!corrOwner || !corrRepo) return false;
+
+                // 원 PR files fetch (github.rest.pulls.listFiles)
+                const { data: origFiles } = await github.rest.pulls.listFiles({
+                  owner: corrOwner,
+                  repo: corrRepo,
+                  pull_number: parseInt(corrNum, 10)
+                });
+                const cond3a = origFiles.every(f => !SECURITY_PATHS.some(p => p.test(f.filename)));
+                return cond3a;  // (3a) && (3b) — cond3b 은 이미 위에서 검사
+              } catch (e) {
+                return false;  // fetch 실패 → fail-closed
+              }
+            }
+
+            // 조건 1 — post-merge-fix label (기존 allLabels.includes 동형, L159/L165 패턴)
+            const hasPostMergeFixLabel = allLabels.includes('post-merge-fix');
+
+            // short-circuit: 조건 1 미충족 시 조건 2/3 fetch skip (API 절약 — OpRiskArch §7.4 rate-limit)
+            let isPostMergeFix = false;
+            if (hasPostMergeFixLabel) {
+              // 조건 2 — hub Story §10 FIX Ledger row binding (cross-repo audit trail)
+              const cond2 = await checkHubStorySection10Binding(body, pr, process.env.CROSS_REPO_TOKEN);
+              // 조건 3 — 원 MERGED PR §7 보안 non-touch 양면
+              const cond3 = await checkSecurityNonTouch(body, pr, files, github, context);
+              isPostMergeFix = cond2 && cond3;  // 조건 1(label)은 진입 가드, AND 결합은 2∧3
+            }
+
+            // OR-gate 4-way 확장 (Refactor: additive, 기존 source 무변경 — Change Plan §3.1)
+            if (isEpicLabel || isSiblingPr || isDocOnly || isPostMergeFix) {
               const reason = isEpicLabel
                 ? `type:epic label fast-pass (CFP-106 #143 fix)`
-                : `doc-only PR fast-pass — files: ${files.map(f=>f.filename).slice(0,3).join(', ')}${files.length>3?'...':''} (CFP-106 #143 fix)`;
+                : isSiblingPr
+                ? `sibling-pr label fast-pass (CFP-499 / ADR-010 Amendment 4 — wrapper Story mirror sync PR)`
+                : isDocOnly
+                ? `doc-only PR fast-pass — files: ${files.map(f=>f.filename).slice(0,3).join(', ')}${files.length>3?'...':''} (CFP-106 #143 fix)`
+                : `post-merge-fix 3-조건 AND fast-pass (ADR-026 Amendment 4 §결정 6 — label ∧ Story §10 binding ∧ 원 PR §7 보안 non-touch 양면)`;
               await github.rest.checks.create({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -156,15 +339,109 @@ jobs:
               return;
             }
 
-            const required = hasCode
-              ? { phase: 'phase:보안-테스트', gate: 'gate:security-test-pass' }
-              : { phase: 'phase:설계-리뷰', gate: 'gate:design-review-pass' };
+            // CFP-113 fix: trust Story frontmatter phase when present.
+            // Phase=설계 (Phase 1 PR) → gate:design-review-pass regardless of hasCode.
+            // Phase=구현/구현-리뷰/구현-테스트/보안-테스트 → match per-phase gate.
+            // Fallback to hasCode heuristic only when no Story binding.
+            let required;
+            if (phaseLabel === 'phase:설계' || phaseLabel === '설계' || phaseLabel === 'phase:설계-리뷰' || phaseLabel === '설계-리뷰') {
+              required = { phase: phaseLabel, gate: 'gate:design-review-pass' };
+            } else if (phaseLabel === 'phase:보안-테스트' || phaseLabel === '보안-테스트') {
+              required = { phase: phaseLabel, gate: 'gate:security-test-pass' };
+            } else if (phaseLabel === 'phase:구현' || phaseLabel === '구현' || phaseLabel === 'phase:구현-리뷰' || phaseLabel === '구현-리뷰') {
+              // CFP-342 fix: Phase 2 PR (구현 phase) — gate:design-review-pass 만 요구
+              // (CFP-317 / ADR-048: security-test gate 기본 불필요, lanes.security_ai:true opt-in만)
+              required = { phase: phaseLabel, gate: 'gate:design-review-pass' };
+            } else {
+              // No Story binding — file-based heuristic (legacy).
+              // CFP-317 / ADR-048: code PRs no longer require gate:security-test-pass by default.
+              // GitHub CI handles code quality gate. Design review gate applies universally.
+              required = { phase: 'phase:설계-리뷰', gate: 'gate:design-review-pass' };
+            }
 
             const phaseOk = phaseLabel === required.phase;
-            const gateOk = gateLabel === required.gate;
-            const summary = (phaseOk && gateOk)
-              ? `phase + gate satisfied: ${required.phase} + ${required.gate} (source: ${sourceNote})`
-              : `Awaiting: phase=${required.phase} (current=${phaseLabel || 'none'}), gate=${required.gate} (current=${gateLabel || 'none'}) (source: ${sourceNote})`;
+            // CFP-123 fix: gate membership check (PR may carry multiple gates simultaneously)
+            //   Required gate must be PRESENT among PR gate labels — first-label strict equality
+            //   would false-fail when PR carries both gate:security-test-pass + gate:live-entry-pass.
+            let gateOk = prGateLabels.includes(required.gate)
+              || gateLabel === required.gate;  // fallback when prGateLabels not populated (cross-repo Story binding path)
+
+            // CFP-133 fix (#239): if gate label not attached, fall back to PR comment
+            //   recognition. autonomous mode (사용자 directive Sonnet decider 제외) 에서 label
+            //   부착이 누락 — review chain PASS comment 가 PR 에 이미 박제되어 있으면 그것을
+            //   evidence 로 인정. CFP-61/ADR-022 §결정 4 invariant 보존 (PL synthesis only,
+            //   label attachment by Orchestrator) — 단순히 evidence source 확장.
+            //
+            //   Comment prefix mapping (comment-prefix-registry-v1):
+            //     [설계-리뷰] ... PASS  → gate:design-review-pass evidence
+            //     [구현-리뷰] ... PASS  → (gate 무, phase progression 만)
+            //     [구현-테스트] ... PASS|N/A → (gate 무)
+            //     [보안-테스트] ... PASS|N/A → gate:security-test-pass evidence
+            let gateCommentEvidence = null;
+            if (!gateOk) {
+              try {
+                const { data: comments } = await github.rest.issues.listComments({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  per_page: 100
+                });
+                // Lane → gate prefix mapping
+                const lanePrefixForGate = {
+                  'gate:design-review-pass': '[설계-리뷰]',
+                  'gate:security-test-pass': '[보안-테스트]'
+                };
+                const targetPrefix = lanePrefixForGate[required.gate];
+                if (targetPrefix) {
+                  const passRegex = new RegExp(
+                    `^\\s*##?\\s*\\${targetPrefix}\\s.*\\b(PASS|N/A)\\b`,
+                    'm'
+                  );
+                  for (const c of comments) {
+                    const body = c.body || '';
+                    if (passRegex.test(body)) {
+                      gateOk = true;
+                      gateCommentEvidence = `${targetPrefix} comment #${c.id}`;
+                      break;
+                    }
+                  }
+                }
+              } catch (e) {
+                // listComments 실패 = silent fallback (label-only 동작 유지)
+              }
+            }
+
+            // CFP-123 / ADR-030: Live Epic lane-entry gate
+            //   When Story / PR is Live touching AND we're at security-test phase (Phase 2 PR merge gate),
+            //   require gate:live-entry-pass label IN ADDITION to gate:security-test-pass.
+            //   Detection: gate:live-entry-pass attached to PR (consumer CI 또는 Orchestrator 부착).
+            const isLivePhase = required.phase === 'phase:보안-테스트' || required.phase === '보안-테스트';
+            const requireLiveEntry = liveTouching && isLivePhase;
+            let liveEntryOk = true;
+            if (requireLiveEntry) {
+              if (prGateLabels.length === 0) {
+                // prGateLabels not populated when Story binding satisfied phase + gate fully —
+                // re-fetch PR labels to verify Live entry gate presence.
+                const { data: prFullForLive } = await github.rest.pulls.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: pr.number
+                });
+                prGateLabels = prFullForLive.labels.map(l => l.name).filter(l => l.startsWith('gate:'));
+              }
+              liveEntryOk = prGateLabels.includes('gate:live-entry-pass');
+            }
+
+            const allOk = phaseOk && gateOk && liveEntryOk;
+            const liveNote = requireLiveEntry
+              ? (liveEntryOk
+                  ? `, gate:live-entry-pass ✓ (Live touching)`
+                  : `, gate:live-entry-pass MISSING (Live touching Story — ADR-030)`)
+              : '';
+            const evidenceNote = gateCommentEvidence ? ` (evidence: ${gateCommentEvidence})` : '';
+            const summary = allOk
+              ? `phase + gate satisfied: ${required.phase} + ${required.gate}${evidenceNote}${liveNote} (source: ${sourceNote})`
+              : `Awaiting: phase=${required.phase} (current=${phaseLabel || 'none'}), gate=${required.gate} (current=${gateLabel || 'none'})${liveNote} (source: ${sourceNote})`;
 
             await github.rest.checks.create({
               owner: context.repo.owner,
@@ -172,6 +449,6 @@ jobs:
               name: 'phase-gate-mergeable',
               head_sha: pr.head.sha,
               status: 'completed',
-              conclusion: (phaseOk && gateOk) ? 'success' : 'action_required',
+              conclusion: allOk ? 'success' : 'action_required',
               output: { title: 'Phase Gate', summary: summary }
             });
