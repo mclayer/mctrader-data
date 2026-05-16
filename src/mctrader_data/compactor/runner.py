@@ -298,9 +298,13 @@ class CompactorRunner:
             )
 
 
+_LEGACY_BATCH_DEFAULT = 500
+
+
 def scan_and_cleanup_legacy(
     root: Path,
     nas_uploader: NASUploader,
+    batch_limit: int | None = None,
 ) -> dict[str, int]:
     """legacy local parquet 스캔 + 4중 HEAD verify pass면 retroactive unlink (MCT-189 D-3 C path A).
 
@@ -308,18 +312,40 @@ def scan_and_cleanup_legacy(
     legacy Parquet 자동 회수. promote_l1() 위임 = 동일 invariant (INV-4 HEAD fail = local 보존,
     pre-delete guard, fd-consistent sha256+size). 본 함수는 단순 스캔+위임.
 
+    자체 페이싱 (batch_limit):
+        production 130GB / 260k+ parquet 환경에서 batch_limit=500 기본 = sweep당 max ~50sec
+        (~100ms/parquet × 500), 약 520 sweep × 6 min = ~52 시간에 점진 회수.
+        첫 sweep stall 회피, compaction loop 차단 없음.
+        cursor 별도 불요 — full glob 재실행 시 이미 unlink된 file은 자연 사라져
+        다음 batch 가 다음 500개 picks up.
+        env MCTRADER_LEGACY_CLEANUP_BATCH 로 조정 가능.
+
+    PromotionVerifyError 처리 시 retry_queue enqueue 미수행
+        (DualWriter wiring path 와 비대칭) — legacy 데이터는 NAS object 영구 부재 가능
+        (MCT-189 이전 wiring 누락 기간 누락 PUT) → retry_queue 무한 backlog 위험 방지.
+        preserved file은 다음 6-min sweep 자연 재시도. 의도된 분리.
+
     Args:
         root: data root (예: /var/lib/mctrader/data)
-        nas_uploader: NASUploader (head_object 4-tuple + enqueue_retry 보유)
+        nas_uploader: NASUploader (head_object 4-tuple 보유)
+        batch_limit: sweep당 최대 처리 건수 (None = env MCTRADER_LEGACY_CLEANUP_BATCH,
+            기본 500). 달성 시 즉시 반환 — 다음 cycle 에서 이어짐.
 
     Returns:
-        {"cleaned": int, "preserved": int, "errors": int}
+        {"cleaned": int, "preserved": int, "errors": int, "batch_limit": int}
         preserved = HEAD verify fail (정상 안전망 — INV-4)
     """
     from mctrader_data.compactor.promotion import promote_l1, PromotionVerifyError
 
+    if batch_limit is None:
+        batch_limit = int(
+            os.environ.get("MCTRADER_LEGACY_CLEANUP_BATCH", str(_LEGACY_BATCH_DEFAULT))
+        )
+
     cleaned = preserved = errors = 0
     for parquet in root.glob("market/**/*.parquet"):
+        if cleaned + preserved + errors >= batch_limit:
+            break  # 자체 페이싱 — 다음 6-min sweep 에서 이어서 진행
         # local → NAS key 변환: root 기준 relative path, POSIX 경로
         rel = parquet.relative_to(root)
         nas_key = str(rel).replace("\\", "/")
@@ -337,17 +363,18 @@ def scan_and_cleanup_legacy(
         except PromotionVerifyError:
             preserved += 1
             log.info("[runner] legacy preserved (HEAD verify fail) path=%s", rel)
-        except Exception as e:
+        except (OSError, RuntimeError):
             errors += 1
-            log.warning("[runner] legacy cleanup error path=%s err=%s", rel, e)
+            log.exception("[runner] legacy cleanup error path=%s", rel)
 
     log.info(
-        "[runner] legacy cleanup: cleaned=%d preserved=%d errors=%d",
+        "[runner] legacy cleanup batch: cleaned=%d preserved=%d errors=%d limit=%d",
         cleaned,
         preserved,
         errors,
+        batch_limit,
     )
-    return {"cleaned": cleaned, "preserved": preserved, "errors": errors}
+    return {"cleaned": cleaned, "preserved": preserved, "errors": errors, "batch_limit": batch_limit}
 
 
 def run_backfill(
