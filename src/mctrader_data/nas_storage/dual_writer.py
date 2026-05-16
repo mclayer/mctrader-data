@@ -112,7 +112,9 @@ class DualWriter:
             → tmp_path.unlink(missing_ok=True) → DualWriteResult(status="hard_floor_blocked").
 
     §6.7 Cross-module contract (MCT-150 §6.7 직접 propagation):
-    - committed/local_only → caller source 삭제 가능.
+    - committed → MCT-189 D-2 A: DualWriter self-delete (caller 0건 재발 차단).
+                  source(data as Path) promote_l1() 4중 verify 후 삭제.
+    - local_only → caller source 삭제 가능.
     - hard_floor_blocked → caller source retain 의무 (RPO=0, S8 user_confirmed).
 
     ADR-017 hot path 무영향: 본 writer 가 L3 cold tier callsite 만 담당, collector WAL/L1
@@ -236,6 +238,25 @@ class DualWriter:
         if nas_put_result.status in _COMMITTED_STATUSES:
             # Both sides committed → atomic visible (local rename)
             tmp_path.rename(local_path)
+            # MCT-189 D-2 A: DualWriter self-delete (caller 0건 재발 차단)
+            # source(data as Path) 를 promote_l1() 4중 verify 후 삭제
+            if isinstance(data, Path) and data != local_path:
+                from mctrader_data.compactor.promotion import (  # noqa: PLC0415
+                    promote_l1,
+                    PromotionVerifyError,
+                )
+                try:
+                    promote_l1(
+                        local_path=data,
+                        nas_uploader=self._uploader,
+                        nas_key=nas_key,
+                        segment_id=nas_key,
+                    )
+                except PromotionVerifyError as e:
+                    log.warning(
+                        "[dual_writer] promote_l1 verify failed — source preserved, manual cleanup required: %s",
+                        e,
+                    )
             dwr_status: Literal["committed", "local_only", "hard_floor_blocked"] = "committed"
 
         elif nas_put_result.status == _QUEUED_STATUS:
@@ -344,6 +365,24 @@ class DualWriter:
 
         # PutResult.status → DualWriteResult.status 변환 (§6.7 Cross-module contract)
         if nas_put_result.status in _COMMITTED_STATUSES:
+            # MCT-189 D-2 A: DualWriter self-delete (caller 0건 재발 차단)
+            # put_l1() = path 가 source이자 NAS object → promote_l1() 4중 verify 후 삭제
+            from mctrader_data.compactor.promotion import (  # noqa: PLC0415
+                promote_l1,
+                PromotionVerifyError,
+            )
+            try:
+                promote_l1(
+                    local_path=path,
+                    nas_uploader=self._uploader,
+                    nas_key=nas_key,
+                    segment_id=nas_key,
+                )
+            except PromotionVerifyError as e:
+                log.warning(
+                    "[dual_writer] put_l1 promote_l1 verify failed — local preserved, manual cleanup required: %s",
+                    e,
+                )
             dwr_status: Literal["committed", "local_only", "hard_floor_blocked"] = "committed"
         elif nas_put_result.status == _QUEUED_STATUS:
             dwr_status = "local_only"
