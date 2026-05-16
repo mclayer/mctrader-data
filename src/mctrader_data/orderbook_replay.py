@@ -98,28 +98,53 @@ def _safe_path_component(value: str, name: str) -> str:
     return value
 
 
+def _assert_within_root(root: Path, candidate: Path) -> Path:
+    """Boundary check — constructed path must be within root (CWE-22 guard).
+
+    Resolves both paths to absolute form and verifies candidate is a descendant.
+    Raises ValueError on violation (defense-in-depth after _safe_path_component).
+    """
+    root_resolved = root.resolve()
+    candidate_resolved = candidate.resolve()
+    try:
+        candidate_resolved.relative_to(root_resolved)
+    except ValueError:
+        raise ValueError(
+            f"Path traversal detected: {candidate_resolved!r} is outside root {root_resolved!r}"
+        ) from None
+    return candidate
+
+
 def _tick_partition_dir(root: Path, exchange: str, symbol: str, date_str: str) -> Path:
-    return (
+    _safe_path_component(exchange, "exchange")
+    _safe_path_component(symbol, "symbol")
+    _safe_path_component(date_str, "date_str")
+    candidate = (
         root
         / "market"
         / "ticks"
         / f"schema_version={TICK_SCHEMA_VERSION}"
-        / f"exchange={_safe_path_component(exchange, 'exchange')}"
-        / f"symbol={_safe_path_component(symbol, 'symbol')}"
-        / f"date={_safe_path_component(date_str, 'date_str')}"
+        / f"exchange={exchange}"
+        / f"symbol={symbol}"
+        / f"date={date_str}"
     )
+    return _assert_within_root(root, candidate)
 
 
 def _orderbook_partition_dir(root: Path, exchange: str, symbol: str, date_str: str) -> Path:
-    return (
+    _safe_path_component(exchange, "exchange")
+    _safe_path_component(symbol, "symbol")
+    _safe_path_component(date_str, "date_str")
+    candidate = (
         root
         / "market"
         / "orderbook"
         / f"schema_version={ORDERBOOK_SCHEMA_VERSION}"
-        / f"exchange={_safe_path_component(exchange, 'exchange')}"
-        / f"symbol={_safe_path_component(symbol, 'symbol')}"
-        / f"date={_safe_path_component(date_str, 'date_str')}"
+        / f"exchange={exchange}"
+        / f"symbol={symbol}"
+        / f"date={date_str}"
     )
+    return _assert_within_root(root, candidate)
 
 
 def _row_to_tick(row: dict) -> TickRecord:
