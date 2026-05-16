@@ -21,6 +21,7 @@ from .gc import run_gc  # filesystem GC (24h grace deletion of .compacted sealed
 from .backfill import iter_frozen_segments, BackfillManifest
 
 if TYPE_CHECKING:
+    from mctrader_data.nas_storage.nas_uploader import NASUploader
     from mctrader_data.nas_storage.dual_writer import DualWriter
 
 log = logging.getLogger(__name__)
@@ -29,6 +30,10 @@ SCAN_INTERVAL_SECONDS = 30
 L2_INTERVAL_SECONDS = 300
 L3_INTERVAL_SECONDS = 3600
 DEFAULT_GC_INTERVAL_SECONDS = 300  # MCT-133 A1 Task 6c — stdlib gc.collect cadence
+
+# MCT-189 D-3 C: legacy retroactive cleanup cadence.
+# 12 ticks × 30s = 360s ≈ every 6 minutes (ample cadence; 130 GB cleanup is best-effort).
+LEGACY_CLEANUP_EVERY_N_CYCLES: int = 12
 
 
 class CompactorRunner:
@@ -51,6 +56,8 @@ class CompactorRunner:
         self._last_l2 = 0.0
         self._last_l3 = 0.0
         self._last_gc = 0.0
+        # MCT-189 D-3 C: legacy cleanup cycle counter
+        self._cycle_count: int = 0
         # MCT-133 A1 Task 6c: interval-driven stdlib gc.collect() to release
         # pyarrow Python-heap buffers between compaction passes. Knob shipped
         # inert in Task 4 (compose.yml MCTRADER_COMPACTOR_GC_INTERVAL_SECONDS).
@@ -115,6 +122,26 @@ class CompactorRunner:
             self._last_gc = now
             collected = gc.collect()
             log.debug("[compactor] gc.collect() released %d objects", collected)
+
+        # MCT-189 D-3 C: retroactive legacy cleanup (pre-wiring era parquet files).
+        # Best-effort; errors are logged but never propagate to stop the main loop.
+        self._cycle_count += 1
+        if self._cycle_count % LEGACY_CLEANUP_EVERY_N_CYCLES == 0:
+            _nas_uploader_ref = (
+                self._dual_writer._uploader  # type: ignore[union-attr]
+                if self._dual_writer is not None
+                else None
+            )
+            if _nas_uploader_ref is not None:
+                try:
+                    await asyncio.get_running_loop().run_in_executor(
+                        None,
+                        scan_and_cleanup_legacy,
+                        self._root,
+                        _nas_uploader_ref,
+                    )
+                except Exception:
+                    log.exception("[compactor] legacy cleanup tick error — continuing")
 
         run_gc(self._root)
 
@@ -269,6 +296,58 @@ class CompactorRunner:
                 " — SOP MANUAL_GATE escalation 의무",
                 tier, nas_key,
             )
+
+
+def scan_and_cleanup_legacy(
+    root: Path,
+    nas_uploader: NASUploader,
+) -> dict[str, int]:
+    """legacy local parquet 스캔 + 4중 HEAD verify pass면 retroactive unlink (MCT-189 D-3 C path A).
+
+    pre-wiring era (45e501c MCT-184 partial wiring + MCT-169 정의만 LAND 기간) 누적
+    legacy Parquet 자동 회수. promote_l1() 위임 = 동일 invariant (INV-4 HEAD fail = local 보존,
+    pre-delete guard, fd-consistent sha256+size). 본 함수는 단순 스캔+위임.
+
+    Args:
+        root: data root (예: /var/lib/mctrader/data)
+        nas_uploader: NASUploader (head_object 4-tuple + enqueue_retry 보유)
+
+    Returns:
+        {"cleaned": int, "preserved": int, "errors": int}
+        preserved = HEAD verify fail (정상 안전망 — INV-4)
+    """
+    from mctrader_data.compactor.promotion import promote_l1, PromotionVerifyError
+
+    cleaned = preserved = errors = 0
+    for parquet in root.glob("market/**/*.parquet"):
+        # local → NAS key 변환: root 기준 relative path, POSIX 경로
+        rel = parquet.relative_to(root)
+        nas_key = str(rel).replace("\\", "/")
+        try:
+            result = promote_l1(
+                local_path=parquet,
+                nas_uploader=nas_uploader,
+                nas_key=nas_key,
+                segment_id=f"legacy-{rel}",
+            )
+            # INV-6: already_promoted = local 부재로 진입 불가 (glob 결과는 local 존재 보장).
+            # 방어 처리: already_promoted도 cleaned 카운트 (NAS only 상태 = 정상).
+            if result.status in ("promoted", "already_promoted"):
+                cleaned += 1
+        except PromotionVerifyError:
+            preserved += 1
+            log.info("[runner] legacy preserved (HEAD verify fail) path=%s", rel)
+        except Exception as e:
+            errors += 1
+            log.warning("[runner] legacy cleanup error path=%s err=%s", rel, e)
+
+    log.info(
+        "[runner] legacy cleanup: cleaned=%d preserved=%d errors=%d",
+        cleaned,
+        preserved,
+        errors,
+    )
+    return {"cleaned": cleaned, "preserved": preserved, "errors": errors}
 
 
 def run_backfill(
