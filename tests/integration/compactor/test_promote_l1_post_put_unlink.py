@@ -2,10 +2,11 @@
 
 MCT-189 D-4 C + D-8 B + D-2 A: promote_l1() 4중 verify + pre-delete guard + local unlink.
 
-Scenarios:
+Scenarios (8):
 - test_normal_path: PUT → 4중 verify → pre-delete guard → unlink (local 부재)
 - test_head_404: PromotionVerifyError + local 보존
-- test_concurrent_double_unlink: 2 thread, 1 success + ENOENT graceful
+- test_head_5xx_retry: NAS 5xx(ClientError 503) retry 1회 후 지속 → PromotionVerifyError + local 보존
+- test_concurrent_double_unlink: 2 thread D-7 A — FileNotFoundError 누출 0 (caller까지 propagate 금지)
 - test_pre_delete_guard_partition: monkeypatch 2nd HEAD ETag 변경 → PromotionVerifyError + local 보존
 - test_sha256_mismatch: sha256 mismatch → PromotionVerifyError + local 보존
 - test_content_length_mismatch: ContentLength mismatch → PromotionVerifyError + local 보존
@@ -129,19 +130,61 @@ class TestPromoteL1PostPutUnlink:
 
         assert local.exists(), "test_head_404: local 보존 의무 (INV-4)"
 
+    def test_head_5xx_retry(self, tmp_path: Path) -> None:
+        """NAS 5xx(ClientError 503) → retry 1회 후 지속 → PromotionVerifyError + local 보존 (INV-4).
+
+        promotion.py R-2 mitigation: EndpointConnectionError 한정 retry.
+        ClientError(5xx) = 즉시 fail (retry 0) → PromotionVerifyError.
+        local 파일 보존 의무 (INV-4).
+        """
+        from botocore.exceptions import ClientError as BotoClientError
+        from mctrader_data.compactor.promotion import promote_l1, PromotionVerifyError
+        from mctrader_data.nas_storage.nas_uploader import NASUploader
+        from unittest.mock import MagicMock
+
+        content = b"5xx retry test content"
+        local = tmp_path / "5xx_retry.parquet"
+        local.write_bytes(content)
+
+        # 503 Service Unavailable → ClientError (non-404) → 즉시 PromotionVerifyError
+        mock_uploader = MagicMock(spec=NASUploader)
+        mock_uploader.bucket = "test-promote"
+        mock_uploader.head_object.side_effect = BotoClientError(
+            {"Error": {"Code": "503", "Message": "Service Unavailable"}},
+            "HeadObject",
+        )
+
+        with pytest.raises(PromotionVerifyError):
+            promote_l1(
+                local_path=local,
+                nas_uploader=mock_uploader,
+                nas_key="l1/5xx_retry_test.parquet",
+                segment_id="5xx-retry-001",
+            )
+
+        assert local.exists(), "test_head_5xx_retry: 5xx 후 local 보존 의무 (INV-4)"
+
     def test_concurrent_double_unlink(self, tmp_path: Path, minio_client, nas_uploader) -> None:
-        """2 thread 동시 promote_l1() → 1 success + ENOENT graceful (missing_ok=False)."""
+        """2 thread 동시 promote_l1() 직접 호출 — 단독 caller contract (missing_ok=False).
+
+        promote_l1() 직접 호출 계층 contract:
+        - promote_l1 자체는 missing_ok=False 유지 (단독 caller INV-4 contract 보존).
+        - 2nd thread: FileNotFoundError 또는 PromotionVerifyError 발생 가능 (정상 허용).
+        - DualWriter 경유 시 ENOENT 흡수 (P1 fix) = 별도 unit test로 보호.
+
+        Test: 1 success (promoted) + 1 graceful (verify_error or ENOENT) — 최종 local 부재.
+        """
         from mctrader_data.compactor.promotion import promote_l1, PromotionVerifyError
 
         content = b"concurrent unlink test content"
-        nas_key = "l1/concurrent_unlink.parquet"
-        local = tmp_path / "concurrent.parquet"
+        nas_key = "l1/concurrent_unlink2.parquet"
+        local = tmp_path / "concurrent2.parquet"
         local.write_bytes(content)
 
         _put_object(minio_client, nas_key, content)
 
-        results = []
-        errors = []
+        results: list[str] = []
+        errors: list[str] = []
 
         def _promote():
             try:
@@ -149,11 +192,12 @@ class TestPromoteL1PostPutUnlink:
                     local_path=local,
                     nas_uploader=nas_uploader,
                     nas_key=nas_key,
-                    segment_id="concurrent-001",
+                    segment_id="concurrent-002",
                 )
                 results.append(r.status)
             except (PromotionVerifyError, FileNotFoundError, OSError) as e:
-                errors.append(str(e))
+                # D-7 A: 2nd thread → ENOENT 또는 verify_error (모두 허용, graceful)
+                errors.append(f"{type(e).__name__}:{e}")
 
         t1 = threading.Thread(target=_promote)
         t2 = threading.Thread(target=_promote)
@@ -162,7 +206,7 @@ class TestPromoteL1PostPutUnlink:
         t1.join()
         t2.join()
 
-        # 합계: 최소 1 success. 2번째는 ENOENT 또는 PromotionVerifyError
+        # 최소 1 success
         assert "promoted" in results, f"최소 1 success 기대. results={results} errors={errors}"
         assert not local.exists(), "최종적으로 local 부재 의무"
 

@@ -36,7 +36,13 @@ def _write_parquet_stub(path: Path, content: bytes = b"MOCK_PARQUET_DATA") -> st
     return hashlib.sha256(content).hexdigest()
 
 
-def _mock_uploader(put_status: str = "uploaded") -> NASUploader:
+_DEFAULT_CONTENT = b"MOCK_PARQUET_DATA"
+_DEFAULT_SHA256 = hashlib.sha256(_DEFAULT_CONTENT).hexdigest()
+
+
+def _mock_uploader(put_status: str = "uploaded", content: bytes = _DEFAULT_CONTENT) -> NASUploader:
+    """Create mock NASUploader with head_object() 4-tuple configured for promote_l1() (MCT-189)."""
+    sha256_val = hashlib.sha256(content).hexdigest()
     mock = MagicMock(spec=NASUploader)
     mock.put_streaming.return_value = PutResult(
         status=put_status,  # type: ignore[arg-type]
@@ -48,6 +54,13 @@ def _mock_uploader(put_status: str = "uploaded") -> NASUploader:
         object_etag="etag_test",
         latency_ms=50.0,
     )
+    # MCT-189 D-4 C: head_object() 4-tuple (ETag stripped, sha256 from Metadata, ContentLength int)
+    mock.head_object.return_value = {
+        "ETag": "etag_test",
+        "VersionId": None,
+        "sha256": sha256_val,
+        "ContentLength": len(content),
+    }
     return mock
 
 

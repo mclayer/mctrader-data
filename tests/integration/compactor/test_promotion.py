@@ -109,8 +109,8 @@ class TestPromoteL1HeadVerify:
         assert result.status == "promoted"
         assert result.segment_id == "seg-001"
         assert not local_file.exists()  # AC-2: local deleted
-        # AC-1: head_object called (MCT-189: via nas_uploader.head_object())
-        assert mock_uploader.head_object.call_count >= 1
+        # AC-1: head_object called twice (verify HEAD + pre-delete guard HEAD, P2-1 정밀화)
+        assert mock_uploader.head_object.call_count == 2
 
     def test_promote_l1_head_404_raises(self, tmp_path: Path) -> None:
         """AC-7 + INV-4: HEAD 404 → PromotionVerifyError + local 유지."""
@@ -293,8 +293,8 @@ class TestPromoteL1Retry:
 
         assert result.status == "promoted"
         assert not local_file.exists()
-        # 1 fail + 1 success (verify) + 1 guard = 3 calls total
-        assert mock_uploader.head_object.call_count >= 2
+        # 1 fail + 1 success (verify) + 1 guard = 3 calls total (P2-1 정밀화)
+        assert mock_uploader.head_object.call_count == 3
 
     def test_retry_exhausted_raises(self, tmp_path: Path) -> None:
         """AC-7: HEAD retry 1회 후에도 실패 → PromotionVerifyError + local 유지 (INV-4)."""
