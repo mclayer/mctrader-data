@@ -20,6 +20,8 @@ dependencies = [
     "redis[hiredis]>=5",
     "prometheus-client>=0.20",
     "pyyaml>=6",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
 ]
 
 [project.optional-dependencies]
@@ -75,5 +77,8 @@ markers = [
 [dependency-groups]
 dev = [
     "psutil>=7.2.2",
+    "pyright>=1.1.409",
     "pytest-benchmark>=4.0",
+    "ruff>=0.15.12",
+    "testcontainers[minio]>=4.14.2",
 ]
