@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -37,6 +37,7 @@ class TestPromotion4TupleGuard:
         local = tmp_path / "seg.parquet"
         local.write_bytes(content)
 
+        local_sha256 = _sha256(content)
         wrong_nas_sha256 = "0" * 64  # 의도적으로 다른 sha256
 
         # head_object 2회 호출 (1차 verify + pre-delete guard 대비)
