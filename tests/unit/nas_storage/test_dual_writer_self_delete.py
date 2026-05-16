@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from mctrader_data.nas_storage.dual_writer import DualWriter
 from mctrader_data.nas_storage.nas_uploader import NASUploader, PutResult
@@ -156,6 +156,56 @@ class TestDualWriterSelfDelete:
         mock_retry_queue.enqueue.assert_called_once_with(
             key="dest_vf.parquet", data=source, sha256=_sha256(content)
         )
+
+    def test_write_concurrent_filenotfound_graceful_no_leak(self, tmp_path: Path) -> None:
+        """spec D-7 A: DualWriter 경유 ENOENT 비누출 (P1 fix production 경로 회귀 보호).
+
+        production 경로 = DualWriter.write(data=Path) committed 분기 내
+        promote_l1() 가 FileNotFoundError raise 시 (concurrent race):
+        - (a) FileNotFoundError 가 caller 로 propagate 안 됨 (누출 0)
+        - (b) result.status == "committed" (already-deleted = INV-1 XOR 만족, race = idempotent)
+        - (c) retry_queue.enqueue 미호출 (PromotionVerifyError 아닌 ENOENT = 이미 promoted)
+
+        dual_writer.py write() L269-273 except FileNotFoundError 분기 직접 실행.
+        """
+        content = b"concurrent race content for ENOENT graceful test"
+        source = tmp_path / "src_race.parquet"
+        source.write_bytes(content)
+
+        local_root = tmp_path / "local"
+        local_root.mkdir()
+        local_dest = local_root / "dest_race.parquet"
+
+        mock_retry_queue = MagicMock()
+        mock_uploader = MagicMock(spec=NASUploader)
+        mock_uploader.put_streaming.return_value = PutResult(
+            status="uploaded", object_etag="etag-race", latency_ms=1.0
+        )
+        mock_uploader._retry_queue = mock_retry_queue  # noqa: SLF001
+
+        writer = DualWriter(nas_uploader=mock_uploader, local_root=local_root)
+
+        # promote_l1 을 patch 하여 FileNotFoundError raise (concurrent race 시뮬)
+        # lazy import 경로: dual_writer.py 내 `from mctrader_data.compactor.promotion import promote_l1`
+        # → 실제 모듈 객체를 patch (lazy import 후 참조하는 promotion 모듈의 함수 교체)
+        with patch(
+            "mctrader_data.compactor.promotion.promote_l1",
+            side_effect=FileNotFoundError("concurrent unlink: file already deleted"),
+        ):
+            # (a) FileNotFoundError 가 caller 로 propagate 안 됨 (누출 0)
+            result = writer.write(
+                local_path=local_dest,
+                nas_key="dest_race.parquet",
+                data=source,
+                sha256=_sha256(content),
+            )
+
+        # (b) status == "committed" (already-deleted = INV-1 XOR 만족, D-7 A)
+        assert result.status == "committed", (
+            "spec D-7 A: concurrent ENOENT → committed (INV-1 XOR 만족)"
+        )
+        # (c) retry_queue.enqueue 미호출 (ENOENT 경로 = enqueue 불요)
+        mock_retry_queue.enqueue.assert_not_called()
 
     def test_write_local_only_source_not_deleted(self, tmp_path: Path) -> None:
         """write() local_only 시 source 삭제 미실행 (D-2 A는 committed만 해당)."""

@@ -165,11 +165,12 @@ class TestPromoteL1PostPutUnlink:
         assert local.exists(), "test_head_5xx_retry: 5xx 후 local 보존 의무 (INV-4)"
 
     def test_concurrent_double_unlink(self, tmp_path: Path, minio_client, nas_uploader) -> None:
-        """2 thread 동시 promote_l1() — D-7 A: 2nd thread ENOENT graceful (promote 완료 or error).
+        """2 thread 동시 promote_l1() 직접 호출 — 단독 caller contract (missing_ok=False).
 
-        spec D-7 A: FileNotFoundError = idempotent no-op (INV-1 XOR 만족).
-        DualWriter.write() 계층에서 ENOENT 흡수 (P1 fix).
-        직접 promote_l1() 호출 시는 FileNotFoundError 또는 PromotionVerifyError 허용.
+        promote_l1() 직접 호출 계층 contract:
+        - promote_l1 자체는 missing_ok=False 유지 (단독 caller INV-4 contract 보존).
+        - 2nd thread: FileNotFoundError 또는 PromotionVerifyError 발생 가능 (정상 허용).
+        - DualWriter 경유 시 ENOENT 흡수 (P1 fix) = 별도 unit test로 보호.
 
         Test: 1 success (promoted) + 1 graceful (verify_error or ENOENT) — 최종 local 부재.
         """
