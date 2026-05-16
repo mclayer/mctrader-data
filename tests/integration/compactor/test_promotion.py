@@ -41,32 +41,38 @@ def _make_mock_uploader(
     head_version_id: str | None = "v1-test",
     content_length: int = 1024,
     get_object_body: bytes = b"fake parquet content",
+    local_content: bytes = b"fake parquet content",
 ) -> MagicMock:
     """Return a mock NASUploader.
 
-    promotion.py + get_streaming.py 는 nas_uploader._get_client().head_object() 호출.
-    → mock_client 에 head_object, get_object 설정.
+    MCT-189: promotion.py 는 nas_uploader.head_object() 4-tuple dict 경유 (D-4 C).
+    → mock.head_object() 에 4-tuple dict 또는 ClientError side_effect 설정.
+    get_streaming.py 는 여전히 _get_client().get_object() 경유.
     """
+    import hashlib as _hashlib
+    local_sha256 = _hashlib.sha256(local_content).hexdigest()
+
     mock_client = MagicMock()
     mock_client.bucket = "mctrader-market"
 
-    if head_exists:
-        mock_client.head_object.return_value = {
-            "ETag": f'"{head_etag}"',
-            "VersionId": head_version_id,
-            "ContentLength": content_length,
-            "Metadata": {"sha256": "fakehash"},
-        }
-    else:
-        mock_client.head_object.side_effect = _client_error_404()
-
-    # get_object mock (for get_streaming)
+    # get_object mock (for get_streaming — _get_client() 경유, 변경 없음)
     body_stream = BytesIO(get_object_body)
     mock_client.get_object.return_value = {"Body": body_stream}
 
     mock = MagicMock()
     mock.bucket = "mctrader-market"
     mock._get_client.return_value = mock_client
+
+    if head_exists:
+        # MCT-189 D-4 C: head_object() 4-tuple dict 반환 (ETag already stripped)
+        mock.head_object.return_value = {
+            "ETag": head_etag,  # already stripped (no surrounding quotes)
+            "VersionId": head_version_id,
+            "sha256": local_sha256,
+            "ContentLength": content_length,
+        }
+    else:
+        mock.head_object.side_effect = _client_error_404()
 
     return mock
 
@@ -81,13 +87,16 @@ class TestPromoteL1HeadVerify:
         """AC-1 + AC-2: HEAD verify PASS → promote succeed + local delete."""
         from mctrader_data.compactor.promotion import promote_l1
 
+        content = b"fake parquet content"
         local_file = tmp_path / "part-test.parquet"
-        local_file.write_bytes(b"fake parquet content")
+        local_file.write_bytes(content)
 
         mock_uploader = _make_mock_uploader(
             head_exists=True,
             head_etag="etag-test",
             head_version_id="v1",
+            content_length=len(content),
+            local_content=content,
         )
 
         result = promote_l1(
@@ -100,9 +109,8 @@ class TestPromoteL1HeadVerify:
         assert result.status == "promoted"
         assert result.segment_id == "seg-001"
         assert not local_file.exists()  # AC-2: local deleted
-        # AC-1: head_object called (via _get_client())
-        mock_client = mock_uploader._get_client.return_value
-        mock_client.head_object.assert_called_once()
+        # AC-1: head_object called twice (verify HEAD + pre-delete guard HEAD, P2-1 정밀화)
+        assert mock_uploader.head_object.call_count == 2
 
     def test_promote_l1_head_404_raises(self, tmp_path: Path) -> None:
         """AC-7 + INV-4: HEAD 404 → PromotionVerifyError + local 유지."""
@@ -125,27 +133,23 @@ class TestPromoteL1HeadVerify:
         assert local_file.exists()  # INV-4: local 보존
 
     def test_promote_l1_etag_mismatch_raises(self, tmp_path: Path) -> None:
-        """AC-7 + INV-4: ETag 정보 일치 없이 → PromotionVerifyError + local 유지.
+        """AC-7 + INV-4: non-404 ClientError → PromotionVerifyError + local 유지.
 
-        Note: 현재 구현에서는 ETag 값 자체는 서버 응답으로 신뢰하므로
-        mismatch scenario = VersionId mismatch 또는 ContentLength mismatch.
-        HEAD 200 + 정상 응답 = verify PASS (promotion proceed).
-        본 test: HEAD 성공하되 verify 실패 시나리오 = ClientError (비-404).
+        MCT-189: head_object()가 ClientError를 그대로 raise하면 _head_with_retry가
+        PromotionVerifyError로 변환. HEAD 403 = verify fail.
         """
         from mctrader_data.compactor.promotion import promote_l1, PromotionVerifyError
 
         local_file = tmp_path / "part-conflict.parquet"
         local_file.write_bytes(b"parquet content")
 
-        mock_client = MagicMock()
-        # HEAD가 403 (non-404 ClientError) → verify fail
-        mock_client.head_object.side_effect = ClientError(
+        mock_uploader = MagicMock()
+        mock_uploader.bucket = "mctrader-market"
+        # MCT-189: head_object() 직접 mock (403 ClientError)
+        mock_uploader.head_object.side_effect = ClientError(
             {"Error": {"Code": "403", "Message": "Forbidden"}},
             "HeadObject",
         )
-        mock_uploader = MagicMock()
-        mock_uploader.bucket = "mctrader-market"
-        mock_uploader._get_client.return_value = mock_client
 
         with pytest.raises(PromotionVerifyError):
             promote_l1(
@@ -165,10 +169,15 @@ class TestPromoteL1Grace0:
         """INV-2: wall-clock < 100ms (grace 0)."""
         from mctrader_data.compactor.promotion import promote_l1
 
+        content = b"grace test"
         local_file = tmp_path / "part-grace.parquet"
-        local_file.write_bytes(b"grace test")
+        local_file.write_bytes(content)
 
-        mock_uploader = _make_mock_uploader(head_exists=True)
+        mock_uploader = _make_mock_uploader(
+            head_exists=True,
+            content_length=len(content),
+            local_content=content,
+        )
 
         t_start = time.monotonic()
         result = promote_l1(
@@ -191,13 +200,16 @@ class TestPromoteL1VersionId:
         """INV-5: PromotionResult 에 version_id 박제."""
         from mctrader_data.compactor.promotion import promote_l1
 
+        content = b"version test"
         local_file = tmp_path / "part-version.parquet"
-        local_file.write_bytes(b"version test")
+        local_file.write_bytes(content)
 
         expected_version = "v-abc-123"
         mock_uploader = _make_mock_uploader(
             head_exists=True,
             head_version_id=expected_version,
+            content_length=len(content),
+            local_content=content,
         )
 
         result = promote_l1(
@@ -222,7 +234,11 @@ class TestPromoteL1Idempotency:
         # local 파일 생성하지 않음 (already promoted state)
         assert not local_file.exists()
 
-        mock_uploader = _make_mock_uploader(head_exists=True)
+        mock_uploader = _make_mock_uploader(
+            head_exists=True,
+            content_length=1024,
+            local_content=b"fake parquet content",
+        )
 
         result = promote_l1(
             local_path=local_file,
@@ -241,29 +257,32 @@ class TestPromoteL1Retry:
     def test_retry_once_on_transient_error(self, tmp_path: Path) -> None:
         """AC-7: HEAD transient error → retry 1회 후 성공."""
         from mctrader_data.compactor.promotion import promote_l1
+        import hashlib as _hashlib
 
+        content = b"retry test"
         local_file = tmp_path / "part-retry.parquet"
-        local_file.write_bytes(b"retry test")
+        local_file.write_bytes(content)
+        local_sha256 = _hashlib.sha256(content).hexdigest()
 
         from botocore.exceptions import EndpointConnectionError
         call_count = [0]
 
-        def head_side_effect(**kwargs):
+        # MCT-189: head_object() 직접 mock (4-tuple dict 반환, ETag already stripped)
+        def head_side_effect(key: str) -> dict:
             call_count[0] += 1
             if call_count[0] == 1:
                 raise EndpointConnectionError(endpoint_url="http://nas:9000")
+            # 2차 이후: 4-tuple dict 반환 (promote_l1에서 2번 호출: verify + pre-delete guard)
             return {
-                "ETag": '"etag-retry"',
+                "ETag": "etag-retry",
                 "VersionId": "v-retry",
-                "ContentLength": len(b"retry test"),
-                "Metadata": {"sha256": "retryhash"},
+                "sha256": local_sha256,
+                "ContentLength": len(content),
             }
 
-        mock_client = MagicMock()
-        mock_client.head_object.side_effect = head_side_effect
         mock_uploader = MagicMock()
         mock_uploader.bucket = "mctrader-market"
-        mock_uploader._get_client.return_value = mock_client
+        mock_uploader.head_object.side_effect = head_side_effect
 
         result = promote_l1(
             local_path=local_file,
@@ -274,7 +293,8 @@ class TestPromoteL1Retry:
 
         assert result.status == "promoted"
         assert not local_file.exists()
-        assert mock_client.head_object.call_count == 2  # 1 fail + 1 success
+        # 1 fail + 1 success (verify) + 1 guard = 3 calls total (P2-1 정밀화)
+        assert mock_uploader.head_object.call_count == 3
 
     def test_retry_exhausted_raises(self, tmp_path: Path) -> None:
         """AC-7: HEAD retry 1회 후에도 실패 → PromotionVerifyError + local 유지 (INV-4)."""
@@ -285,11 +305,12 @@ class TestPromoteL1Retry:
 
         from botocore.exceptions import EndpointConnectionError
 
-        mock_client = MagicMock()
-        mock_client.head_object.side_effect = EndpointConnectionError(endpoint_url="http://nas:9000")
+        # MCT-189: head_object() 직접 mock — EndpointConnectionError (retry 소진)
         mock_uploader = MagicMock()
         mock_uploader.bucket = "mctrader-market"
-        mock_uploader._get_client.return_value = mock_client
+        mock_uploader.head_object.side_effect = EndpointConnectionError(
+            endpoint_url="http://nas:9000"
+        )
 
         with pytest.raises(PromotionVerifyError):
             promote_l1(
@@ -300,7 +321,8 @@ class TestPromoteL1Retry:
             )
 
         assert local_file.exists()  # INV-4: local 보존
-        assert mock_client.head_object.call_count == 2  # initial + 1 retry
+        # initial(1) + 1 retry = 2 total (EndpointConnectionError 는 retry 1회)
+        assert mock_uploader.head_object.call_count == 2
 
 
 # ─── AC-5: get_streaming tests ───────────────────────────────────────────────

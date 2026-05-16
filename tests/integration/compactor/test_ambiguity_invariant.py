@@ -174,23 +174,26 @@ class TestAmbiguityInvariant:
         """
         from mctrader_data.compactor.promotion import promote_l1
 
+        import hashlib as _hashlib
+        local_content = b"fake parquet data"
         local_file = tmp_path / "part-promote.parquet"
-        local_file.write_bytes(b"fake parquet data")
+        local_file.write_bytes(local_content)
+        local_sha256 = _hashlib.sha256(local_content).hexdigest()
 
         # Mock NASUploader: HEAD verify PASS + list_objects_v2 (NAS exists post-promotion)
+        # MCT-189: head_object() 4-tuple dict 직접 mock (ETag already stripped)
         mock_client = MagicMock()
-        head_response = {
-            "ETag": '"etag_promote"',
-            "VersionId": "version-1",
-            "ContentLength": len(b"fake parquet data"),
-            "Metadata": {"sha256": "fakehash"},
-        }
-        mock_client.head_object.return_value = head_response
         mock_client.list_objects_v2.return_value = {
             "Contents": [{"Key": "schema_version=ohlcv.v1/tier=L1/part-promote.parquet"}]
         }
         mock_uploader = MagicMock()
         mock_uploader._get_client.return_value = mock_client
+        mock_uploader.head_object.return_value = {
+            "ETag": "etag_promote",
+            "VersionId": "version-1",
+            "sha256": local_sha256,
+            "ContentLength": len(local_content),
+        }
         mock_uploader._list_objects.return_value = [
             "schema_version=ohlcv.v1/tier=L1/part-promote.parquet"
         ]
@@ -229,22 +232,26 @@ class TestAmbiguityInvariant:
         """
         from mctrader_data.compactor.promotion import promote_l1
 
+        import hashlib as _hashlib
+        xor_content = b"parquet content"
         local_file = tmp_path / "part-xor-test.parquet"
-        local_file.write_bytes(b"parquet content")
+        local_file.write_bytes(xor_content)
+        xor_sha256 = _hashlib.sha256(xor_content).hexdigest()
 
         mock_client = MagicMock()
-        mock_client.head_object.return_value = {
-            "ETag": '"etag_xor"',
-            "VersionId": "version-xor",
-            "ContentLength": len(b"parquet content"),
-            "Metadata": {"sha256": "xorhash"},
-        }
         # NAS has objects (nas_exists=True)
         mock_client.list_objects_v2.return_value = {
             "Contents": [{"Key": "schema_version=ohlcv.v1/tier=L1/part-xor-test.parquet"}]
         }
+        # MCT-189: head_object() 4-tuple dict 직접 mock (ETag already stripped)
         mock_uploader = MagicMock()
         mock_uploader._get_client.return_value = mock_client
+        mock_uploader.head_object.return_value = {
+            "ETag": "etag_xor",
+            "VersionId": "version-xor",
+            "sha256": xor_sha256,
+            "ContentLength": len(xor_content),
+        }
         mock_uploader._list_objects.return_value = [
             "schema_version=ohlcv.v1/tier=L1/part-xor-test.parquet"
         ]

@@ -112,7 +112,9 @@ class DualWriter:
             → tmp_path.unlink(missing_ok=True) → DualWriteResult(status="hard_floor_blocked").
 
     §6.7 Cross-module contract (MCT-150 §6.7 직접 propagation):
-    - committed/local_only → caller source 삭제 가능.
+    - committed → MCT-189 D-2 A: DualWriter self-delete (caller 0건 재발 차단).
+                  source(data as Path) promote_l1() 4중 verify 후 삭제.
+    - local_only → caller source 삭제 가능.
     - hard_floor_blocked → caller source retain 의무 (RPO=0, S8 user_confirmed).
 
     ADR-017 hot path 무영향: 본 writer 가 L3 cold tier callsite 만 담당, collector WAL/L1
@@ -236,7 +238,11 @@ class DualWriter:
         if nas_put_result.status in _COMMITTED_STATUSES:
             # Both sides committed → atomic visible (local rename)
             tmp_path.rename(local_path)
+            # MCT-189 D-2 A: DualWriter self-delete (caller 0건 재발 차단)
+            # source(data as Path) 를 promote_l1() 4중 verify 후 삭제 (Path 입력 한정)
             dwr_status: Literal["committed", "local_only", "hard_floor_blocked"] = "committed"
+            if isinstance(data, Path) and data != local_path:
+                dwr_status = self._promote_after_nas_put(data, nas_key, sha256)
 
         elif nas_put_result.status == _QUEUED_STATUS:
             # NAS queued (retry_queue persistent) → local visible, caller source safe to delete
@@ -283,6 +289,42 @@ class DualWriter:
             )
 
         return result
+
+    def _promote_after_nas_put(
+        self,
+        source: Path,
+        nas_key: str,
+        sha256: str,
+    ) -> Literal["committed", "local_only"]:
+        """NAS PUT commit 후 source self-delete (MCT-189 D-2 A).
+
+        promote_l1() 4중 verify 후 local 삭제. 예외 분기:
+        - PromotionVerifyError: retry_queue enqueue + "local_only" 반환 (orphan 방지)
+        - FileNotFoundError: concurrent unlink graceful → "committed" 반환 (D-7 A, INV-1 XOR 만족)
+        """
+        from mctrader_data.compactor.promotion import (  # noqa: PLC0415
+            promote_l1,
+            PromotionVerifyError,
+        )
+        try:
+            promote_l1(
+                local_path=source,
+                nas_uploader=self._uploader,
+                nas_key=nas_key,
+                segment_id=nas_key,
+            )
+            return "committed"
+        except PromotionVerifyError as e:
+            log.warning(
+                "[dual_writer] promote_l1 verify failed — enqueue retry_queue, status=local_only: %s",
+                e,
+            )
+            self._uploader.enqueue_retry(key=nas_key, data=source, sha256=sha256)
+            return "local_only"
+        except FileNotFoundError:
+            # D-7 A: concurrent unlink → INV-1 XOR 만족, idempotent no-op
+            log.debug("[dual_writer] promote_l1 ENOENT — concurrent unlink (D-7 A)")
+            return "committed"
 
     def put_l1(self, path: Path) -> DualWriteResult:
         """L1 NAS PUT — L1 ParquetWriter atomic rename 직후 호출 (ADR-029 D1=B, MCT-168).
@@ -344,7 +386,11 @@ class DualWriter:
 
         # PutResult.status → DualWriteResult.status 변환 (§6.7 Cross-module contract)
         if nas_put_result.status in _COMMITTED_STATUSES:
-            dwr_status: Literal["committed", "local_only", "hard_floor_blocked"] = "committed"
+            # MCT-189 D-2 A: DualWriter self-delete (caller 0건 재발 차단)
+            # put_l1() = path 가 source이자 NAS object → promote_l1() 4중 verify 후 삭제
+            dwr_status: Literal["committed", "local_only", "hard_floor_blocked"] = (
+                self._promote_after_nas_put(path, nas_key, sha256)
+            )
         elif nas_put_result.status == _QUEUED_STATUS:
             dwr_status = "local_only"
         elif nas_put_result.status == _HARD_FLOOR_STATUS:

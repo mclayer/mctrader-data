@@ -30,6 +30,7 @@ R-2 mitigation:
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from dataclasses import dataclass
@@ -149,13 +150,49 @@ def promote_l1(
         segment_id=segment_id,
     )
 
-    etag = head_result.get("ETag", "").strip('"')
+    # MCT-189 D-4 C: 4-tuple dict (ETag already stripped in head_object())
+    etag = head_result.get("ETag", "")
     version_id: str | None = head_result.get("VersionId")
+    nas_sha256: str | None = head_result.get("sha256")
+    nas_content_length: int = head_result.get("ContentLength", 0)
 
     log.info(
         "[promotion] HEAD verify PASS segment=%s key=%s etag=%s version_id=%s",
         segment_id, nas_key, etag, version_id,
     )
+
+    # MCT-189 D-4 C: 4중 verify (sha256 + ContentLength) — INV-4 local 보존
+    # FIX-B: 동일 fd 스냅샷으로 sha256 + size 취득 (TOCTOU 차단)
+    local_sha256, local_size = _compute_local_sha256_and_size(local_path)
+
+    if nas_sha256 is not None and nas_sha256 != local_sha256:
+        raise PromotionVerifyError(
+            f"sha256 mismatch: nas={nas_sha256!r} local={local_sha256!r}. "
+            f"segment={segment_id!r} key={nas_key!r}. INV-4: local 보존 의무."
+        )
+
+    if nas_content_length != local_size:
+        raise PromotionVerifyError(
+            f"ContentLength mismatch: nas={nas_content_length} local={local_size}. "
+            f"segment={segment_id!r} key={nas_key!r}. INV-4: local 보존 의무."
+        )
+
+    # MCT-189 D-8 B: pre-delete guard — unlink 직전 HEAD 1회 더 (race detection)
+    guard_result = _head_with_retry(
+        nas_uploader=nas_uploader,
+        nas_key=nas_key,
+        segment_id=segment_id,
+    )
+    guard_etag = guard_result.get("ETag", "")
+    guard_content_length: int = guard_result.get("ContentLength", 0)
+
+    if guard_etag != etag or guard_content_length != nas_content_length:
+        raise PromotionVerifyError(
+            f"pre-delete guard mismatch (race detected): "
+            f"initial_etag={etag!r} guard_etag={guard_etag!r} "
+            f"initial_cl={nas_content_length} guard_cl={guard_content_length}. "
+            f"segment={segment_id!r} key={nas_key!r}. INV-4: local 보존 의무."
+        )
 
     # AC-2 + INV-2: HEAD verify PASS → immediate local delete (grace 0, time.sleep 0)
     # INV-4: unlink(missing_ok=False) — 예외 발생 시 caller 가 catch 후 local 보존 처리
@@ -179,6 +216,23 @@ def promote_l1(
 # ─── internal helpers ─────────────────────────────────────────────────────────
 
 
+def _compute_local_sha256_and_size(path: Path) -> tuple[str, int]:
+    """동일 fd 로 sha256 + size 취득 — TOCTOU 차단 (FIX-B, MCT-189 D-4 C).
+
+    sha256 계산 중 파일 교체가 발생해도 동일 fd 스냅샷으로 불일치 검출 가능.
+    8MB chunk streaming (메모리 O(1) — INV-4 정합).
+
+    Returns:
+        (hexdigest, byte_size) — 동일 fd 내 순차 취득.
+    """
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(8 * 1024 * 1024), b""):
+            h.update(chunk)
+        size = f.seek(0, 2)  # SEEK_END — 동일 fd 의 최종 byte offset = file size
+    return h.hexdigest(), size
+
+
 def _head_with_retry(
     *,
     nas_uploader: NASUploader,
@@ -187,23 +241,21 @@ def _head_with_retry(
 ) -> dict:
     """NAS HEAD 요청 (retry 1회, 50ms backoff on EndpointConnectionError).
 
+    MCT-189: NASUploader.head_object() 4-tuple dict 경유 (ETag/VersionId/sha256/ContentLength).
+
     Returns:
-        head_object response dict (ETag, VersionId, ContentLength 포함)
+        dict: {"ETag": str, "VersionId": str|None, "sha256": str|None, "ContentLength": int}
 
     Raises:
         PromotionVerifyError: HEAD 404, non-404 ClientError, or retry 소진
     """
-    client = nas_uploader._get_client()  # type: ignore[attr-defined]
-    bucket = nas_uploader.bucket
-
     attempts = 0
     max_attempts = 1 + _HEAD_RETRY_COUNT  # initial + 1 retry
 
     while attempts < max_attempts:
         attempts += 1
         try:
-            response = client.head_object(Bucket=bucket, Key=nas_key)
-            return response
+            return nas_uploader.head_object(nas_key)
 
         except ClientError as exc:
             code = exc.response.get("Error", {}).get("Code", "")
