@@ -162,8 +162,8 @@ def promote_l1(
     )
 
     # MCT-189 D-4 C: 4중 verify (sha256 + ContentLength) — INV-4 local 보존
-    local_sha256 = _compute_local_sha256(local_path)
-    local_size = local_path.stat().st_size
+    # FIX-B: 동일 fd 스냅샷으로 sha256 + size 취득 (TOCTOU 차단)
+    local_sha256, local_size = _compute_local_sha256_and_size(local_path)
 
     if nas_sha256 is not None and nas_sha256 != local_sha256:
         raise PromotionVerifyError(
@@ -216,16 +216,21 @@ def promote_l1(
 # ─── internal helpers ─────────────────────────────────────────────────────────
 
 
-def _compute_local_sha256(path: Path) -> str:
-    """로컬 파일 sha256 계산 (8MB chunk, read_bytes 0 — INV-4 정합).
+def _compute_local_sha256_and_size(path: Path) -> tuple[str, int]:
+    """동일 fd 로 sha256 + size 취득 — TOCTOU 차단 (FIX-B, MCT-189 D-4 C).
 
-    MCT-189 D-4 C: caller-side single computation (multipart ETag ≠ sha256 분리).
+    sha256 계산 중 파일 교체가 발생해도 동일 fd 스냅샷으로 불일치 검출 가능.
+    8MB chunk streaming (메모리 O(1) — INV-4 정합).
+
+    Returns:
+        (hexdigest, byte_size) — 동일 fd 내 순차 취득.
     """
     h = hashlib.sha256()
     with path.open("rb") as f:
         for chunk in iter(lambda: f.read(8 * 1024 * 1024), b""):
             h.update(chunk)
-    return h.hexdigest()
+        size = f.seek(0, 2)  # SEEK_END — 동일 fd 의 최종 byte offset = file size
+    return h.hexdigest(), size
 
 
 def _head_with_retry(

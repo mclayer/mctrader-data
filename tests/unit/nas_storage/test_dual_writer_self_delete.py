@@ -125,9 +125,6 @@ class TestDualWriterSelfDelete:
         local_root.mkdir()
         local_dest = local_root / "dest_vf.parquet"
 
-        mock_retry_queue = MagicMock()
-        mock_retry_queue.enqueue.return_value = MagicMock(status="ok")
-
         mock_uploader = MagicMock(spec=NASUploader)
         mock_uploader.put_streaming.return_value = PutResult(
             status="uploaded", object_etag="etag-ok", latency_ms=1.0
@@ -139,8 +136,7 @@ class TestDualWriterSelfDelete:
             "sha256": "0" * 64,  # wrong sha256
             "ContentLength": len(content),
         }
-        # P0-1: retry_queue 접근 (NASUploader._retry_queue)
-        mock_uploader._retry_queue = mock_retry_queue  # noqa: SLF001
+        # FIX-A: NASUploader.enqueue_retry() 공개 메서드 경유 (MagicMock spec 자동 stub)
 
         writer = DualWriter(nas_uploader=mock_uploader, local_root=local_root)
         result = writer.write(
@@ -150,10 +146,10 @@ class TestDualWriterSelfDelete:
             sha256=_sha256(content),
         )
 
-        # P0-1: verify-fail → local_only (not "committed"), source 보존, retry_queue enqueue
+        # P0-1: verify-fail → local_only (not "committed"), source 보존, enqueue_retry 호출
         assert result.status == "local_only", "verify-fail 시 local_only 반환 의무 (committed 반환 금지)"
         assert source.exists(), "promote verify 실패 시 source 보존 의무 (INV-4)"
-        mock_retry_queue.enqueue.assert_called_once_with(
+        mock_uploader.enqueue_retry.assert_called_once_with(
             key="dest_vf.parquet", data=source, sha256=_sha256(content)
         )
 
@@ -176,12 +172,11 @@ class TestDualWriterSelfDelete:
         local_root.mkdir()
         local_dest = local_root / "dest_race.parquet"
 
-        mock_retry_queue = MagicMock()
         mock_uploader = MagicMock(spec=NASUploader)
         mock_uploader.put_streaming.return_value = PutResult(
             status="uploaded", object_etag="etag-race", latency_ms=1.0
         )
-        mock_uploader._retry_queue = mock_retry_queue  # noqa: SLF001
+        # FIX-A: _retry_queue 직접 접근 불필요 — enqueue_retry() 공개 메서드 stub
 
         writer = DualWriter(nas_uploader=mock_uploader, local_root=local_root)
 
@@ -204,8 +199,8 @@ class TestDualWriterSelfDelete:
         assert result.status == "committed", (
             "spec D-7 A: concurrent ENOENT → committed (INV-1 XOR 만족)"
         )
-        # (c) retry_queue.enqueue 미호출 (ENOENT 경로 = enqueue 불요)
-        mock_retry_queue.enqueue.assert_not_called()
+        # (c) enqueue_retry 미호출 (ENOENT 경로 = enqueue 불요)
+        mock_uploader.enqueue_retry.assert_not_called()
 
     def test_write_local_only_source_not_deleted(self, tmp_path: Path) -> None:
         """write() local_only 시 source 삭제 미실행 (D-2 A는 committed만 해당)."""

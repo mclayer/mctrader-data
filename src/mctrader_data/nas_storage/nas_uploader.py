@@ -369,6 +369,30 @@ class NASUploader:
 
         return PutResult(status="uploaded", object_etag=etag)
 
+    def enqueue_retry(self, key: str, data: bytes | Path, sha256: str) -> None:
+        """retry_queue 에 직접 enqueue (MCT-189 D-2 A: promote verify-fail orphan 방지).
+
+        DualWriter 가 promote_l1() verify 실패 시 source 를 retry_queue 에 재등록하기 위한
+        public gateway. _retry_queue None 시 log.error (orphan 위험 가시화).
+
+        production cli.py:827-836 에서 NASUploader 생성 시 retry_queue 주입 보장 — 정상 경로는
+        rq is not None. None = 테스트/단독 사용 환경 (silent-skip → error log 로 가시화).
+
+        Args:
+            key: NAS object key (tier prefix 포함)
+            data: bytes 또는 Path (RetryQueue.enqueue 시그니처 정합)
+            sha256: sha256 hexdigest
+        """
+        rq = self._retry_queue
+        if rq is None:
+            log.error(
+                "[nas_uploader] enqueue_retry: retry_queue not configured — orphan risk! "
+                "key=%r (production path: cli.py NASUploader 생성 시 retry_queue 주입 의무)",
+                key,
+            )
+            return
+        rq.enqueue(key=key, data=data, sha256=sha256)
+
     def head_object(self, key: str) -> dict:
         """4-tuple verify primitive (MCT-189 D-4 C).
 
