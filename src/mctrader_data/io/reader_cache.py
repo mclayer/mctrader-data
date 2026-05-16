@@ -33,7 +33,7 @@ import time
 import uuid
 from collections import OrderedDict, deque
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Optional
 
 logger = logging.getLogger(__name__)
 
