@@ -34,7 +34,9 @@ from mctrader_data.io.tier_reader import TierReader
 def _mock_cold_reader(status="hit_nas", data=b"cold_data"):
     cr = MagicMock()
     cr.read.return_value = ColdReadResult(
-        status=status, data=data, nas_object_key="tier=L2/key.parquet"
+        status=status,  # type: ignore[arg-type]
+        data=data,
+        nas_object_key="tier=L2/key.parquet",
     )
     return cr
 
@@ -42,7 +44,9 @@ def _mock_cold_reader(status="hit_nas", data=b"cold_data"):
 def _mock_l1_reader(status="hit_nas", data=b"l1_data"):
     lr = MagicMock()
     lr.read.return_value = L1ReadResult(
-        status=status, data=data, nas_object_key="tier=L1/key.parquet"
+        status=status,  # type: ignore[arg-type]
+        data=data,
+        nas_object_key="tier=L1/key.parquet",
     )
     return lr
 

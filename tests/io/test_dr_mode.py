@@ -113,6 +113,7 @@ class TestDRModeHalfOpen:
         assert dr.current_state() == "OPEN"
 
         # 30s 경과 simulate
+        assert dr._open_started_at is not None  # float | None narrowing
         dr._open_started_at -= 31.0
         dr._try_half_open()
         assert dr.current_state() == "HALF_OPEN"
@@ -139,6 +140,7 @@ class TestDRModeHalfOpen:
         dr.record_failure(status_code=500, latency_ms=100.0)
         assert dr.current_state() == "OPEN"
         # 10s만 경과
+        assert dr._open_started_at is not None  # float | None narrowing
         dr._open_started_at -= 10.0
         dr._try_half_open()
         assert dr.current_state() == "OPEN"

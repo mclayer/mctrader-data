@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from mctrader_data.io.reader_cache import CacheFlushResult, ReaderCache
+from mctrader_data.io.reader_cache import CacheEntry, CacheFlushResult, ReaderCache
 
 
 # ============================================================================
@@ -83,9 +83,10 @@ def test_cache_flush_partial_failed_race(monkeypatch):
         # verify probe put 직후 race 로 추가 entry 잔존
         if key.startswith("__verify_probe_"):
             # bypass lock for race simulation — 직접 _cache 접근
-            cache._cache["race-entry"] = type(
-                "E", (), {"value": b"x", "inserted_at": time.monotonic(), "last_accessed_at": time.monotonic()}
-            )()
+            _now = time.monotonic()
+            cache._cache["race-entry"] = CacheEntry(
+                value=b"x", inserted_at=_now, last_accessed_at=_now
+            )
 
     monkeypatch.setattr(cache, "put", _race_put)
     result = cache.flush_all()
@@ -217,7 +218,7 @@ def test_stats_emits_prometheus_gauges():
     PaperRunner WS tick, ReaderCache 미인스턴스화 (Phase 0 verify 실증,
     MCT-170 reader_cache = NAS cold read 전용). hit_ratio/p99 Gauge =
     cold reader 컴포넌트 한정 metric (AC-5 contract 정정, ADR-030 §D8)."""
-    from mctrader_engine.metrics import (  # noqa: F401 — skipped, engine absent
+    from mctrader_engine.metrics import (  # type: ignore[import-not-found]  # noqa: F401
         nas_reader_cache_hit_ratio,
         nas_reader_p99_ms,
     )
