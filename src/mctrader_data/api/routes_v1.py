@@ -15,6 +15,7 @@ SecurityArch §7.2 위협 완화:
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from pathlib import Path
@@ -179,14 +180,37 @@ async def post_reverse_write_paper_candles(
     root = resolve_data_root()
     snapshot_id = body.snapshot_id
 
-    # INV-3 idempotency: sidecar sentinel 검사 (restart-safe — persisted, in-memory 비의존)
+    # F-2 fix: INV-3 idempotency — canonical_sha256 sidecar SSOT
     # sidecar path = paper_storage.write_paper_candles 가 생성하는 _paper_lineage_{snapshot_id}.json
-    # 검색: root 하위 _paper_lineage_{snapshot_id}.json 존재 시 no-op
+    # sidecar 내부에 canonical_sha256 field 저장 → payload hash 비교
+    # (a) sidecar 부재 → write (c-case)
+    # (b) sidecar 존재 + sha256 일치 → no-op / idempotent_skip=True (a-case)
+    # (c) sidecar 존재 + sha256 불일치 → 409 Conflict (snapshot_id collision, b-case)
     sidecar_pattern = f"_paper_lineage_{snapshot_id}.json"
+    request_sha256 = body.canonical_sha256()
     existing_sidecar = _find_sidecar(root, sidecar_pattern)
     if existing_sidecar is not None:
-        logger.info("paper-candles idempotent skip: snapshot_id=%s sidecar=%s", snapshot_id, existing_sidecar)
-        return PaperCandlesResponse(written=False, path=str(existing_sidecar.parent), idempotent_skip=True)
+        stored_sha256 = _read_sidecar_sha256(existing_sidecar)
+        if stored_sha256 == request_sha256:
+            # (a) same payload: idempotent no-op
+            logger.info(
+                "paper-candles idempotent skip: snapshot_id=%s sha256=%s sidecar=%s",
+                snapshot_id, request_sha256[:8], existing_sidecar,
+            )
+            return PaperCandlesResponse(written=False, path=str(existing_sidecar.parent), idempotent_skip=True)
+        else:
+            # (b) snapshot_id collision with different payload → 409
+            logger.warning(
+                "paper-candles 409 conflict: snapshot_id=%s stored_sha256=%s request_sha256=%s",
+                snapshot_id, (stored_sha256 or "")[:8], request_sha256[:8],
+            )
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"snapshot_id={snapshot_id!r} already exists with different payload sha256. "
+                    "Use a unique snapshot_id per distinct payload (INV-3 violation)."
+                ),
+            )
 
     # Construct CandleLike objects from request
     candles = _build_candles(body.candles)
@@ -217,6 +241,15 @@ async def post_reverse_write_paper_candles(
         logger.error("paper-candles write error: %s", e)
         raise HTTPException(status_code=500, detail=f"write_paper_candles error: {e}") from e
 
+    # F-2 fix: write 후 sidecar 에 canonical_sha256 persist (INV-3 idempotency SSOT)
+    # sidecar 는 write_paper_candles 가 생성 — 동일 패턴 경로에 sha256 append
+    sidecar_path = _find_sidecar(root, sidecar_pattern)
+    if sidecar_path is not None:
+        _persist_sidecar_sha256(sidecar_path, request_sha256)
+    else:
+        # sidecar 미생성 (edge case) — best-effort warn + 정상 응답 유지
+        logger.warning("paper-candles: sidecar not found after write (snapshot_id=%s)", snapshot_id)
+
     return PaperCandlesResponse(written=True, path=str(written_path), idempotent_skip=False)
 
 
@@ -230,25 +263,53 @@ def _find_sidecar(root: Path, sidecar_pattern: str) -> Path | None:
     return None
 
 
+def _read_sidecar_sha256(sidecar_path: Path) -> str | None:
+    """F-2: sidecar JSON 에서 canonical_sha256 field 읽기.
+
+    sidecar 가 JSON 이 아니거나 field 부재 시 None 반환 (legacy sidecar 호환).
+    """
+    try:
+        content = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        return content.get("canonical_sha256")
+    except Exception:
+        return None
+
+
+def _persist_sidecar_sha256(sidecar_path: Path, sha256: str) -> None:
+    """F-2: sidecar JSON 에 canonical_sha256 field persist (idempotency SSOT).
+
+    기존 JSON 내용 보존 + sha256 field merge. 쓰기 실패 시 best-effort warn.
+    """
+    try:
+        try:
+            content: dict = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        except Exception:
+            content = {}
+        content["canonical_sha256"] = sha256
+        sidecar_path.write_text(json.dumps(content, separators=(",", ":")), encoding="utf-8")
+    except Exception as e:
+        logger.warning("paper-candles: failed to persist sha256 to sidecar %s: %s", sidecar_path, e)
+
+
 def _build_candles(candle_schemas: list) -> list:
     """CandleSchema list → CandleLike-compatible SimpleNamespace list.
 
     paper_storage.write_paper_candles 는 CandleLike Protocol 호환 객체 수용.
+
+    F-1 fix: ts_utc 는 Pydantic CandleSchema.ts_utc strict datetime validator 에 의해
+    이미 검증된 datetime 객체 (parse 실패 시 422 → 본 함수 미도달).
+    NEVER substitute current time on parse failure.
     """
-    from datetime import datetime, timezone  # noqa: PLC0415
     from types import SimpleNamespace  # noqa: PLC0415
 
     result = []
     for c in candle_schemas:
-        try:
-            ts_utc = datetime.fromisoformat(c.ts_utc.replace("Z", "+00:00"))
-        except Exception:
-            ts_utc = datetime.now(timezone.utc)
+        # F-1: c.ts_utc 는 Pydantic strict datetime (UTC-aware) — 이미 validated
         ns = SimpleNamespace(
             exchange=c.exchange,
             symbol=c.symbol,
             timeframe=c.timeframe,
-            ts_utc=ts_utc,
+            ts_utc=c.ts_utc,  # datetime object (UTC-aware, no fallback)
             open=c.open,
             high=c.high,
             low=c.low,

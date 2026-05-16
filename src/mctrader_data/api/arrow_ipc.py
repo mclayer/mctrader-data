@@ -41,19 +41,25 @@ def bytes_to_table(data: bytes) -> pa.Table:
 def read_result_to_ipc_bytes(data: bytes) -> bytes:
     """io/ reader ReadResult.data (Arrow IPC bytes) → raw IPC stream bytes.
 
-    io/ reader 가 반환한 bytes 가 이미 Arrow IPC stream 형식인 경우 그대로 pass-through.
-    아닌 경우 pyarrow.Table 로 파싱 후 재직렬화 (byte-equivalence 보장).
+    F-4 fix (Option A — INV-2 bytes-level):
+    io/ reader 가 반환한 bytes 가 이미 Arrow IPC stream 형식이라고 contract 보장
+    (Change Plan §3.2 ReadResult.data = raw Arrow IPC bytes).
+    → schema validation 후 data unchanged return (re-serialize 0).
+
+    Re-serialize 는 RecordBatch boundary / dictionary dedup / alignment 차이로
+    bytes-identical 보장 불가 (pyarrow 버전 의존). Option A = validation only + pass-through.
     """
     if not data:
         # empty result — empty Arrow IPC stream 반환 (0-row table)
         empty = pa.table({})
         return table_to_ipc_bytes(empty)
     try:
-        # Round-trip verify: IPC parse → re-serialize (byte-equivalence)
+        # Validation: valid Arrow IPC stream 여부 확인 (schema 파싱)
         buf = io.BytesIO(data)
         reader = pa.ipc.open_stream(buf)
-        table = reader.read_all()
-        return table_to_ipc_bytes(table)
+        _ = reader.schema  # schema validation only (read_all 0 — bytes unchanged)
     except Exception as e:
-        logger.error("arrow_ipc: failed to parse reader data as Arrow IPC — %s", e)
+        logger.error("arrow_ipc: failed to validate reader data as Arrow IPC — %s", e)
         raise ValueError(f"io/ reader data is not valid Arrow IPC: {e}") from e
+    # INV-2 bytes-level: data unchanged return (re-serialize 0)
+    return data

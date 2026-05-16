@@ -181,6 +181,11 @@ def test_tc3_historical_arrow_ipc_byte_equivalence() -> None:
     assert actual_table.schema == expected_table.schema, "Schema mismatch (INV-2 violation)"
     assert actual_table.num_rows == expected_table.num_rows, "Row count mismatch (INV-2 violation)"
     assert actual_table.equals(expected_table), "Table data mismatch (INV-2 violation)"
+    # F-4 fix: bytes-level assert (read_result_to_ipc_bytes Option A — unchanged return)
+    assert resp.content == ipc_data, (
+        "INV-2 bytes-level violation: REST response bytes != io/ reader data bytes. "
+        "read_result_to_ipc_bytes must return data unchanged (re-serialize 0)."
+    )
 
 
 # ---------- TC-4: historical 응답 = Arrow IPC only (NAS 비노출) ----------
@@ -275,58 +280,325 @@ def test_tc5_reverse_write_paper_candles_wrap() -> None:
 def test_tc6_reverse_write_paper_candles_idempotent() -> None:
     """TC-6: INV-3 — 동일 hash payload 재POST = no-op (idempotent_skip=true).
 
-    sidecar sentinel 존재 시 write_paper_candles 미호출 + idempotent_skip=true.
+    F-2 fix: sidecar 에 canonical_sha256 저장 + 동일 hash 비교 → idempotent skip.
     """
-    with tempfile.TemporaryDirectory() as tmpdir:
-        root = Path(tmpdir)
-        snap_id = "snap-idem-001"
+    from mctrader_data.api.app import create_app  # noqa: PLC0415
+    from mctrader_data.api.schemas import PaperCandlesRequest  # noqa: PLC0415
 
-        payload = {
-            "candles": [
-                {
-                    "exchange": "bithumb",
-                    "symbol": "BTC-KRW",
-                    "timeframe": "1m",
-                    "ts_utc": "2026-05-16T09:00:00+00:00",
-                    "open": 50_000_000.0,
-                    "high": 50_100_000.0,
-                    "low": 49_900_000.0,
-                    "close": 50_050_000.0,
-                    "volume": 2.0,
-                }
-            ],
+    snap_id = "snap-idem-001"
+    payload = {
+        "candles": [
+            {
+                "exchange": "bithumb",
+                "symbol": "BTC-KRW",
+                "timeframe": "1m",
+                "ts_utc": "2026-05-16T09:00:00+00:00",
+                "open": 50_000_000.0,
+                "high": 50_100_000.0,
+                "low": 49_900_000.0,
+                "close": 50_050_000.0,
+                "volume": 2.0,
+            }
+        ],
+        "run_id": "run-idem-001",
+        "snapshot_id": snap_id,
+        "lineage": {
             "run_id": "run-idem-001",
             "snapshot_id": snap_id,
-            "lineage": {
-                "run_id": "run-idem-001",
-                "snapshot_id": snap_id,
-                "strategy_id": "strategy-B",
-                "created_at": "2026-05-16T09:05:00+00:00",
-            },
-        }
+            "strategy_id": "strategy-B",
+            "created_at": "2026-05-16T09:05:00+00:00",
+        },
+    }
 
-        from mctrader_data.api.app import create_app  # noqa: PLC0415
+    # Compute actual sha256 for sidecar (F-2 fix: sha256 must match)
+    req = PaperCandlesRequest(**payload)
+    sha256 = req.canonical_sha256()
 
-        app = create_app(docs_enabled=False)
-        client = TestClient(app, raise_server_exceptions=True)
+    app = create_app(docs_enabled=False)
+    client = TestClient(app, raise_server_exceptions=True)
 
-        # Simulate existing sidecar (idempotency sentinel exists)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        # Simulate existing sidecar with correct sha256 (F-2 fix)
         existing_sidecar = root / f"_paper_lineage_{snap_id}.json"
         existing_sidecar.parent.mkdir(parents=True, exist_ok=True)
-        existing_sidecar.write_text("{}")
+        existing_sidecar.write_text(json.dumps({"canonical_sha256": sha256}, separators=(",", ":")))
 
         with patch("mctrader_data.api.routes_v1.resolve_data_root", return_value=root), \
              patch("mctrader_data.api.routes_v1._find_sidecar", return_value=existing_sidecar), \
              patch("mctrader_data.api.routes_v1.write_paper_candles") as mock_write:
 
-            # 2회차 POST → should be no-op
+            # 2회차 POST → should be no-op (same sha256)
             resp = client.post("/v1/reverse-write/paper-candles", json=payload)
 
-        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
-        body = resp.json()
-        assert body["written"] is False, "Expected written=False (idempotent skip)"
-        assert body["idempotent_skip"] is True, "Expected idempotent_skip=True"
-        assert not mock_write.called, "write_paper_candles called on idempotent POST (INV-3 violation)"
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    body = resp.json()
+    assert body["written"] is False, "Expected written=False (idempotent skip)"
+    assert body["idempotent_skip"] is True, "Expected idempotent_skip=True"
+    assert not mock_write.called, "write_paper_candles called on idempotent POST (INV-3 violation)"
+
+
+# ---------- F-1 fix tests: ts_utc strict datetime 422 ----------
+
+
+def _make_paper_payload(ts_utc: str = "2026-05-17T09:00:00+00:00") -> dict:
+    """Helper: paper-candles request payload with configurable ts_utc."""
+    return {
+        "candles": [
+            {
+                "exchange": "bithumb",
+                "symbol": "BTC-KRW",
+                "timeframe": "1m",
+                "ts_utc": ts_utc,
+                "open": 50_000_000.0,
+                "high": 50_100_000.0,
+                "low": 49_900_000.0,
+                "close": 50_050_000.0,
+                "volume": 1.0,
+            }
+        ],
+        "run_id": "run-f1-test",
+        "snapshot_id": "snap-f1-test",
+        "lineage": {
+            "run_id": "run-f1-test",
+            "snapshot_id": "snap-f1-test",
+            "strategy_id": "strategy-F1",
+            "created_at": "2026-05-17T09:00:00+00:00",
+        },
+    }
+
+
+def test_f1_invalid_ts_utc_not_a_date_rejected() -> None:
+    """F-1 fix: ts_utc = 'not-a-date' → 422 (NEVER silent substitute)."""
+    client = _make_client()
+    payload = _make_paper_payload(ts_utc="not-a-date")
+    resp = client.post("/v1/reverse-write/paper-candles", json=payload)
+    assert resp.status_code == 422, (
+        f"Expected 422 for invalid ts_utc 'not-a-date', got {resp.status_code}. "
+        "F-1 fix: NEVER substitute datetime.now() on parse failure."
+    )
+
+
+def test_f1_naive_ts_utc_rejected() -> None:
+    """F-1 fix: ts_utc = '2026-05-17T09:00:00' (naive, no timezone) → 422."""
+    client = _make_client()
+    payload = _make_paper_payload(ts_utc="2026-05-17T09:00:00")
+    resp = client.post("/v1/reverse-write/paper-candles", json=payload)
+    assert resp.status_code == 422, (
+        f"Expected 422 for naive ts_utc '2026-05-17T09:00:00', got {resp.status_code}. "
+        "F-1 fix: UTC-aware required (CandleSchema.require_utc validator)."
+    )
+
+
+def test_f1_valid_ts_utc_accepted() -> None:
+    """F-1 fix: ts_utc = valid UTC ISO8601 → 200 (regression: valid accepted)."""
+    from mctrader_data.api.app import create_app  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+
+    app = create_app(docs_enabled=False)
+    client = TestClient(app, raise_server_exceptions=True)
+
+    payload = _make_paper_payload(ts_utc="2026-05-17T09:00:00+00:00")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        written_path = root / "part-snap-f1.parquet"
+        with patch("mctrader_data.api.routes_v1.resolve_data_root", return_value=root), \
+             patch("mctrader_data.api.routes_v1._find_sidecar", return_value=None), \
+             patch("mctrader_data.api.routes_v1.write_paper_candles", return_value=written_path):
+            resp = client.post("/v1/reverse-write/paper-candles", json=payload)
+
+    assert resp.status_code == 200, f"Expected 200 for valid UTC ts_utc, got {resp.status_code}: {resp.text}"
+
+
+# ---------- F-2 fix tests: INV-3 idempotency 3-case ----------
+
+
+def _make_sidecar_content(sha256: str) -> str:
+    """sidecar JSON with canonical_sha256 field."""
+    return json.dumps({"canonical_sha256": sha256}, separators=(",", ":"))
+
+
+def test_f2_idempotency_case_a_same_sha256_noop() -> None:
+    """F-2 fix case (a): sidecar 존재 + sha256 일치 → idempotent_skip=True, write 0."""
+    from mctrader_data.api.app import create_app  # noqa: PLC0415
+    from mctrader_data.api.schemas import PaperCandlesRequest  # noqa: PLC0415
+
+    payload = {
+        "candles": [
+            {
+                "exchange": "bithumb",
+                "symbol": "BTC-KRW",
+                "timeframe": "1m",
+                "ts_utc": "2026-05-17T09:00:00+00:00",
+                "open": 50_000_000.0,
+                "high": 50_100_000.0,
+                "low": 49_900_000.0,
+                "close": 50_050_000.0,
+                "volume": 1.0,
+            }
+        ],
+        "run_id": "run-f2-a",
+        "snapshot_id": "snap-f2-a",
+        "lineage": {
+            "run_id": "run-f2-a",
+            "snapshot_id": "snap-f2-a",
+            "strategy_id": "strategy-F2",
+            "created_at": "2026-05-17T09:00:00+00:00",
+        },
+    }
+
+    # Compute actual sha256
+    req = PaperCandlesRequest(**payload)
+    sha256 = req.canonical_sha256()
+
+    app = create_app(docs_enabled=False)
+    client = TestClient(app, raise_server_exceptions=True)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        sidecar = root / "_paper_lineage_snap-f2-a.json"
+        sidecar.write_text(_make_sidecar_content(sha256))
+
+        with patch("mctrader_data.api.routes_v1.resolve_data_root", return_value=root), \
+             patch("mctrader_data.api.routes_v1._find_sidecar", return_value=sidecar), \
+             patch("mctrader_data.api.routes_v1.write_paper_candles") as mock_write:
+            resp = client.post("/v1/reverse-write/paper-candles", json=payload)
+
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    body = resp.json()
+    assert body["idempotent_skip"] is True, "Expected idempotent_skip=True (same payload)"
+    assert not mock_write.called, "write called on same-sha256 idempotent POST (INV-3 violation)"
+
+
+def test_f2_idempotency_case_b_different_sha256_409() -> None:
+    """F-2 fix case (b): sidecar 존재 + sha256 불일치 → 409 Conflict."""
+    from mctrader_data.api.app import create_app  # noqa: PLC0415
+
+    payload = {
+        "candles": [
+            {
+                "exchange": "bithumb",
+                "symbol": "BTC-KRW",
+                "timeframe": "1m",
+                "ts_utc": "2026-05-17T09:00:00+00:00",
+                "open": 60_000_000.0,  # different payload
+                "high": 60_100_000.0,
+                "low": 59_900_000.0,
+                "close": 60_050_000.0,
+                "volume": 2.0,
+            }
+        ],
+        "run_id": "run-f2-b",
+        "snapshot_id": "snap-f2-b",
+        "lineage": {
+            "run_id": "run-f2-b",
+            "snapshot_id": "snap-f2-b",
+            "strategy_id": "strategy-F2",
+            "created_at": "2026-05-17T09:00:00+00:00",
+        },
+    }
+
+    app = create_app(docs_enabled=False)
+    client = TestClient(app, raise_server_exceptions=True)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        sidecar = root / "_paper_lineage_snap-f2-b.json"
+        sidecar.write_text(_make_sidecar_content("different_sha256_stored"))
+
+        with patch("mctrader_data.api.routes_v1.resolve_data_root", return_value=root), \
+             patch("mctrader_data.api.routes_v1._find_sidecar", return_value=sidecar), \
+             patch("mctrader_data.api.routes_v1.write_paper_candles") as mock_write:
+            resp = client.post("/v1/reverse-write/paper-candles", json=payload)
+
+    assert resp.status_code == 409, (
+        f"Expected 409 Conflict for snapshot_id collision with different payload, got {resp.status_code}"
+    )
+    assert not mock_write.called, "write called on 409 conflict case"
+
+
+def test_f2_idempotency_case_c_no_sidecar_writes() -> None:
+    """F-2 fix case (c): sidecar 부재 → write 정상 수행."""
+    from mctrader_data.api.app import create_app  # noqa: PLC0415
+
+    payload = {
+        "candles": [
+            {
+                "exchange": "bithumb",
+                "symbol": "ETH-KRW",
+                "timeframe": "1m",
+                "ts_utc": "2026-05-17T09:00:00+00:00",
+                "open": 3_000_000.0,
+                "high": 3_010_000.0,
+                "low": 2_990_000.0,
+                "close": 3_005_000.0,
+                "volume": 5.0,
+            }
+        ],
+        "run_id": "run-f2-c",
+        "snapshot_id": "snap-f2-c",
+        "lineage": {
+            "run_id": "run-f2-c",
+            "snapshot_id": "snap-f2-c",
+            "strategy_id": "strategy-F2",
+            "created_at": "2026-05-17T09:00:00+00:00",
+        },
+    }
+
+    app = create_app(docs_enabled=False)
+    client = TestClient(app, raise_server_exceptions=True)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        written_path = root / "part-snap-f2-c.parquet"
+
+        with patch("mctrader_data.api.routes_v1.resolve_data_root", return_value=root), \
+             patch("mctrader_data.api.routes_v1._find_sidecar", return_value=None), \
+             patch("mctrader_data.api.routes_v1.write_paper_candles", return_value=written_path) as mock_write:
+            resp = client.post("/v1/reverse-write/paper-candles", json=payload)
+
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    body = resp.json()
+    assert body["written"] is True, "Expected written=True (no sidecar → write)"
+    assert body["idempotent_skip"] is False
+    assert mock_write.called, "write_paper_candles not called when no sidecar (case c)"
+
+
+def test_f2_canonical_sha256_wired() -> None:
+    """F-2 fix: canonical_sha256() routes_v1 실 호출 — dead code 해소 verify."""
+    from mctrader_data.api.schemas import PaperCandlesRequest  # noqa: PLC0415
+
+    payload_data = {
+        "candles": [
+            {
+                "exchange": "bithumb",
+                "symbol": "BTC-KRW",
+                "timeframe": "1m",
+                "ts_utc": "2026-05-17T09:00:00+00:00",
+                "open": 50_000_000.0,
+                "high": 50_100_000.0,
+                "low": 49_900_000.0,
+                "close": 50_050_000.0,
+                "volume": 1.0,
+            }
+        ],
+        "run_id": "run-sha-test",
+        "snapshot_id": "snap-sha-test",
+        "lineage": {
+            "run_id": "run-sha-test",
+            "snapshot_id": "snap-sha-test",
+            "strategy_id": "strategy-SHA",
+            "created_at": "2026-05-17T09:00:00+00:00",
+        },
+    }
+    req = PaperCandlesRequest(**payload_data)
+    sha = req.canonical_sha256()
+    assert isinstance(sha, str) and len(sha) == 64, "canonical_sha256 must return 64-char hex"
+
+    # Same payload → same sha256
+    req2 = PaperCandlesRequest(**payload_data)
+    assert req2.canonical_sha256() == sha, "canonical_sha256 not deterministic"
 
 
 # ---------- TC-7: input validation ----------
@@ -612,32 +884,38 @@ def test_perf_baseline_idempotent_skip_latency() -> None:
     """§8.2 Perf Baseline: reverse-write idempotent skip latency.
 
     hash 검사 → no-op 경로가 full write 대비 빠름 확인.
+    F-2 fix: sidecar 에 canonical_sha256 저장 → 동일 hash 비교로 idempotent skip.
     """
+    from mctrader_data.api.app import create_app  # noqa: PLC0415
+    from mctrader_data.api.schemas import PaperCandlesRequest  # noqa: PLC0415
+
+    snap_id = "snap-perf-001"
+    payload = {
+        "candles": [{
+            "exchange": "bithumb", "symbol": "BTC-KRW", "timeframe": "1m",
+            "ts_utc": "2026-05-16T09:00:00+00:00",
+            "open": 50_000_000.0, "high": 50_100_000.0, "low": 49_900_000.0,
+            "close": 50_050_000.0, "volume": 1.0,
+        }],
+        "run_id": "run-perf-001",
+        "snapshot_id": snap_id,
+        "lineage": {
+            "run_id": "run-perf-001", "snapshot_id": snap_id,
+            "strategy_id": "s", "created_at": "2026-05-16T09:00:00+00:00",
+        },
+    }
+
+    # Compute sha256 for sidecar (F-2 fix)
+    req = PaperCandlesRequest(**payload)
+    sha256 = req.canonical_sha256()
+
+    app = create_app(docs_enabled=False)
+    client = TestClient(app, raise_server_exceptions=True)
+
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
-        snap_id = "snap-perf-001"
         existing_sidecar = root / f"_paper_lineage_{snap_id}.json"
-        existing_sidecar.write_text("{}")
-
-        payload = {
-            "candles": [{
-                "exchange": "bithumb", "symbol": "BTC-KRW", "timeframe": "1m",
-                "ts_utc": "2026-05-16T09:00:00+00:00",
-                "open": 50_000_000.0, "high": 50_100_000.0, "low": 49_900_000.0,
-                "close": 50_050_000.0, "volume": 1.0,
-            }],
-            "run_id": "run-perf-001",
-            "snapshot_id": snap_id,
-            "lineage": {
-                "run_id": "run-perf-001", "snapshot_id": snap_id,
-                "strategy_id": "s", "created_at": "2026-05-16T09:00:00+00:00",
-            },
-        }
-
-        from mctrader_data.api.app import create_app  # noqa: PLC0415
-
-        app = create_app(docs_enabled=False)
-        client = TestClient(app, raise_server_exceptions=True)
+        existing_sidecar.write_text(json.dumps({"canonical_sha256": sha256}, separators=(",", ":")))
 
         n_iter = 20
         latencies_ms: list[float] = []
@@ -647,13 +925,13 @@ def test_perf_baseline_idempotent_skip_latency() -> None:
                 t0 = time.perf_counter()
                 resp = client.post("/v1/reverse-write/paper-candles", json=payload)
                 t1 = time.perf_counter()
-                assert resp.status_code == 200
+                assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
                 assert resp.json()["idempotent_skip"] is True
                 latencies_ms.append((t1 - t0) * 1000)
 
-        mean_ms = sum(latencies_ms) / len(latencies_ms)
-        p99 = sorted(latencies_ms)[int(len(latencies_ms) * 0.99)]
+    mean_ms = sum(latencies_ms) / len(latencies_ms)
+    p99 = sorted(latencies_ms)[int(len(latencies_ms) * 0.99)]
 
-        print(f"\n[Perf Baseline] idempotent skip ({n_iter} samples): mean={mean_ms:.2f}ms p99={p99:.2f}ms")
-        # Sanity: idempotent skip (no write) should be fast
-        assert mean_ms < 100, f"idempotent skip latency too high: {mean_ms:.2f}ms"
+    print(f"\n[Perf Baseline] idempotent skip ({n_iter} samples): mean={mean_ms:.2f}ms p99={p99:.2f}ms")
+    # Sanity: idempotent skip (no write) should be fast
+    assert mean_ms < 100, f"idempotent skip latency too high: {mean_ms:.2f}ms"

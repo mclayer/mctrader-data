@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -61,19 +62,31 @@ class HistoricalCandlesQuery(BaseModel):
 
 
 class CandleSchema(BaseModel):
-    """Single candle OHLCV row for reverse-write."""
+    """Single candle OHLCV row for reverse-write.
+
+    F-1 fix: ts_utc → strict datetime (parse failure → Pydantic 422 자동).
+    NEVER substitute current time on parse failure.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     exchange: str = Field(max_length=32)
     symbol: str = Field(max_length=32, pattern=r"^[A-Z0-9_\-]+$")
     timeframe: str = Field(max_length=16)
-    ts_utc: str = Field(description="ISO8601 UTC timestamp", max_length=32)
+    ts_utc: datetime = Field(description="ISO8601 UTC timestamp (strict — parse failure → 422)")
     open: float
     high: float
     low: float
     close: float
     volume: float
+
+    @field_validator("ts_utc")
+    @classmethod
+    def require_utc(cls, v: datetime) -> datetime:
+        """F-1 fix: ts_utc must be timezone-aware UTC. naive datetime → 422."""
+        if v.tzinfo is None:
+            raise ValueError("ts_utc must be timezone-aware (UTC required, e.g. '2026-05-17T09:00:00+00:00')")
+        return v.astimezone(timezone.utc)
 
 
 class PaperLineageSchema(BaseModel):
@@ -108,6 +121,7 @@ class PaperCandlesRequest(BaseModel):
         """INV-3 idempotency key — canonical payload sha256.
 
         paper_lineage.canonical_jsonl_hash 패턴 재사용.
+        F-2 fix: routes_v1 에서 실제 호출됨 (dead code 해소).
         """
         payload = self.model_dump(mode="json")
         canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
