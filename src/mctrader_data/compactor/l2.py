@@ -168,18 +168,17 @@ class L2Compactor:
         NASUploader._list_objects(prefix) → NAS key list → get_streaming() 순서.
         pq.ParquetFile(BytesIO stream) 로 읽기 (local Path open 0, INV-3).
         """
-        from mctrader_data.nas_storage.get_streaming import get_streaming
-
         nas_prefix = (
             f"l1/market/{channel}/schema_version={schema_ver}/tier=L1/"
             f"exchange={exchange}/symbol={symbol}/date={date_str}/"
         )
 
+        # ADR-017 Amendment 3: NAS GET path 도 content-derived sort key
         try:
-            nas_keys = sorted(
+            candidate_keys = [
                 k for k in self._nas_uploader._list_objects(nas_prefix)  # type: ignore[union-attr]
                 if k.endswith(".parquet")
-            )
+            ]
         except Exception:
             _log.warning(
                 "[L2Compactor] NAS _list_objects failed prefix=%s — skip (INV-3)",
@@ -187,6 +186,22 @@ class L2Compactor:
             )
             return None
 
+        if not candidate_keys:
+            return None
+
+        # content-derived sort: get_streaming → pq.read_metadata stats.min
+        from mctrader_data.nas_storage.get_streaming import get_streaming
+
+        keyed: list[tuple[str, object]] = []
+        for k in candidate_keys:
+            stream = get_streaming(nas_uploader=self._nas_uploader, nas_key=k)  # type: ignore[arg-type]
+            ts = _extract_min_ts(stream)
+            if ts is None:
+                _log.warning("[L2Compactor] skip 0-row NAS L1 key: %s", k)
+                continue
+            keyed.append((k, ts))
+
+        nas_keys = [k for k, _ts in sorted(keyed, key=lambda x: x[1])]
         if not nas_keys:
             return None
 
