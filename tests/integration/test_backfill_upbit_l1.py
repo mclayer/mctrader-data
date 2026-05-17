@@ -11,6 +11,7 @@ Marked as integration (runs in CI, not in --skip-integration mode).
 from __future__ import annotations
 
 import json
+import tempfile
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -56,7 +57,7 @@ def _write_sealed_segment(
     add_compacted: bool = False,
 ) -> Path:
     """Write a sealed WAL segment with n_records and optional .compacted marker."""
-    filename = f"segment-{ts_str}-NODE_TEST.ndjson.sealed"
+    filename = f"segment-{ts_str}-N1.ndjson.sealed"  # short node_id — Windows MAX_PATH=260 guard
     seg = date_dir / filename
     lines = [
         _make_ob_snapshot_record(ts=f"2026-05-13T{12 + i:02d}:00:00+00:00", exchange=exchange, symbol=symbol)
@@ -91,7 +92,7 @@ def _build_wal_tree(
 
 
 @pytest.mark.integration
-def test_backfill_e2e(tmp_path: Path) -> None:
+def test_backfill_e2e() -> None:
     """Full pipeline: WAL sealed segments → run_backfill → L1 parquets.
 
     Verifies:
@@ -101,113 +102,122 @@ def test_backfill_e2e(tmp_path: Path) -> None:
     - .compacted sentinel created for each processed segment (INV-2)
     - BackfillManifest written (D5=B, INV-4)
     - Idempotency: second run processes 0 segments (INV-2)
+
+    Uses tempfile.mkdtemp for shorter root path — ts-prefix adds ~17 chars to
+    parquet filenames; Windows MAX_PATH=260 requires shorter base than pytest tmp_path.
     """
-    root = tmp_path
-    exchange = "upbit"
-    channel = "orderbooksnapshot"
-    n_segments = 4
-    n_records = 3  # records per segment → 6 L1 rows each (2 bid + 2 ask × 3 records)
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        exchange = "upbit"
+        channel = "orderbooksnapshot"
+        n_segments = 4
+        n_records = 3  # records per segment → 6 L1 rows each (2 bid + 2 ask × 3 records)
 
-    # Build WAL tree
-    _build_wal_tree(
-        root=root,
-        exchange=exchange,
-        channel=channel,
-        symbol="KRW-BTC",
-        date="2026-05-13",
-        n_segments=n_segments,
-        n_records_each=n_records,
-    )
-
-    # Add one pre-compacted segment — must be skipped (D4=A)
-    pre_compacted_dir = root / "wal" / exchange / channel / "KRW-BTC" / "2026-05-13"
-    _write_sealed_segment(pre_compacted_dir, ts_str="20260513T99000Z", add_compacted=True)
-
-    # Verify iter finds only uncompacted
-    wal_root = root / "wal"
-    segments = iter_frozen_segments(wal_root, exchange, channel)
-    assert len(segments) == n_segments, (
-        f"Expected {n_segments} uncompacted segments, got {len(segments)}"
-    )
-
-    # Run backfill
-    manifest = run_backfill(root=root, exchange=exchange, tier="L1", channel=channel)
-
-    # Verify manifest
-    assert manifest.segments_processed == n_segments
-    assert manifest.l1_parquets_created == n_segments
-    assert manifest.date_range_start == "2026-05-13"
-    assert manifest.date_range_end == "2026-05-13"
-
-    # Verify L1 parquets exist with correct schema
-    l1_base = (
-        root / "market" / channel / "schema_version=orderbook_snapshot.v1"
-        / "tier=L1" / f"exchange={exchange}"
-    )
-    all_parquets = list(l1_base.rglob("*.parquet"))
-    assert len(all_parquets) == n_segments, (
-        f"Expected {n_segments} L1 parquets, got {len(all_parquets)}"
-    )
-
-    # Schema check (INV-3)
-    for parquet in all_parquets[:1]:
-        tbl = pq.ParquetFile(str(parquet)).read()
-        expected_names = set(_OB_SNAPSHOT_SCHEMA.names)
-        actual_names = set(tbl.schema.names)
-        assert expected_names == actual_names, (
-            f"Schema mismatch (INV-3). Expected={expected_names}, Got={actual_names}"
+        # Build WAL tree
+        _build_wal_tree(
+            root=root,
+            exchange=exchange,
+            channel=channel,
+            symbol="KRW-BTC",
+            date="2026-05-13",
+            n_segments=n_segments,
+            n_records_each=n_records,
         )
 
-    # .compacted sentinel check (INV-2)
-    for seg in segments:
-        compacted = Path(str(seg) + ".compacted")
-        assert compacted.exists(), f".compacted sentinel missing for {seg.name}"
+        # Add one pre-compacted segment — must be skipped (D4=A)
+        pre_compacted_dir = root / "wal" / exchange / channel / "KRW-BTC" / "2026-05-13"
+        _write_sealed_segment(pre_compacted_dir, ts_str="20260513T99000Z", add_compacted=True)
 
-    # Idempotency: second run must process 0 segments
-    manifest2 = run_backfill(root=root, exchange=exchange, tier="L1", channel=channel)
-    assert manifest2.segments_processed == 0, (
-        f"Idempotency FAIL: second run processed {manifest2.segments_processed} segments"
-    )
+        # Verify iter finds only uncompacted
+        wal_root = root / "wal"
+        segments = iter_frozen_segments(wal_root, exchange, channel)
+        assert len(segments) == n_segments, (
+            f"Expected {n_segments} uncompacted segments, got {len(segments)}"
+        )
+
+        # Run backfill
+        manifest = run_backfill(root=root, exchange=exchange, tier="L1", channel=channel)
+
+        # Verify manifest
+        assert manifest.segments_processed == n_segments
+        assert manifest.l1_parquets_created == n_segments
+        assert manifest.date_range_start == "2026-05-13"
+        assert manifest.date_range_end == "2026-05-13"
+
+        # Verify L1 parquets exist with correct schema
+        l1_base = (
+            root / "market" / channel / "schema_version=orderbook_snapshot.v1"
+            / "tier=L1" / f"exchange={exchange}"
+        )
+        all_parquets = list(l1_base.rglob("*.parquet"))
+        assert len(all_parquets) == n_segments, (
+            f"Expected {n_segments} L1 parquets, got {len(all_parquets)}"
+        )
+
+        # Schema check (INV-3)
+        for parquet in all_parquets[:1]:
+            tbl = pq.ParquetFile(str(parquet)).read()
+            expected_names = set(_OB_SNAPSHOT_SCHEMA.names)
+            actual_names = set(tbl.schema.names)
+            assert expected_names == actual_names, (
+                f"Schema mismatch (INV-3). Expected={expected_names}, Got={actual_names}"
+            )
+
+        # .compacted sentinel check (INV-2)
+        for seg in segments:
+            compacted = Path(str(seg) + ".compacted")
+            assert compacted.exists(), f".compacted sentinel missing for {seg.name}"
+
+        # Idempotency: second run must process 0 segments
+        manifest2 = run_backfill(root=root, exchange=exchange, tier="L1", channel=channel)
+        assert manifest2.segments_processed == 0, (
+            f"Idempotency FAIL: second run processed {manifest2.segments_processed} segments"
+        )
 
 
 # ─── test 2: partial loss verify logic ───────────────────────────────────────
 
 
 @pytest.mark.integration
-def test_verify_partial_loss_pass(tmp_path: Path) -> None:
-    """verify_backfill_partial_loss: all L1 present → PASS, fix_trigger=False."""
-    root = tmp_path
+def test_verify_partial_loss_pass() -> None:
+    """verify_backfill_partial_loss: all L1 present → PASS, fix_trigger=False.
 
-    # Build and compact a segment
-    _build_wal_tree(root=root, n_segments=2, n_records_each=2)
-    run_backfill(root=root, exchange="upbit", tier="L1", channel="orderbooksnapshot")
+    Uses tempfile.TemporaryDirectory for shorter root path — ts-prefix adds ~17 chars to
+    parquet filenames; Windows MAX_PATH=260 requires shorter base than pytest tmp_path.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
 
-    # Test the V2 verify logic inline (scripts/ not importable in CI)
-    wal_root = root / "wal"
-    market_root = root / "market"
+        # Build and compact a segment
+        _build_wal_tree(root=root, n_segments=2, n_records_each=2)
+        run_backfill(root=root, exchange="upbit", tier="L1", channel="orderbooksnapshot")
 
-    # WAL keys
-    wal_keys: set[str] = set()
-    for sym_dir in (wal_root / "upbit" / "orderbooksnapshot").iterdir():
-        sym = sym_dir.name
-        for date_dir in sym_dir.iterdir():
-            dt = date_dir.name
-            if any(f.name.endswith(".ndjson.sealed") for f in date_dir.iterdir()):
-                wal_keys.add(f"{sym}/{dt}")
+        # Test the V2 verify logic inline (scripts/ not importable in CI)
+        wal_root = root / "wal"
+        market_root = root / "market"
 
-    # L1 keys
-    l1_base = (
-        market_root / "orderbooksnapshot"
-        / "schema_version=orderbook_snapshot.v1" / "tier=L1" / "exchange=upbit"
-    )
-    l1_keys: set[str] = set()
-    if l1_base.exists():
-        for sym_dir in l1_base.iterdir():
-            sym = sym_dir.name.split("=", 1)[-1]
+        # WAL keys
+        wal_keys: set[str] = set()
+        for sym_dir in (wal_root / "upbit" / "orderbooksnapshot").iterdir():
+            sym = sym_dir.name
             for date_dir in sym_dir.iterdir():
-                dt = date_dir.name.split("=", 1)[-1]
-                if list(date_dir.rglob("*.parquet")):
-                    l1_keys.add(f"{sym}/{dt}")
+                dt = date_dir.name
+                if any(f.name.endswith(".ndjson.sealed") for f in date_dir.iterdir()):
+                    wal_keys.add(f"{sym}/{dt}")
 
-    v2_loss_keys = wal_keys - l1_keys
-    assert len(v2_loss_keys) == 0, f"V2 loss detected: {v2_loss_keys}"
+        # L1 keys
+        l1_base = (
+            market_root / "orderbooksnapshot"
+            / "schema_version=orderbook_snapshot.v1" / "tier=L1" / "exchange=upbit"
+        )
+        l1_keys: set[str] = set()
+        if l1_base.exists():
+            for sym_dir in l1_base.iterdir():
+                sym = sym_dir.name.split("=", 1)[-1]
+                for date_dir in sym_dir.iterdir():
+                    dt = date_dir.name.split("=", 1)[-1]
+                    if list(date_dir.rglob("*.parquet")):
+                        l1_keys.add(f"{sym}/{dt}")
+
+        v2_loss_keys = wal_keys - l1_keys
+        assert len(v2_loss_keys) == 0, f"V2 loss detected: {v2_loss_keys}"

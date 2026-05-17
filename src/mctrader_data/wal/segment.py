@@ -71,3 +71,27 @@ def parse_node_id_from_segment(sealed: Path) -> str:
     # base = segment-20260509T000000Z-NODE_A
     parts = base.split("-", 2)  # ["segment", "20260509T000000Z", "NODE_A"]
     return parts[2] if len(parts) >= 3 else "DEFAULT"
+
+
+def parse_ts_from_segment(sealed: Path) -> str:
+    """Extract epoch ts from segment filename: segment-{YYYYMMDDTHHMMSSZ}-{node_id}.ndjson[.sealed[.compacted]]
+
+    Symmetric with parse_node_id_from_segment — ts 위치 = parts[1].
+    Returns 'YYYYMMDDTHHMMSSZ' (사전 정렬 가능 ISO 형식).
+
+    ADR-009 §D2 Amendment N — L1 dual filename pattern 의 ts source.
+    """
+    stem = sealed.name
+    base = (
+        stem
+        .replace(".ndjson.sealed.compacted", "")
+        .replace(".ndjson.sealed", "")
+        .replace(".ndjson", "")
+    )
+    parts = base.split("-", 2)
+    if len(parts) < 3 or parts[0] != "segment":
+        raise ValueError(
+            f"Unexpected segment filename: {sealed.name!r}. "
+            f"Expected 'segment-<YYYYMMDDTHHMMSSZ>-<node_id>.ndjson[.sealed[.compacted]]'."
+        )
+    return parts[1]

@@ -15,18 +15,22 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import logging
 import os
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pyarrow.parquet as pq
 
 from mctrader_data.compactor.l1 import _schema_version
+from mctrader_data.compactor.sort_key import _extract_min_ts
 from mctrader_data.metrics import compactor_writer_open_count
 
 if TYPE_CHECKING:
     from mctrader_data.nas_storage.nas_uploader import NASUploader
+
+_log = logging.getLogger(__name__)
 
 
 class L2Compactor:
@@ -67,7 +71,19 @@ class L2Compactor:
 
         # Local fallback (backward compat — nas_uploader=None)
         # Read individual files (not directory) to avoid Hive auto-discovery conflict
-        l1_files = sorted(l1_dir.rglob("part-*.parquet")) if l1_dir.exists() else []
+        # ADR-017 Amendment 3: content-derived sort key (파일명 untrusted)
+        # Primary = pq.read_metadata stats.min, Fallback = iter_batches[:1]
+        if l1_dir.exists():
+            candidates = list(l1_dir.rglob("part-*.parquet"))
+            with_ts = [(p, _extract_min_ts(p)) for p in candidates]
+            # 0-row file (None) skip + warning
+            for p, ts in with_ts:
+                if ts is None:
+                    _log.warning("[L2Compactor] skip 0-row L1 file: %s", p)
+            filtered = [(p, ts) for p, ts in with_ts if ts is not None]
+            l1_files = [p for p, _ in sorted(filtered, key=lambda x: x[1])]
+        else:
+            l1_files = []
         if not l1_files:
             return None
 
@@ -155,6 +171,9 @@ class L2Compactor:
         INV-9 (FIX iteration 2): run_id hash input = canonical keys
         (_legacy_key_to_canonical(k) for all nas_keys) — pre-U2/alias-overlap/post-U3
         3 단계 동일 canonical_keys → 동일 run_id → L2 output filename drift 0.
+
+        ADR-017 Amendment 3 (PR #96): post-dedup nas_keys 에 대해
+        content-derived sort (get_streaming → _extract_min_ts) 적용 — 파일명 untrusted.
         """
         from mctrader_data.nas_storage.get_streaming import get_streaming
         from mctrader_data.nas_storage.nas_key import (
@@ -193,16 +212,30 @@ class L2Compactor:
             for raw_key in legacy_keys:
                 canonical = _legacy_key_to_canonical(raw_key)  # l1/ strip via SSOT (INV-1 정합)
                 canonical_map.setdefault(canonical, raw_key)  # legacy fallback only if flat absent
-            nas_keys = sorted(canonical_map.values())
+            candidate_keys = sorted(canonical_map.values())
         except Exception:
-            import logging
-            logging.getLogger(__name__).warning(
+            _log.warning(
                 "[L2Compactor] NAS _list_objects failed flat=%s legacy=%s — skip (INV-3)",
                 flat_prefix,
                 legacy_prefix,
             )
             return None
 
+        if not candidate_keys:
+            return None
+
+        # ADR-017 Amendment 3 (PR #96): content-derived sort on dedup'd keys.
+        # get_streaming → pq.read_metadata stats.min (Primary) / iter_batches[:1] (Fallback).
+        keyed: list[tuple[str, datetime]] = []
+        for k in candidate_keys:
+            stream = get_streaming(nas_uploader=self._nas_uploader, nas_key=k)  # type: ignore[arg-type]
+            ts = _extract_min_ts(stream)
+            if ts is None:
+                _log.warning("[L2Compactor] skip 0-row NAS L1 key: %s", k)
+                continue
+            keyed.append((k, ts))
+
+        nas_keys = [k for k, _ts in sorted(keyed, key=lambda x: x[1])]
         if not nas_keys:
             return None
 

@@ -15,7 +15,9 @@ MCT-168 invariants (ADR-029 D1=B + D2=B):
 Path layout (ADR-009 §D2 / ADR-017 — ALL components in key=value Hive format):
   <root>/market/<channel>/schema_version=<version>/tier=L1/
     exchange=<exchange>/symbol=<symbol>/date=<date>/
-    node=<node_id>/part-<run_id>.parquet
+    node=<node_id>/part-<YYYYMMDDTHHMMSSZ>-<run_id>.parquet
+
+  Legacy pattern (dual-glob compatible): part-<run_id>.parquet
 
 WAL segment path (parsed to extract metadata):
   <root>/wal/<exchange>/<channel>/<symbol>/<date>/<filename>.ndjson.sealed
@@ -35,7 +37,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from mctrader_data.wal.ndjson_codec import decode_line
-from mctrader_data.wal.segment import compacted_path, parse_node_id_from_segment
+from mctrader_data.wal.segment import compacted_path, parse_node_id_from_segment, parse_ts_from_segment
 from mctrader_data.tick_storage import (
     TICK_SCHEMA_VERSION,
     TickRecord,
@@ -137,7 +139,8 @@ class L1Compactor:
         """
         meta = self._parse_segment_meta(sealed)
         run_id = self._derive_run_id(sealed)
-        parquet_path = self._derive_parquet_path(meta, run_id)
+        ts_prefix = parse_ts_from_segment(sealed)
+        parquet_path = self._derive_parquet_path(meta, run_id, ts_prefix)
         parquet_path.parent.mkdir(parents=True, exist_ok=True)
 
         if not parquet_path.exists():
@@ -240,8 +243,11 @@ class L1Compactor:
         rel_str = rel.as_posix()
         return hashlib.sha256(rel_str.encode("utf-8")).hexdigest()[:16]
 
-    def _derive_parquet_path(self, meta: dict, run_id: str) -> Path:
+    def _derive_parquet_path(self, meta: dict, run_id: str, ts_prefix: str) -> Path:
         """Derive the output Parquet path from metadata.
+
+        ADR-009 §D2 Amendment N — new naming = part-<YYYYMMDDTHHMMSSZ>-<sha[:16]>.parquet
+        (legacy = part-<sha[:16]>.parquet — reader dual-glob 호환).
 
         All path components use key=value Hive format per ADR-009 §D2 and ADR-017.
         Callers reading individual files must use pq.ParquetFile(f).read() — NOT
@@ -263,7 +269,7 @@ class L1Compactor:
             / f"symbol={symbol}"
             / f"date={date}"
             / f"node={node_id}"
-            / f"part-{run_id}.parquet"
+            / f"part-{ts_prefix}-{run_id}.parquet"
         )
 
     def _schema_version_for_channel(self, channel: str) -> str:
