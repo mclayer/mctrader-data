@@ -1,0 +1,31 @@
+# E2E Demo — single-host two-process simulation
+# duration=10.0s, rate=20.0/sec/node, restart_at=4.0s
+
+## Phase 1: 4.0s — NODE_A wrote 61 ticks
+## Phase 2: NODE_A restarted, 6.0s remaining
+
+## Write summary
+| node   | total ticks |
+|--------|-------------|
+| NODE_A |         159 |
+| NODE_B |         158 |
+| total  |         317 |
+
+## Heartbeat artifacts
+| node   | exists | now (final)               |
+|--------|--------|---------------------------|
+| NODE_A | YES    | 2026-05-06T03:19:18.64366 |
+| NODE_B | YES    | 2026-05-06T03:19:18.64808 |
+
+## scan_ticks (full window, multi-node dedup auto-detected)
+- input total: 317 (NODE_A 159 + NODE_B 158)
+- scanned: 317
+- no scanner crash: YES
+- coverage > 0: YES
+
+## Verdict
+- duration: 10.3s
+- both heartbeats present: YES
+- scan succeeded with multi-node partition: YES
+- mid-run NODE_A restart simulated: YES
+- **E2E demo: PASS**
