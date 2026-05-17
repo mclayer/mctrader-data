@@ -310,6 +310,43 @@ sha256 idempotency.
 `rglob` 사용 (commit c169720, CRITICAL fix). `node=<id>/` subdir 미포함 layout 은 production
 부재 = 매칭 0.
 
+## L1 file naming convention (ADR-009 §D2 Amendment N, 2026-05-17)
+
+L1 Parquet 파일명 두 패턴 양립 (dual-glob 호환):
+
+| 패턴 | 적용 | 예시 |
+|------|------|------|
+| **legacy** | 기존 117GB (PR #85 WS-A `f2e2bc9` 산출물) — rewrite 0 | `part-<sha[:16]>.parquet` |
+| **new** (forward-only) | 본 Story merge 후 신규 segment | `part-<YYYYMMDDTHHMMSSZ>-<sha[:16]>.parquet` |
+
+- ts source = sealed WAL segment 의 epoch ts (`segment-<ts>-<node>.ndjson.sealed`, `parse_ts_from_segment` helper)
+- `_derive_run_id` 불변 = `sha256(sealed_path)[:16]` — INV-3 idempotency 보존, NAS PUT 재upload 0, `.compacted` sentinel mapping 보존
+- Reader 의무: `rglob("part-*.parquet")` 양쪽 모두 match
+
+## L2/L3 compactor sort key 규약 (ADR-017 Amendment 3, 2026-05-17)
+
+L2/L3 compactor 의 input 파일 정렬 키 = **content-derived ts_utc** (파일명 untrusted).
+
+```python
+from mctrader_data.compactor.sort_key import _extract_min_ts
+
+# Primary: pq.read_metadata(path).row_group(N).column(ts_utc_idx).statistics.min
+# Fallback: stats 부재 시 pq.ParquetFile(path).iter_batches(batch_size=1) first-row
+# 0-row file: None 반환 → caller skip + warning emit
+ts = _extract_min_ts(path_or_stream)
+```
+
+- **INV**: `sorted(files)` (byte-order) 또는 mtime 기반 sort **금지** — 파일명 시간 정보 0 (legacy) 또는 grain 5분 (new) 이라 content-sort 가 유일 정답
+- **L1 intra-file mono 보장**: `l1.py compact_segment` step 5 `table.sort_by("ts_utc")` — fallback first-row = file_min
+- **multi-row-group**: file-level min = `min(rg.min for rg in row_groups)` 명시 집계
+
+## dual-glob 호환 (sha-only legacy + ts-prefix new, 2026-05-17)
+
+- `rglob("part-*.parquet")` 양쪽 match
+- content-derived sort key (`_extract_min_ts`) 라 파일명 무관 정렬 정확
+- 117GB rewrite 불필요 (legacy 보존, forward 신규부터 new 패턴, eventually 자연 rotation 통일)
+- verify gate: `scripts/verify_l2_l3_sort_correctness.py` 에 `legacy_sha_count` + `new_ts_prefix_count` 분리 보고
+
 ## 관련 ADR
 
 - ADR-017 Amendment 2 (compactor source 규약, channel matrix SSOT)
