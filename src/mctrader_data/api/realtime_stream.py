@@ -153,10 +153,8 @@ class RealtimeStreamPublisher:
         dead-in-data: publish_tick production caller 0 (consumer=engine MCT-186).
         telemetry best-effort — Exception 발생 시 publish path 절대 차단 금지.
         """
-        try:
+        with contextlib.suppress(Exception):  # telemetry best-effort, never break publish path
             _publish_failures_total.inc()
-        except Exception:  # noqa: BLE001 — telemetry best-effort, never break publish path
-            pass
 
     @property
     def publish_failures(self) -> int:
