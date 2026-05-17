@@ -1,0 +1,129 @@
+name: wrapper-managed block lint (blocking-on-pr mode)
+# CFP-702 / ADR-027 Amendment 3 §결정 7.D / ADR-060 §결정 5
+# Tier: blocking-on-pr (continue-on-error: false — D4 marker 위반 = customization wholesale loss 직결)
+# Bypass channel: hotfix-bypass:wrapper-managed-block label (ADR-024 §결정 6.A per-entry namespace)
+#
+# 검증: # BEGIN / # END wrapper-managed marker block pairing + 순서 + flat-only nesting
+# File type별 marker syntax (ADR-027 §결정 7.A.1):
+#   .yml/.yaml/.sh:  # BEGIN wrapper-managed  /  # END wrapper-managed
+#   .md:             <!-- BEGIN wrapper-managed -->  /  <!-- END wrapper-managed -->
+#   .json:           sidecar manifest only (marker-incapable — Wave 2 Story-5 carrier)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    paths:
+      - '**/*.yml'
+      - '**/*.yaml'
+      - '**/*.sh'
+      - '**/*.md'
+      - 'scripts/check-wrapper-managed-block.sh'
+      - '.github/workflows/wrapper-managed-block.yml'
+      - 'templates/github-workflows/wrapper-managed-block.yml'
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  wrapper-managed-block:
+    runs-on: ubuntu-latest
+    # blocking-on-pr mode (ADR-060 §결정 5) — D4 marker 위반 = PR merge 차단
+    continue-on-error: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check bypass label
+        id: bypass
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          labels=$(gh pr view "$PR_NUMBER" --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+          echo "labels=$labels"
+          case ",$labels," in
+            *,hotfix-bypass:wrapper-managed-block,*)
+              echo "bypass=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "bypass=false" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Detect changed files
+        id: changed
+        if: steps.bypass.outputs.bypass == 'false'
+        run: |
+          set -euo pipefail
+          git diff --name-only "origin/${{ github.base_ref }}...HEAD" \
+            | grep -E '\.(yml|yaml|sh|md)$' \
+            > /tmp/changed_files.txt || true
+          if [ -s /tmp/changed_files.txt ]; then
+            echo "has_changed=true" >> "$GITHUB_OUTPUT"
+            echo "=== Changed files for marker lint ==="
+            cat /tmp/changed_files.txt
+          else
+            echo "has_changed=false" >> "$GITHUB_OUTPUT"
+            echo "=== No .yml/.yaml/.sh/.md files changed ==="
+          fi
+
+      - name: Run wrapper-managed block lint
+        id: lint
+        if: steps.bypass.outputs.bypass == 'false' && steps.changed.outputs.has_changed == 'true'
+        run: |
+          set +e
+          # 변경된 파일만 대상으로 lint 실행
+          mapfile -t changed_files < /tmp/changed_files.txt
+          bash scripts/check-wrapper-managed-block.sh "${changed_files[@]}" 2>&1 | tee /tmp/lint.out
+          status=${PIPESTATUS[0]}
+          echo "exit_status=$status" >> "$GITHUB_OUTPUT"
+          exit $status  # blocking-on-pr mode — lint fail 시 step fail propagation
+
+      - name: Skip lint (no changed files)
+        id: lint_skip
+        if: steps.bypass.outputs.bypass == 'false' && steps.changed.outputs.has_changed != 'true'
+        run: |
+          echo "exit_status=0" >> "$GITHUB_OUTPUT"
+          echo "[wrapper-managed-block-lint] INFO: 변경된 대상 파일 없음 — PASS (no-op)" | tee /tmp/lint.out
+
+      - name: Post lint result comment (sticky)
+        # always() — audit trail comment 는 lint 실패 시에도 실행
+        if: always() && steps.bypass.outputs.bypass == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          LINT_STATUS: ${{ steps.lint.outputs.exit_status || steps.lint_skip.outputs.exit_status || '0' }}
+        run: |
+          set -euo pipefail
+          LINT_OUT="$(cat /tmp/lint.out 2>/dev/null || echo '(lint output 부재)')"
+          if [ "${LINT_STATUS:-1}" = "0" ]; then
+            HEADER="## wrapper-managed block lint — PASS (blocking-on-pr mode, CFP-702)"
+            FOOTER="blocking-on-pr mode — marker block 정합 확인됨. D4 customization 보존 invariant OK."
+          else
+            HEADER="## wrapper-managed block lint — violation 감지 (blocking-on-pr mode)"
+            FOOTER=$'**blocking-on-pr mode (CFP-702 / ADR-027 Amendment 3 §결정 7.D)**: marker block 위반이 PR merge 를 차단합니다.\n\n**violation 유형**:\n- orphan BEGIN (END 없음) 또는 orphan END (BEGIN 없음)\n- marker 역전 (END 가 BEGIN 보다 앞)\n- nested marker (flat-only invariant 위반)\n\n**수정 방법**: `# BEGIN wrapper-managed` ... `# END wrapper-managed` 쌍을 올바르게 배치\n\n**hotfix bypass channel**: `hotfix-bypass:wrapper-managed-block` label 부착 시 lint skip + audit comment 자동 발의.'
+          fi
+          BODY=$(printf '%s\n\n```\n%s\n```\n\n%s\n\n%s' \
+            "$HEADER" "$LINT_OUT" "$FOOTER" \
+            "> 본 workflow = blocking-on-pr mode (continue-on-error: false, CFP-702 / ADR-027 Amendment 3 §결정 7.D). D4 marker 위반 = customization wholesale loss 위험.")
+          gh pr comment "$PR_NUMBER" --body "$BODY"
+
+      - name: Post bypass audit comment
+        if: steps.bypass.outputs.bypass == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          BODY="## wrapper-managed block lint — BYPASSED (hotfix-bypass:wrapper-managed-block)
+
+          **hotfix-bypass:wrapper-managed-block** label 감지 — lint skip (ADR-024 §결정 6.A per-entry namespace).
+
+          **bypass 적용 사유를 PR description 또는 comment 에 명시해야 합니다** (audit trail 의무).
+          bypass 없이 진행하려면 label 을 제거하고 marker block 위반을 수정해 주세요.
+
+          > CFP-702 / ADR-027 Amendment 3 §결정 7.D — D4 customization marker 보존 invariant bypass channel."
+          gh pr comment "$PR_NUMBER" --body "$BODY"

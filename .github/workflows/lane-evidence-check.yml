@@ -1,0 +1,206 @@
+name: Lane Evidence Check (CFP-126 / ADR-031)
+# Security: third-party actions are SHA-pinned per CFP-300 policy.
+
+# Phase 2 PR description 의 `## Lane evidence` 블록 + 7-row 의무 검증.
+# Story §14 Lane Evidence 와 cross-validate (lint script 별도 — scripts/check-lane-evidence.sh).
+#
+# Effective date: ADR-031 Accepted PR merge 직후 신규 Phase 2 PR 부터 (retroactive 미처리, ADR-031 §결정 5).
+# CFP-106 fast-pass: type:epic / doc-only PR = 본 검사 면제 (phase-gate-mergeable.yml 동일 로직).
+#
+# Bypass: BYPASS_LANE_EVIDENCE=1 + BYPASS_LANE_EVIDENCE_REASON 양 env 의무 (workflow level — repo secrets 사용).
+
+on:
+  pull_request:
+    types: [opened, synchronize, edited, labeled, unlabeled]
+
+permissions:
+  pull-requests: write
+  checks: write
+
+jobs:
+  lane-evidence:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Check Lane Evidence block + 7-row
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pr = context.payload.pull_request;
+            const body = pr.body || '';
+            const labels = pr.labels.map(l => l.name);
+
+            // 1. Fast-pass: type:epic / doc-only PR (CFP-106 정합)
+            if (labels.includes('type:epic')) {
+              await github.rest.checks.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'lane-evidence-check',
+                head_sha: pr.head.sha,
+                status: 'completed',
+                conclusion: 'success',
+                output: { title: 'Lane Evidence', summary: 'Fast-pass (type:epic — CFP-106 정합)' }
+              });
+              return;
+            }
+
+            // 2. Phase detection — only Phase 2 PR (label phase:보안-테스트 or phase:구현-* 진행 중)
+            const phase = labels.find(l => l.startsWith('phase:'));
+            const isPhase2 =
+              phase === 'phase:보안-테스트' ||
+              phase === 'phase:구현-테스트' ||
+              phase === 'phase:구현-리뷰' ||
+              phase === 'phase:구현';
+            if (!isPhase2) {
+              await github.rest.checks.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'lane-evidence-check',
+                head_sha: pr.head.sha,
+                status: 'completed',
+                conclusion: 'success',
+                output: { title: 'Lane Evidence', summary: `N/A — phase=${phase || 'none'} (Phase 2 만 검사)` }
+              });
+              return;
+            }
+
+            // 3. Doc-only fast-pass (CFP-106 정합)
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+              per_page: 100
+            });
+            const allDoc = files.every(f =>
+              f.filename.startsWith('docs/') ||
+              f.filename.startsWith('wrapper/') ||
+              f.filename.startsWith('.github/') ||
+              f.filename.startsWith('templates/') ||
+              f.filename.endsWith('.md') ||
+              f.filename === 'CHANGELOG.md' ||
+              f.filename === 'README.md'
+            );
+            if (allDoc) {
+              await github.rest.checks.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'lane-evidence-check',
+                head_sha: pr.head.sha,
+                status: 'completed',
+                conclusion: 'success',
+                output: { title: 'Lane Evidence', summary: 'Fast-pass (doc-only PR — CFP-106 정합)' }
+              });
+              return;
+            }
+
+            // 4. Bypass check (PR description 명시)
+            const bypassMatch = body.match(/BYPASS:\s*(.+)/i);
+            if (bypassMatch) {
+              const reason = bypassMatch[1].trim();
+              await github.rest.checks.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'lane-evidence-check',
+                head_sha: pr.head.sha,
+                status: 'completed',
+                conclusion: 'success',
+                output: { title: 'Lane Evidence', summary: `BYPASS honored: ${reason} (audit trail 의무 — ADR-026)` }
+              });
+              return;
+            }
+
+            // 5a. Duplicate block detection (CFP-465 baseline + CFP-490 tie-break 강화) —
+            //     body 에 `## Lane evidence` heading 이 1회 초과 시 fail + tie-break case A/B/C 식별.
+            //
+            // Option A strict (CFP-490 §3.1 결정 1): heading 1회 초과 = 항상 action_required
+            //   (CFP-465 invariant 보존, lenient fallback 채택 안 함, ADR-031 §결정 2 정합).
+            //
+            // .mjs extraction (CFP-490 §3.1 결정 2): testability rationale — 6 test_function 18+ assertion
+            //   case A/B/C path coverage 측정. ADR-061 supporting analogy (multi-line script externalization).
+            //
+            // Root cause documentation (CFP-490 §1 step 1-5 sequence):
+            //   - first-match capture boundary (line 131): 첫 heading content 만 capture, 두 번째 heading 이 boundary
+            //   - duplicate origin (Story §7.5 결정 4): codeforge-develop DeveloperPL agent body composition
+            //     영역의 `## Lane evidence` heading 첫 inject (auto-generated) + Orchestrator manual append 누적
+            //   - actual recurrence: CFP-500 FIX-5 (1차) + CFP-451 본 세션 transient (2차)
+            // ESM dynamic import (.mjs) — actions/github-script CJS context 안에서 호환.
+            //   require() 는 CJS만 지원, dynamic import() 는 ESM/CJS 양방향 지원.
+            const mjsUrl = `file://${process.env.GITHUB_WORKSPACE}/.github/scripts/check-lane-evidence-block.mjs`;
+            const { analyzeDuplicateHeadings } = await import(mjsUrl);
+            const dupResult = analyzeDuplicateHeadings(body);
+            if (dupResult !== null) {
+              await github.rest.checks.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'lane-evidence-check',
+                head_sha: pr.head.sha,
+                status: 'completed',
+                conclusion: 'action_required',
+                output: {
+                  title: `Lane Evidence — duplicate heading (Case ${dupResult.case})`,
+                  summary: dupResult.summary
+                }
+              });
+              return;
+            }
+
+            // 5. Lane evidence block presence check
+            const blockMatch = body.match(/^## Lane evidence\s*$([\s\S]*?)(?=^## |$(?![\s\S]))/m);
+            if (!blockMatch) {
+              await github.rest.checks.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'lane-evidence-check',
+                head_sha: pr.head.sha,
+                status: 'completed',
+                conclusion: 'action_required',
+                output: {
+                  title: 'Lane Evidence',
+                  summary: '## Lane evidence 블록 부재 — Phase 2 PR 의무 (ADR-031 §결정 2). PR template 참조 + scripts/check-lane-evidence.sh local validate.'
+                }
+              });
+              return;
+            }
+
+            // 6. 7-row valid format check (lane: <PASS|SKIPPED|FIX|ESCALATED|BYPASS>)
+            const blockBody = blockMatch[1];
+            const requiredLanes = ['요구사항', '설계', '설계-리뷰', '구현', '구현-리뷰', '구현-테스트', '보안-테스트'];
+            const rowRegex = /^-\s*([^:]+):\s*(PASS|SKIPPED|FIX|ESCALATED|BYPASS)/gm;
+            const foundLanes = new Set();
+            let m;
+            while ((m = rowRegex.exec(blockBody)) !== null) {
+              foundLanes.add(m[1].trim());
+            }
+            const missing = requiredLanes.filter(l => !foundLanes.has(l));
+
+            if (missing.length > 0) {
+              await github.rest.checks.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'lane-evidence-check',
+                head_sha: pr.head.sha,
+                status: 'completed',
+                conclusion: 'action_required',
+                output: {
+                  title: 'Lane Evidence',
+                  summary: `7-row 검증 실패 — ${missing.length}/7 lane row 부재 또는 invalid format: ${missing.join(', ')}. valid format: \`- <lane>: <PASS|SKIPPED|FIX|ESCALATED|BYPASS>\``
+                }
+              });
+              return;
+            }
+
+            // PASS
+            await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'lane-evidence-check',
+              head_sha: pr.head.sha,
+              status: 'completed',
+              conclusion: 'success',
+              output: {
+                title: 'Lane Evidence',
+                summary: `7/7 lane row valid format. ${foundLanes.size} lanes detected: ${[...foundLanes].join(', ')}`
+              }
+            });

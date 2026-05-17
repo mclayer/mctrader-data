@@ -1,0 +1,55 @@
+# parallel-dispatch-prompt-check.yml
+# ADR-064 Amendment 1 / CFP-609 — parallel-dispatch-protocol-v1 §8 mechanical enforcement
+# Framework: ADR-060 evidence-enforceable promotion framework (warning tier)
+# Bypass channel: hotfix-bypass:parallel-dispatch-prompt label (ADR-024 Amendment 3)
+# SSOT: docs/inter-plugin-contracts/parallel-dispatch-protocol-v1.md §4 + §8
+
+name: parallel-dispatch-prompt-check
+
+on:
+  pull_request:
+    paths:
+      - 'docs/stories/**.md'
+      - 'docs/change-plans/**.md'
+      - 'docs/inter-plugin-contracts/parallel-dispatch-protocol-v1.md'
+      - 'scripts/check-parallel-dispatch-prompt.sh'
+      - 'scripts/check_parallel_dispatch_prompt.py'
+
+permissions:
+  contents: read
+  pull-requests: write  # audit comment 자동 발의
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    continue-on-error: true  # warning tier — ADR-060 §결정 5 정합
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Check hotfix-bypass label
+        id: bypass
+        run: |
+          if echo '${{ toJson(github.event.pull_request.labels.*.name) }}' | grep -q 'hotfix-bypass:parallel-dispatch-prompt'; then
+            echo "bypass=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "bypass=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run parallel-dispatch-prompt lint
+        if: steps.bypass.outputs.bypass != '1'
+        run: |
+          bash scripts/check-parallel-dispatch-prompt.sh \
+            docs/stories \
+            docs/change-plans \
+            || echo "::warning::parallel-dispatch-prompt-check WARN — see job output above. SSOT: docs/inter-plugin-contracts/parallel-dispatch-protocol-v1.md"
+
+      - name: Bypass notice
+        if: steps.bypass.outputs.bypass == '1'
+        run: |
+          echo "::notice::parallel-dispatch-prompt-check skipped — hotfix-bypass:parallel-dispatch-prompt label active (ADR-024 Amendment 3 audit trail required)"

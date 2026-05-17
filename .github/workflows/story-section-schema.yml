@@ -1,4 +1,5 @@
 name: Story Section Schema (CFP-91 / CFP-94)
+# Security: third-party actions are SHA-pinned per CFP-300 policy.
 
 # Validates docs/stories/*.md against templates/story-page-structure.md schema:
 # - Implementation Story (type: story OR no type field) = strict mode (§1-§13 모두 의무)
@@ -22,7 +23,7 @@ jobs:
   story-section-schema:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Run story section schema lint
         run: |

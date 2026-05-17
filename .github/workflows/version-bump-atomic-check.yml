@@ -1,0 +1,75 @@
+# CFP-441 / ADR-063 §결정 5 — Version bump 3-file atomic invariant check (PR-time enforcement)
+#
+# 검증:
+#   - plugin.json mirrored field (name/version/description/author) 변경 시
+#   - CHANGELOG.md latest entry version 일치
+#   - marketplace.json mirrored field 4종 parity (ADR-016)
+#   - marketplace sync 상태 (ADR-063 §결정 2 ordering)
+#
+# 기존 `check-marketplace-parity` + `invariant-check` workflow 와 보완 관계
+# (사후 감지 → 통합 channel + 명시적 ADR-063 violation 메시지).
+#
+# Hotfix bypass: hotfix-bypass:marketplace-atomic label 부착 시 skip
+# (ADR-024 Amendment 3 hotfix-bypass label family 정합, 24시간 이내 sync 의무).
+
+name: version-bump-atomic-check
+
+on:
+  pull_request:
+    paths:
+      - '.claude-plugin/plugin.json'
+      - 'CHANGELOG.md'
+      - 'scripts/check-version-bump-atomic.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write  # CFP-585 — Bypass audit comment (gh pr comment) requires write
+
+jobs:
+  atomic-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (with fetch-depth for diff)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check hotfix bypass label
+        id: bypass
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          LABELS=$(gh pr view "${{ github.event.pull_request.number }}" --json labels --jq '.labels[].name' || echo "")
+          if echo "$LABELS" | grep -q "^hotfix-bypass:marketplace-atomic$"; then
+            echo "bypass=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::version-bump-atomic-check: hotfix-bypass:marketplace-atomic label detected — skipping (ADR-024 Amendment 3, 24h sync 의무)"
+          else
+            echo "bypass=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run check-version-bump-atomic.sh
+        if: steps.bypass.outputs.bypass != 'true'
+        env:
+          BASE_REF: origin/${{ github.event.pull_request.base.ref || 'main' }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          chmod +x scripts/check-version-bump-atomic.sh
+          bash scripts/check-version-bump-atomic.sh
+
+      - name: Bypass audit comment
+        if: steps.bypass.outputs.bypass == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr comment "${{ github.event.pull_request.number }}" --body "[audit] **version-bump-atomic bypass 감지**
+
+          \`hotfix-bypass:marketplace-atomic\` label 부착 — ADR-063 atomic invariant check skip 됨.
+
+          **의무** (ADR-024 Amendment 3 hotfix-bypass family 정합):
+          - 24시간 이내 marketplace sync PR open + merge
+          - bypass 해제 후 atomic invariant 회복 확인
+
+          Source: \`templates/github-workflows/version-bump-atomic-check.yml\` (CFP-441 / ADR-063 §결정 4)"

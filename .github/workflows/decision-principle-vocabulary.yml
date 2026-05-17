@@ -1,0 +1,178 @@
+name: Decision principle vocabulary (warning mode)
+# CFP-449 / ADR-060 / ADR-064 — Evidence-enforceable framework 2nd warning-tier entry
+# Tier: warning (continue-on-error, non-required check)
+# Bypass channel: hotfix-bypass:decision-principle-vocab label (ADR-024 Amendment 3 + ADR-060 §결정 7)
+# Dictionary SSOT: ADR-064 §결정 2 (8 forbid-list 어휘)
+# Lint scope: 5 영역 (ADR / change-plans / CLAUDE.md / playbook / templates)
+#
+# 승격 path:
+#   warning → blocking-on-pr 승격 시 CFP-NNN carrier PR 가 다음 변경 동반 의무:
+#     1. 본 workflow 의 `continue-on-error: true` 제거
+#     2. branch protection `required_status_checks.contexts` 에 본 workflow job name 추가
+#        (ADR-024 Amendment 2 / branch-protection-manifest.yaml SSOT 정합)
+#     3. evidence 3 산출물 제출 (ADR-060 §결정 6 (d) + evidence-checks-registry.yaml promotion_criteria)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    paths:
+      - 'docs/adr/ADR-*.md'
+      - 'docs/change-plans/**/*.md'
+      - 'CLAUDE.md'
+      - 'docs/orchestrator-playbook.md'
+      - 'templates/**/*.md'
+      - 'templates/**/*.yml'
+      - 'templates/**/*.yaml'
+      - 'templates/**/*.sh'
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  decision-principle-vocabulary:
+    runs-on: ubuntu-latest
+    # warning mode (ADR-060 §결정 5) — lint fail 이 PR merge 차단하지 않음.
+    # required_status_checks.contexts 부착 X.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed scope files
+        id: changed
+        run: |
+          set -euo pipefail
+          # 5 scope 영역 grep — EXEMPT_PATHS filter (ADR-064 dictionary SSOT / registry / script self / bats fixture)
+          git diff --name-only origin/${{ github.base_ref }}...HEAD \
+            | grep -E '^(docs/adr/ADR-.*\.md|docs/change-plans/.*\.md|CLAUDE\.md|docs/orchestrator-playbook\.md|templates/.*\.(md|yml|yaml|sh))$' \
+            | grep -v 'ADR-RESERVATION.md' \
+            | grep -v 'ADR-064-decision-principle-mandate.md' \
+            | grep -v 'docs/evidence-checks-registry.yaml' \
+            | grep -v 'scripts/check-decision-principle-vocabulary.sh' \
+            | grep -v 'tests/scripts/test-check-decision-principle-vocabulary.bats' \
+            > /tmp/changed_scope.txt || true
+          if [ -s /tmp/changed_scope.txt ]; then
+            echo "has_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "=== Changed scope files ==="
+          cat /tmp/changed_scope.txt || echo "(none)"
+
+      - name: Check bypass label
+        id: bypass
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          labels=$(gh pr view "$PR_NUMBER" --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+          echo "labels=$labels"
+          case ",$labels," in
+            *,hotfix-bypass:decision-principle-vocab,*)
+              echo "bypass=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "bypass=false" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Run decision principle vocabulary lint
+        id: lint
+        if: steps.changed.outputs.has_changed == 'true' && steps.bypass.outputs.bypass == 'false'
+        run: |
+          set +e
+          mapfile -t files < /tmp/changed_scope.txt
+          bash scripts/check-decision-principle-vocabulary.sh "${files[@]}" 2>&1 | tee /tmp/lint.out
+          status=${PIPESTATUS[0]}
+          echo "exit_status=$status" >> "$GITHUB_OUTPUT"
+          exit 0  # continue-on-error 정합 — fail 이어도 다음 step 진행
+
+      - name: Post lint result comment (sticky)
+        if: steps.changed.outputs.has_changed == 'true' && steps.bypass.outputs.bypass == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          LINT_STATUS: ${{ steps.lint.outputs.exit_status }}
+        run: |
+          set -euo pipefail
+          LINT_OUT="$(cat /tmp/lint.out 2>/dev/null || echo '(lint output 부재)')"
+          if [ "${LINT_STATUS:-1}" = "0" ]; then
+            HEADER="## OK Decision principle vocabulary lint — PASS (warning mode)"
+            FOOTER="violation 0건. ADR-064 §결정 2 forbid-list 8 어휘 dictionary 정합."
+          else
+            HEADER="## WARN Decision principle vocabulary lint — violation 감지 (warning mode)"
+            FOOTER=$'**warning mode (CFP-449 / ADR-060 §결정 5)**: lint fail 이 PR merge 를 차단하지 않습니다. ADR-064 §결정 1 의 4 어휘 운영적 정의 (best-effort / broad coverage / full-scope / active amendment) 로 대체 또는 bypass label 부착.\n\n**hotfix bypass channel** (ADR-024 Amendment 3): 운영 장애 hotfix 시 `hotfix-bypass:decision-principle-vocab` label 부착 + PR description `### Bypass reason` 본문 작성 → lint skip + audit comment 자동 발의 (권한자 = repo admin).'
+          fi
+          BODY=$(printf '%s\n\n```\n%s\n```\n\n%s\n\n%s' \
+            "$HEADER" "$LINT_OUT" "$FOOTER" \
+            "> i 본 workflow = **warning mode** (continue-on-error). PR merge 미차단. 승격 gate (ADR-060 §결정 6) 통과 후 blocking 전환.")
+          gh pr comment "$PR_NUMBER" --body "$BODY"
+
+      - name: Emit bypass audit comment (label applied)
+        if: steps.changed.outputs.has_changed == 'true' && steps.bypass.outputs.bypass == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # Schema: ADR-060 §결정 8 verbatim
+          # [hotfix-bypass-audit] PR=<n> label_applied_by=<user> reason=<reason>
+          # scope_files=<paths> timestamp=<ISO8601>
+
+          # bypass reason 추출 — PR description 의 `### Bypass reason` 섹션 본문
+          REASON=$(gh pr view "$PR_NUMBER" --json body --jq '.body' 2>/dev/null \
+            | awk '/^### Bypass reason/{flag=1;next} /^##/{flag=0} flag' \
+            | sed '/^$/d' | head -n 5 | tr '\n' ' ' | sed 's/  */ /g;s/^ *//;s/ *$//')
+          if [ -z "$REASON" ]; then
+            REASON="(PR description '### Bypass reason' 섹션 부재 — 후속 보완 의무)"
+          fi
+
+          # label applied_by — 가장 최근 labeled event 의 actor
+          LABEL_USER=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/events" \
+            --jq '[.[] | select(.event == "labeled" and .label.name == "hotfix-bypass:decision-principle-vocab")] | last | .actor.login' \
+            2>/dev/null || echo "unknown")
+
+          # scope file list
+          SCOPE_LIST=$(paste -sd',' /tmp/changed_scope.txt 2>/dev/null || echo "")
+
+          # ISO8601 UTC Z suffix (fix-event-v1 schema clarification 정합)
+          TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          AUDIT="[hotfix-bypass-audit] PR=${PR_NUMBER} label_applied_by=${LABEL_USER} reason=${REASON} scope_files=${SCOPE_LIST} timestamp=${TS}"
+
+          # Re-entry 안전망 (EC-D / ADR-060 §결정 8) — bypass PR 자체가 forbid-list 어휘 검출 상태인지 검사
+          set +e
+          mapfile -t files < /tmp/changed_scope.txt
+          bash scripts/check-decision-principle-vocabulary.sh "${files[@]}" > /tmp/recurse.out 2>&1
+          RECURSE=$?
+          set -e
+          if [ "$RECURSE" -ne 0 ]; then
+            AUDIT=$(printf '%s\n%s' "$AUDIT" \
+              "[decision-principle-vocab-deferred] 변경 scope file 가 forbid-list 어휘 검출 상태 — 후속 보완 의무 (별도 carrier scope 또는 다음 commit 으로 해소)")
+          fi
+
+          BODY=$(printf '%s\n\n%s' \
+            "$AUDIT" \
+            "> i ADR-024 Amendment 3 §결정 6.C — audit trail 3중 안전망 1차 (audit comment 자동 발의). assertion lint = \`scripts/check-bypass-audit-comment.sh\`. quarterly merge 시 \`docs/audit/hotfix-bypass-log.md\` append (별도 carrier scope).")
+          gh pr comment "$PR_NUMBER" --body "$BODY"
+
+      - name: Audit assertion (bypass label 부착 시)
+        if: steps.changed.outputs.has_changed == 'true' && steps.bypass.outputs.bypass == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BYPASS_LABEL_PREFIX: 'hotfix-bypass:'
+        run: |
+          # warning mode 시점 — audit assertion fail 도 continue-on-error 정합.
+          # enforce mode 진입 시 본 step 의 exit code 가 required check 결정.
+          set +e
+          bash scripts/check-bypass-audit-comment.sh
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "WARN audit assertion FAIL (warning mode — PR merge 미차단)"
+          fi
+          exit 0

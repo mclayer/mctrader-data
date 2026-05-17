@@ -1,4 +1,5 @@
 name: Fix Ledger Sync
+# Security: third-party actions are SHA-pinned per CFP-300 policy.
 
 # Consumer-distributable single-repo flavor (CFP-67 / F2 Phase 2 split 1/2).
 # Story §10 FIX Ledger row → Issue 의 [FIX #N] 코멘트 mirror + fix:<lane>-retry label 자동 부착.
@@ -23,12 +24,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
 
       - name: Parse current §10 + sync new entries
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           script: |
             const fs = require('fs');

@@ -1,0 +1,46 @@
+name: Story Section Ownership Check (CFP-722)
+# Security: third-party actions are SHA-pinned per CFP-300 policy.
+
+# Validates docs/stories/*.md per-section ownership boundaries —
+# detects destructive (high-delete-ratio) modifications of sections owned by a different lane,
+# and flags unauthorized modifications to monopoly sections (§10 CFP-32 / §13 ArchitectPL /
+# §14 ADR-031 / §10.5 GitOps). Incident origin: PR #441 (+216/-850 destructive rewrite).
+#
+# Tier: warning (ADR-060 §결정 27 / Amendment 13 — 첫 도입 = warning mode).
+# continue-on-error: true — never block PR.
+#
+# Source: scripts/check-story-section-ownership.sh (CFP-722)
+# Carrier ADR: ADR-060 Amendment 13, ADR-031 (§14 monopoly), fix-event-v1 (§10 monopoly).
+#
+# Consumer distribution: 본 workflow + scripts/check-story-section-ownership.sh 둘 다 copy 의무.
+# 후자는 CFP-97 templates/consumer-scripts.manifest entry 후속 (Phase 2 follow-up).
+
+on:
+  pull_request:
+    paths:
+      - 'docs/stories/**'
+
+permissions:
+  contents: read
+
+jobs:
+  story-section-ownership:
+    runs-on: ubuntu-latest
+    continue-on-error: true  # warning tier — never block PR (ADR-060 §결정 27)
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0  # full history needed for base SHA git-show (story-section-1-immutable 선례)
+
+      - name: Run story section ownership lint
+        env:
+          GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GITHUB_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GITHUB_HEAD_REF: ${{ github.head_ref }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          if [ ! -f scripts/check-story-section-ownership.sh ]; then
+            echo "::warning::scripts/check-story-section-ownership.sh 부재 — consumer-scripts manifest copy 누락 (CFP-97 follow-up). consumer-guide §2c 참조."
+            exit 0
+          fi
+          bash scripts/check-story-section-ownership.sh

@@ -1,0 +1,42 @@
+name: Story Section 9 Typed Schema (CFP-410)
+# Security: third-party actions are SHA-pinned per CFP-300 policy.
+
+# Validates docs/stories/*.md §9.1/§9.2/§9.3/§9.4 sub-sections —
+# when a yaml fenced code block is embedded inside §9.x, verify it matches
+# review-verdict-v4 schema (contract / lane / story_key / iteration /
+# pl_recommendation + optional worker_dialog_rounds + findings).
+#
+# Tier: warning (ADR-060 §결정 5 — 첫 도입 = warning mode).
+# Yaml block 부재 = OK (backward compat).
+#
+# Source: scripts/check-story-section-9-typed.sh (CFP-410)
+# Carrier ADR: ADR-044 (review-verdict-v4 schema), ADR-060 (evidence framework).
+#
+# Consumer distribution: 본 workflow + scripts/check-story-section-9-typed.sh 둘 다 copy 의무.
+# 후자는 CFP-97 templates/consumer-scripts.manifest entry 후속 (Phase 2 follow-up).
+
+on:
+  pull_request:
+    paths:
+      - 'docs/stories/**'
+
+permissions:
+  contents: read
+
+jobs:
+  story-section-9-typed:
+    runs-on: ubuntu-latest
+    continue-on-error: true  # warning tier — never block PR
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install pyyaml
+        run: pip install pyyaml
+
+      - name: Run story section 9 typed lint
+        run: |
+          if [ ! -f scripts/check-story-section-9-typed.sh ]; then
+            echo "::warning::scripts/check-story-section-9-typed.sh 부재 — consumer-scripts manifest copy 누락 (CFP-97 follow-up). consumer-guide §2c 참조."
+            exit 0
+          fi
+          bash scripts/check-story-section-9-typed.sh

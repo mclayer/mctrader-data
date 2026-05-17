@@ -1,0 +1,72 @@
+name: Ruleset Drift Check
+
+# CFP-140 / ADR-048 §결정 1: daily ruleset drift detection
+# Daily cron + manual dispatch with optional apply mode.
+# On failure: creates GitHub Issue with label governance-drift.
+
+on:
+  schedule:
+    - cron: '0 9 * * *'  # daily at 09:00 UTC
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: 'Apply drift fixes (default: dry-run report only)'
+        required: false
+        default: 'false'
+        type: boolean
+      org:
+        description: 'Target org slug (default: read from templates/required-workflows-spec.yaml)'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  ruleset-drift-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check enterprise admin prerequisite
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash scripts/check-enterprise-admin.sh \
+            --org "${{ github.repository_owner }}" \
+            || echo "::warning::Not enterprise admin — drift check limited to org-level"
+        continue-on-error: true
+
+      - name: Ruleset drift check (dry-run)
+        id: drift_check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash scripts/sync-rulesets.sh \
+            --dry-run \
+            --org "${{ inputs.org || github.repository_owner }}"
+        continue-on-error: true
+
+      - name: Apply drift (workflow_dispatch with apply=true only)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.apply == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash scripts/sync-rulesets.sh \
+            --apply \
+            --org "${{ inputs.org || github.repository_owner }}"
+
+      - name: Create drift alert Issue
+        if: failure() || steps.drift_check.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "[governance] Ruleset drift detected $(date -u +%Y-%m-%d)" \
+            --body "Daily ruleset drift check detected drift or error. Run: \`bash scripts/sync-rulesets.sh --apply\` to fix.\n\nWorkflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --label "governance-drift" \
+            --repo "${{ github.repository }}" \
+          || echo "::warning::Could not create drift alert Issue (label may not exist)"

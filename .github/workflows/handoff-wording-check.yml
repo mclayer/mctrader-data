@@ -1,0 +1,147 @@
+name: handoff-wording-check (CFP-529 Wave 3)
+# CFP-529 / ADR-068 §결정 5 / ADR-060 — Evidence-enforceable framework warning-tier
+# Tier: warning (continue-on-error, non-required check)
+# Bypass channel: hotfix-bypass:boundary-wording label (ADR-024 Amendment 3 + ADR-060 §결정 7)
+# Scope: 5 영역 (scripts / templates / tests / docs / CLAUDE.md)
+# Direction enum: forward / backward / lateral (Python script SSOT)
+# Drift 패턴 8종: mechanical 5 + AI escalate stub 3
+#
+# 승격 path:
+#   warning → blocking-on-pr 승격 시 CFP-NNN carrier PR 가 다음 변경 동반 의무:
+#     1. 본 workflow 의 `continue-on-error: true` 제거
+#     2. Python invocation 에 `--strict` 옵션 추가
+#     3. branch protection `required_status_checks.contexts` 에 본 workflow job name 추가
+#        (ADR-024 Amendment 2 / branch-protection-manifest.yaml SSOT 정합)
+#     4. evidence 3 산출물 제출 (ADR-060 §결정 6 (d) + evidence-checks-registry.yaml promotion_criteria)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    paths:
+      - 'scripts/**'
+      - 'templates/**'
+      - 'tests/**'
+      - 'docs/**'
+      - 'CLAUDE.md'
+      - '.github/workflows/handoff-wording-check.yml'
+      - 'templates/github-workflows/handoff-wording-check.yml'
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  handoff-wording-check:
+    runs-on: ubuntu-latest
+    # warning mode (ADR-060 §결정 5) — lint fail 이 PR merge 차단하지 않음.
+    # required_status_checks.contexts 부착 X.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Check bypass label
+        id: bypass
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          labels=$(gh pr view "$PR_NUMBER" --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+          echo "labels=$labels"
+          case ",$labels," in
+            *,hotfix-bypass:boundary-wording,*)
+              echo "bypass=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "bypass=false" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Run handoff wording linter
+        id: lint
+        if: steps.bypass.outputs.bypass == 'false'
+        run: |
+          set +e
+          python scripts/check_handoff_wording.py --root . --direction all 2>&1 | tee /tmp/lint.out
+          status=${PIPESTATUS[0]}
+          echo "exit_status=$status" >> "$GITHUB_OUTPUT"
+          exit 0  # continue-on-error 정합 — fail 이어도 다음 step 진행
+
+      - name: Post lint result comment (sticky)
+        if: steps.bypass.outputs.bypass == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          LINT_STATUS: ${{ steps.lint.outputs.exit_status }}
+        run: |
+          set -euo pipefail
+          LINT_OUT="$(cat /tmp/lint.out 2>/dev/null || echo '(lint output 부재)')"
+          # Truncate output to first 80 lines for comment brevity (|| true: SIGPIPE 방어)
+          LINT_TRUNCATED="$(echo "$LINT_OUT" | head -n 80 || true)"
+          if [ "${LINT_STATUS:-1}" = "0" ]; then
+            HEADER="## OK handoff-wording-check — PASS (warning mode)"
+            FOOTER="finding 0건. ADR-068 §결정 5 wording-ssot-grep-lint 정합."
+          else
+            HEADER="## WARN handoff-wording-check — finding 감지 (warning mode)"
+            FOOTER=$'**warning mode (CFP-529 / ADR-060 §결정 5)**: lint finding 이 PR merge 를 차단하지 않습니다. ADR-068 §결정 5 wording SSOT 정합 또는 bypass label 부착.\n\n**hotfix bypass channel** (ADR-024 Amendment 3): 운영 장애 hotfix 시 `hotfix-bypass:boundary-wording` label 부착 + PR description `### Bypass reason` 본문 작성 → lint skip + audit comment 자동 발의 (권한자 = repo admin).'
+          fi
+          BODY=$(printf '%s\n\n```\n%s\n```\n\n%s\n\n%s' \
+            "$HEADER" "$LINT_TRUNCATED" "$FOOTER" \
+            "> i 본 workflow = **warning mode** (continue-on-error). PR merge 미차단. 승격 gate (ADR-060 §결정 6) 통과 후 blocking 전환.")
+          gh pr comment "$PR_NUMBER" --body "$BODY"
+
+      - name: Emit bypass audit comment (label applied)
+        if: steps.bypass.outputs.bypass == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # Schema: ADR-060 §결정 8 verbatim
+          # [hotfix-bypass-audit] PR=<n> label_applied_by=<user> reason=<reason>
+          # scope_files=<paths> timestamp=<ISO8601>
+
+          REASON=$(gh pr view "$PR_NUMBER" --json body --jq '.body' 2>/dev/null \
+            | awk '/^### Bypass reason/{flag=1;next} /^##/{flag=0} flag' \
+            | sed '/^$/d' | head -n 5 | tr '\n' ' ' | sed 's/  */ /g;s/^ *//;s/ *$//')
+          if [ -z "$REASON" ]; then
+            REASON="(PR description '### Bypass reason' 섹션 부재 — 후속 보완 의무)"
+          fi
+
+          LABEL_USER=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/events" \
+            --jq '[.[] | select(.event == "labeled" and .label.name == "hotfix-bypass:boundary-wording")] | last | .actor.login' \
+            2>/dev/null || echo "unknown")
+
+          TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          AUDIT="[hotfix-bypass-audit] PR=${PR_NUMBER} label_applied_by=${LABEL_USER} reason=${REASON} scope=handoff-wording timestamp=${TS}"
+
+          BODY=$(printf '%s\n\n%s' \
+            "$AUDIT" \
+            "> i ADR-024 Amendment 3 §결정 6.C — audit trail 3중 안전망 1차 (audit comment 자동 발의). assertion lint = \`scripts/check-bypass-audit-comment.sh\`. quarterly merge 시 \`docs/audit/hotfix-bypass-log.md\` append (별도 carrier scope).")
+          gh pr comment "$PR_NUMBER" --body "$BODY"
+
+      - name: Audit assertion (bypass label 부착 시)
+        if: steps.bypass.outputs.bypass == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BYPASS_LABEL_PREFIX: 'hotfix-bypass:'
+        run: |
+          # warning mode 시점 — audit assertion fail 도 continue-on-error 정합.
+          # enforce mode 진입 시 본 step 의 exit code 가 required check 결정.
+          set +e
+          bash scripts/check-bypass-audit-comment.sh
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "WARN audit assertion FAIL (warning mode — PR merge 미차단)"
+          fi
+          exit 0

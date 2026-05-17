@@ -1,0 +1,50 @@
+name: wording-dictionary
+on:
+  pull_request:
+    paths:
+      # ADR-064 Amendment 5 §결정 1 (CFP-750) — lint scope 확장 (5 영역 → 거버넌스 문서 전체).
+      # 단축 표현 = docs/** (전체) + CLAUDE.md + CHANGELOG.md + templates/**.
+      # CHANGELOG.md 명시 추가 — docs/** 가 docs/inter-plugin-contracts/** 등 cover 하나
+      # append-only history 영역 CHANGELOG.md 는 별도 명시 (Amendment 5 §결정 1 L602 표 row).
+      - 'docs/**'
+      - 'CLAUDE.md'
+      - 'CHANGELOG.md'
+      - 'templates/**'
+      - '.github/workflows/wording-dictionary.yml'
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    continue-on-error: true  # warning tier — branch protection 차단 안 함 (ADR-060 §결정 5)
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check hotfix-bypass label
+        id: bypass
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const labels = context.payload.pull_request.labels.map(l => l.name);
+            if (labels.includes('hotfix-bypass:wording-dictionary')) {
+              core.setOutput('skip', 'true');
+            } else {
+              core.setOutput('skip', 'false');
+            }
+      - name: Run wording-dictionary lint
+        if: steps.bypass.outputs.skip != 'true'
+        # ADR-064 Amendment 5 §결정 2 / Change Plan §3.2.2 (CFP-750) — 인자 완전 제거.
+        # no-arg invocation = per-word WORD_TARGETS map lookup mode 자동 활성 (어휘별 독립 scope).
+        # 인자 제공 = uniform override mode = per-word scope decoupling 무효화 (금지).
+        run: bash scripts/check-wording-dictionary.sh
+      - name: Audit comment on bypass
+        if: steps.bypass.outputs.skip == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: 'audit: `hotfix-bypass:wording-dictionary` label 적용 — wording-dictionary lint 건너뜀. ADR-064 §결정 2 / Amendment 2 정합 audit 의무. PR description `### Bypass reason` 섹션 기재 필수.'
+            });

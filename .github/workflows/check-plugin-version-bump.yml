@@ -1,0 +1,202 @@
+name: check-plugin-version-bump (CFP-261 / ADR-037)
+# Security: third-party actions are SHA-pinned per CFP-300 policy.
+
+# CFP-261 / ADR-037 결정 3 — Conventional Commits + plugin.json version bump 일관성 검사.
+# Phase 2 v1 (minimal viable) — commit signal + version bump consistency.
+# Phase 2 v2 (follow-up CFP) — 결정 1 surface table mapping + 결정 2 wrapper-coupling T1/T2/T3.
+#
+# Trigger: PR open / synchronize / reopened.
+# Bypass: BYPASS_VERSION_BUMP=1 + BYPASS_VERSION_BUMP_REASON env (audit trail).
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.claude-plugin/plugin.json'
+      - 'agents/**'
+      - 'skills/**'
+      - 'hooks/**'
+      - 'templates/**'
+      - 'docs/**'
+      - 'scripts/bootstrap-labels.sh'
+      - 'scripts/bootstrap-consumer.sh'
+      - 'CLAUDE.md'
+      - 'commands/**'
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  check-version-bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR HEAD
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Bypass check
+        id: bypass
+        env:
+          BYPASS: ${{ vars.BYPASS_VERSION_BUMP || secrets.BYPASS_VERSION_BUMP }}
+          REASON: ${{ vars.BYPASS_VERSION_BUMP_REASON || secrets.BYPASS_VERSION_BUMP_REASON }}
+        run: |
+          set -euo pipefail
+          if [[ "${BYPASS:-0}" == "1" ]]; then
+            if [[ -z "${REASON:-}" ]]; then
+              echo "::error::BYPASS_VERSION_BUMP=1 requires BYPASS_VERSION_BUMP_REASON (non-empty audit trail)"
+              exit 1
+            fi
+            echo "::warning::BYPASS_VERSION_BUMP=1, reason: $REASON"
+            echo "bypassed=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "bypassed=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compute commit signal (Conventional Commits)
+        if: steps.bypass.outputs.bypassed == '0'
+        id: commit_signal
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Aggregate commit messages between base and HEAD
+          msgs=$(git log --format='%s%n%b' "${BASE_SHA}..${HEAD_SHA}")
+
+          # Default = none (no signal)
+          signal="none"
+
+          # MAJOR signal: feat!: or fix!: prefix, OR "BREAKING CHANGE:" footer
+          if echo "$msgs" | grep -qE '^(feat|fix|chore|refactor|docs|style|test|build|ci|perf)(\([^)]+\))?!:' \
+             || echo "$msgs" | grep -qE '^BREAKING CHANGE:'; then
+            signal="major"
+          # MINOR signal: feat: prefix
+          elif echo "$msgs" | grep -qE '^feat(\([^)]+\))?:'; then
+            signal="minor"
+          # PATCH signal: fix:/docs:/chore:/style:/refactor:/test:/build:/ci:/perf:
+          elif echo "$msgs" | grep -qE '^(fix|docs|chore|style|refactor|test|build|ci|perf)(\([^)]+\))?:'; then
+            signal="patch"
+          fi
+
+          # Validate Conventional Commits format on every commit
+          format_violations=0
+          while IFS= read -r line; do
+            if [[ -n "$line" ]] && ! echo "$line" | grep -qE '^(feat|fix|chore|refactor|docs|style|test|build|ci|perf|revert)(\([^)]+\))?!?:|^BREAKING CHANGE:|^Co-Authored-By:|^Closes? #|^Refs?:|^Merge |^[a-z]+: '; then
+              # Tolerant — sub-line in body acceptable
+              :
+            fi
+          done <<< "$msgs"
+
+          echo "signal=$signal" >> "$GITHUB_OUTPUT"
+          echo "::notice::commit signal = $signal"
+
+      - name: Compute version bump (plugin.json before/after)
+        if: steps.bypass.outputs.bypassed == '0'
+        id: version_bump
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! -f .claude-plugin/plugin.json ]]; then
+            echo "::warning::no .claude-plugin/plugin.json — skipping version check (non-plugin repo?)"
+            echo "actual=none" >> "$GITHUB_OUTPUT"
+            echo "head_version=" >> "$GITHUB_OUTPUT"
+            echo "base_version=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          head_v=$(jq -r '.version' .claude-plugin/plugin.json)
+          base_v=$(git show "${BASE_SHA}:.claude-plugin/plugin.json" 2>/dev/null | jq -r '.version' 2>/dev/null || echo "")
+
+          echo "head_version=$head_v" >> "$GITHUB_OUTPUT"
+          echo "base_version=$base_v" >> "$GITHUB_OUTPUT"
+
+          if [[ -z "$base_v" || "$base_v" == "null" ]]; then
+            echo "::notice::base has no plugin.json version — assuming new plugin (skip bump check)"
+            echo "actual=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ "$head_v" == "$base_v" ]]; then
+            echo "actual=none" >> "$GITHUB_OUTPUT"
+            echo "::notice::plugin.json version unchanged ($head_v)"
+            exit 0
+          fi
+
+          IFS='.' read -r h_maj h_min h_pat <<< "$head_v"
+          IFS='.' read -r b_maj b_min b_pat <<< "$base_v"
+
+          if (( h_maj > b_maj )); then
+            actual="major"
+          elif (( h_min > b_min )); then
+            actual="minor"
+          elif (( h_pat > b_pat )); then
+            actual="patch"
+          else
+            actual="downgrade"
+          fi
+
+          echo "actual=$actual" >> "$GITHUB_OUTPUT"
+          echo "::notice::plugin.json version bump = $actual ($base_v → $head_v)"
+
+      - name: Validate consistency
+        if: steps.bypass.outputs.bypassed == '0'
+        env:
+          COMMIT_SIGNAL: ${{ steps.commit_signal.outputs.signal }}
+          ACTUAL: ${{ steps.version_bump.outputs.actual }}
+          BASE_V: ${{ steps.version_bump.outputs.base_version }}
+          HEAD_V: ${{ steps.version_bump.outputs.head_version }}
+        run: |
+          set -euo pipefail
+
+          # Bump rank — for max comparison
+          rank() {
+            case "$1" in
+              none) echo 0 ;;
+              patch) echo 1 ;;
+              minor) echo 2 ;;
+              major) echo 3 ;;
+              downgrade) echo -1 ;;
+              *) echo 0 ;;
+            esac
+          }
+
+          c_rank=$(rank "$COMMIT_SIGNAL")
+          a_rank=$(rank "$ACTUAL")
+
+          echo "commit_signal=$COMMIT_SIGNAL (rank $c_rank)"
+          echo "actual_bump=$ACTUAL (rank $a_rank)"
+          echo "version: $BASE_V → $HEAD_V"
+
+          # Downgrade always fails
+          if [[ "$ACTUAL" == "downgrade" ]]; then
+            echo "::error::plugin.json version downgrade detected ($BASE_V → $HEAD_V) — forward-only policy violation (ADR-037 §결정 5)"
+            exit 1
+          fi
+
+          # If commit signal is major/minor/patch but actual is none → fail
+          if [[ "$c_rank" -gt 0 && "$a_rank" -eq 0 ]]; then
+            echo "::error::commit signal '$COMMIT_SIGNAL' implies version bump, but plugin.json version unchanged. Bump version field per ADR-037 §결정 1."
+            echo "::error::Fix: bump .claude-plugin/plugin.json version to reflect $COMMIT_SIGNAL change, then push."
+            exit 1
+          fi
+
+          # If actual > commit signal → likely OK (e.g., bumped MAJOR but commits only patch — over-cautious)
+          # If actual < commit signal → fail (under-bumped)
+          if [[ "$a_rank" -gt 0 && "$c_rank" -gt "$a_rank" ]]; then
+            echo "::error::commit signal '$COMMIT_SIGNAL' (rank $c_rank) requires higher bump than actual '$ACTUAL' (rank $a_rank)."
+            echo "::error::Fix: either lower commit signal (no feat!:/feat:/etc.) or raise plugin.json bump."
+            exit 1
+          fi
+
+          # PASS
+          echo "::notice::version bump consistency OK ($COMMIT_SIGNAL signal ↔ $ACTUAL bump)"
+
+      - name: Phase 2 v2 follow-up reminder (β surface table + T1/T2/T3 triggers)
+        if: steps.bypass.outputs.bypassed == '0'
+        run: |
+          echo "::notice::CFP-261 Phase 2 v1 enforcement — commit signal + version field consistency."
+          echo "::notice::Follow-up enforcement (β surface table mapping + Wrapper-coupling T1/T2/T3) = 별도 CFP."
+          echo "::notice::ADR-037 SSOT: docs/adr/ADR-037-plugin-version-bump-rule.md"

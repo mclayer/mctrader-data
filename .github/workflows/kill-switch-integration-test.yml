@@ -1,0 +1,95 @@
+# Kill Switch Integration Test — Live touching Story 의무 워크플로우 template
+# Security: third-party actions are SHA-pinned per CFP-300 policy.
+#
+# 정책: Sonnet decider D4=A — kill switch enforcement = engine layer (call site enforcement).
+#       Live touching Story 의 implementation PR 시 kill switch test artifact 의무.
+#
+# Test scope:
+#   1. Auto trigger (drawdown / max_exposure / rate_limit / first_trade_cap / reconciliation_drift)
+#   2. Manual trigger (operator-action-v1 schema → engine consume_action)
+#   3. Engine call site enforcement (UI 우회 시도 차단)
+#   4. UI 장애 시에도 CLI / direct API 로 kill 가능
+#
+# 사용 패턴 (Hybrid — Sonnet decider D7=A):
+#   - codeforge wrapper: reusable workflow (test artifact 의무 검증)
+#   - consumer overlay: 실제 test 실행 (engine + simulated trigger)
+#
+# Consumer 호출 예시 (mctrader):
+#   .github/workflows/kill-switch-integration-test.yml:
+#     uses: mclayer/plugin-codeforge/templates/github-workflows/kill-switch-integration-test.yml@main
+#     with:
+#       test_artifact_path: ".claude-work/kill-switch-test-report.json"
+#       test_command: "uv run pytest tests/integration/test_kill_switch_*.py --json-report --json-report-file=.claude-work/kill-switch-test-report.json"
+#       required_test_categories: "auto_trigger,manual_trigger,call_site_enforcement,ui_failure_resilience"
+
+name: Kill Switch Integration Test (Live touching Story 의무)
+
+on:
+  workflow_call:
+    inputs:
+      test_artifact_path:
+        description: "Test report JSON artifact path (consumer 측 test 실행 후 생성)"
+        required: true
+        type: string
+      test_command:
+        description: "Consumer-defined test 실행 command"
+        required: true
+        type: string
+      required_test_categories:
+        description: "Required test categories (comma-separated)"
+        required: false
+        type: string
+        default: "auto_trigger,manual_trigger,call_site_enforcement,ui_failure_resilience"
+
+permissions:
+  contents: read
+
+jobs:
+  run-kill-switch-tests:
+    runs-on: ubuntu-latest
+    name: Kill switch integration test (ADR-008 D8)
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Run consumer-defined kill switch test
+        run: ${{ inputs.test_command }}
+
+      - name: Verify test artifact present
+        run: |
+          if [ ! -f "${{ inputs.test_artifact_path }}" ]; then
+            echo "::error::Kill switch test artifact 부재: ${{ inputs.test_artifact_path }}"
+            echo "::error::Live touching Story 의 implementation PR 은 본 artifact 의무 (Sonnet decider D4)"
+            exit 1
+          fi
+          echo "Test artifact present: ${{ inputs.test_artifact_path }}"
+
+      - name: Verify all required test categories PASS
+        run: |
+          # JSON artifact 에서 test category 별도 PASS 여부 검증
+          # (consumer 측 test 가 category 별도 grouping + status 기록 의무)
+          IFS=',' read -ra categories <<< "${{ inputs.required_test_categories }}"
+
+          violations=0
+          for cat in "${categories[@]}"; do
+            # 각 category 의 test 가 1개 이상 PASS 여부 검증
+            cat_passed=$(jq -r ".tests[] | select(.metadata.category == \"$cat\" and .outcome == \"passed\") | .nodeid" "${{ inputs.test_artifact_path }}" 2>/dev/null | wc -l)
+            if [ "$cat_passed" -lt 1 ]; then
+              echo "::error::Required test category '$cat' 의 PASS test 부재"
+              violations=$((violations + 1))
+            else
+              echo "::notice::Test category '$cat' = $cat_passed test PASS"
+            fi
+          done
+
+          if [ $violations -gt 0 ]; then
+            echo "::error::Kill switch test category $violations 건 불충족"
+            exit 1
+          fi
+          echo "All required test categories PASS"
+
+      - name: Upload test report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kill-switch-test-report
+          path: ${{ inputs.test_artifact_path }}
+          retention-days: 30

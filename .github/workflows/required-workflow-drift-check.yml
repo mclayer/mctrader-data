@@ -1,0 +1,66 @@
+name: Required Workflow Drift Check
+
+# CFP-140 / ADR-048 §결정 3: weekly required workflow drift detection
+# Checks that enterprise required workflows are in sync with spec.
+# On drift: creates GitHub Issue with label required-workflow-drift.
+
+on:
+  schedule:
+    - cron: '0 10 * * 1'  # weekly Monday at 10:00 UTC
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: 'Apply drift fixes (default: dry-run report only)'
+        required: false
+        default: 'false'
+        type: boolean
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  required-workflow-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check enterprise admin prerequisite
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash scripts/check-enterprise-admin.sh \
+            --org "${{ github.repository_owner }}" \
+            || echo "::warning::Not enterprise admin — required workflow sync limited to org-level"
+        continue-on-error: true
+
+      - name: Required workflow drift check (dry-run)
+        id: drift_check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash scripts/sync-required-workflows.sh \
+            --dry-run \
+            --spec templates/required-workflows-spec.yaml
+
+      - name: Apply drift (workflow_dispatch with apply=true only)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.apply == 'true' && steps.drift_check.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash scripts/sync-required-workflows.sh \
+            --apply \
+            --spec templates/required-workflows-spec.yaml
+
+      - name: Create drift alert Issue
+        if: failure() || steps.drift_check.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "[governance] Required workflow drift detected $(date -u +%Y-%m-%d)" \
+            --body "Weekly required workflow drift check detected drift or error. Run: \`bash scripts/sync-required-workflows.sh --apply\` to fix.\n\nWorkflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --label "required-workflow-drift" \
+            --repo "${{ github.repository }}" \
+          || echo "::warning::Could not create drift alert Issue (label may not exist)"

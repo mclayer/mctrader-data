@@ -1,0 +1,103 @@
+name: Container Image Scan (CFP-128 / ADR-033)
+# Security: third-party actions are SHA-pinned per CFP-300 policy.
+
+# Reusable workflow — consumer 가 Docker-first 채택 시 자기 build pipeline 에서 호출.
+#
+# 도구: hadolint (Dockerfile static lint) + trivy (container image CVE / misconfig scan).
+# SecurityTestPL 1st-layer 의 일부 (CFP-128 / ADR-033 §결정 4 — Dependabot / CodeQL / Secret Scanning + trivy + hadolint 5종).
+#
+# Default policy:
+#   - severity = CRITICAL,HIGH (mid-severity = advisory only)
+#   - ignore-unfixed = true (base image CVE 빠른 변동 false-positive 회피)
+#   - hadolint failure-threshold = warning
+#
+# Output → SecurityTestPL §9 self-write evidence (consumer Story 의 Phase 2 PR review).
+# False positive mitigation: trivy --ignore-unfixed + severity threshold (CFP-128 spec §5 R4).
+
+on:
+  workflow_call:
+    inputs:
+      image-ref:
+        required: true
+        type: string
+        description: "Image reference (e.g. ghcr.io/org/repo:tag) for trivy scan. consumer build pipeline 이 push 후 output 으로 전달."
+      severity:
+        required: false
+        type: string
+        default: "CRITICAL,HIGH"
+        description: "trivy severity threshold (default CRITICAL,HIGH — mid-severity advisory)."
+      ignore-unfixed:
+        required: false
+        type: boolean
+        default: true
+        description: "trivy --ignore-unfixed 활성 (base image CVE 빠른 변동 false-positive 회피)."
+      dockerfile-path:
+        required: false
+        type: string
+        default: "Dockerfile"
+        description: "hadolint 대상 Dockerfile path (multi-Dockerfile repo 시 명시)."
+      hadolint-failure-threshold:
+        required: false
+        type: string
+        default: "warning"
+        description: "hadolint failure-threshold (default warning — error 만 fail)."
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  hadolint:
+    name: Dockerfile lint (hadolint — CFP-128 1st-layer)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Run hadolint
+        uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
+        with:
+          dockerfile: ${{ inputs.dockerfile-path }}
+          recursive: false
+          failure-threshold: ${{ inputs.hadolint-failure-threshold }}
+          format: tty
+          no-color: false
+
+  trivy:
+    name: Container image scan (trivy — CFP-128 1st-layer)
+    runs-on: ubuntu-latest
+    needs: hadolint
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Run trivy image scan
+        uses: aquasecurity/trivy-action@6e7b7d1fd3e4fef0c5fa8cce1229c54b2c9bd0d8 # v0.24.0
+        with:
+          image-ref: ${{ inputs.image-ref }}
+          severity: ${{ inputs.severity }}
+          ignore-unfixed: ${{ inputs.ignore-unfixed }}
+          exit-code: '1'
+          format: 'table'
+          vuln-type: 'os,library'
+          scanners: 'vuln,secret,misconfig'
+
+      - name: Run trivy image scan — SARIF (security-events upload)
+        if: always()
+        uses: aquasecurity/trivy-action@6e7b7d1fd3e4fef0c5fa8cce1229c54b2c9bd0d8 # v0.24.0
+        with:
+          image-ref: ${{ inputs.image-ref }}
+          severity: ${{ inputs.severity }}
+          ignore-unfixed: ${{ inputs.ignore-unfixed }}
+          exit-code: '0'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          vuln-type: 'os,library'
+          scanners: 'vuln,secret,misconfig'
+
+      - name: Upload SARIF to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@7fd177fa680c9881b53cdab4d346d32574c9f7f4 # v3.35.4
+        with:
+          sarif_file: 'trivy-results.sarif'
+          category: 'trivy-image-scan'

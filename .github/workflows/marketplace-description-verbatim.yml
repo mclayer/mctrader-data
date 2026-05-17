@@ -1,0 +1,73 @@
+name: marketplace-description-verbatim
+# CFP-631 / ADR-063 Amendment 2 §결정 11 — description verbatim PR-time enforcement
+# Tier: blocking-on-pr (ADR-060 §결정 5 explicit exception + §결정 19 auto_blocking manual gate)
+# evidence-checks-registry.yaml entry: marketplace-description-verbatim
+#
+# 검증:
+#   wrapper plugin.json description ↔ mclayer/marketplace marketplace.json
+#   plugins[codeforge].description byte-identical (trailing newline normalize 후 비교)
+#
+# 트리거:
+#   pull_request to main — opened / synchronize / reopened / labeled
+#   (labeled 이벤트 포함 = hotfix-bypass label 제거 후 재검증 지원)
+#
+# Hotfix bypass:
+#   hotfix-bypass:marketplace-description-verbatim label 부착 시 skip + audit comment
+#   (ADR-024 Amendment 3 hotfix-bypass family 정합, 24시간 이내 sync 의무)
+#
+# Permissions: minimum (top-level deny-all + job override, CFP-530 / ADR-060 Amendment 8)
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled]
+
+permissions: {}
+
+jobs:
+  description-verbatim:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write  # bypass audit comment 작성용
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check hotfix-bypass label
+        id: bypass
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          LABELS=$(gh pr view "${{ github.event.pull_request.number }}" --json labels --jq '.labels[].name' 2>/dev/null || echo "")
+          if echo "$LABELS" | grep -q "^hotfix-bypass:marketplace-description-verbatim$"; then
+            echo "bypass=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::marketplace-description-verbatim: hotfix-bypass:marketplace-description-verbatim label detected — skipping (ADR-024 Amendment 3, 24h sync 의무)"
+          else
+            echo "bypass=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run marketplace-description-verbatim lint
+        if: steps.bypass.outputs.bypass != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          chmod +x scripts/check-marketplace-description-verbatim.sh
+          bash scripts/check-marketplace-description-verbatim.sh
+
+      - name: Bypass audit comment
+        if: steps.bypass.outputs.bypass == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr comment "${{ github.event.pull_request.number }}" --body "[audit] **marketplace-description-verbatim bypass 감지**
+
+          \`hotfix-bypass:marketplace-description-verbatim\` label 부착 — ADR-063 Amendment 2 §결정 11 description verbatim check skip 됨.
+
+          **의무** (ADR-024 Amendment 3 hotfix-bypass family 정합):
+          - 24시간 이내 marketplace sync PR open + merge (description byte-identical 복원)
+          - bypass 해제 후 description verbatim invariant 회복 확인
+
+          Source: \`templates/github-workflows/marketplace-description-verbatim.yml\` (CFP-631 / ADR-063 Amendment 2 §결정 11)"

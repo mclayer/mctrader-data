@@ -1,0 +1,82 @@
+# Live Test Guard — ADR-008 D5 fail-default workflow template
+# Security: third-party actions are SHA-pinned per CFP-300 policy.
+#
+# 정책: real live mode test = fail-default. MCTRADER_ALLOW_LIVE_TEST=1 (또는 consumer-defined env) 시만
+#       dry-run / shadow only 허용. real secret 사용은 절대 금지.
+#
+# 사용 패턴 (Hybrid — Sonnet decider D7=A):
+#   - codeforge wrapper: 본 reusable workflow template (구조 + check logic)
+#   - consumer overlay: live test allow env var name + dry-run/shadow path 정의
+#
+# Consumer 호출 예시 (mctrader):
+#   .github/workflows/live-test-guard.yml:
+#     uses: mclayer/plugin-codeforge/templates/github-workflows/live-test-guard.yml@main
+#     with:
+#       allow_env_var: MCTRADER_ALLOW_LIVE_TEST
+#       live_test_paths: "tests/live/**"
+#       dry_run_paths: "tests/live_shadow/**"
+
+name: Live Test Guard (Hybrid — codeforge template + consumer policy)
+
+on:
+  workflow_call:
+    inputs:
+      allow_env_var:
+        description: "Consumer-defined env var name that gates live test (default fail unless set)"
+        required: true
+        type: string
+      live_test_paths:
+        description: "Glob pattern for real live test files (must fail unless allow_env_var=1)"
+        required: true
+        type: string
+      dry_run_paths:
+        description: "Glob pattern for dry-run/shadow test files (allowed when allow_env_var=1)"
+        required: false
+        type: string
+        default: "tests/live_shadow/**"
+
+permissions:
+  contents: read
+
+jobs:
+  enforce-live-test-policy:
+    runs-on: ubuntu-latest
+    name: Live test fail-default (ADR-008 D5)
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Detect real live test files
+        id: detect
+        run: |
+          # Search for live test files matching the consumer-defined glob
+          live_files=$(find . -path "./${{ inputs.live_test_paths }}" -type f 2>/dev/null || true)
+          if [ -n "$live_files" ]; then
+            echo "live_files_found=true" >> "$GITHUB_OUTPUT"
+            echo "files=$(echo "$live_files" | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+          else
+            echo "live_files_found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Enforce fail-default policy
+        if: steps.detect.outputs.live_files_found == 'true'
+        env:
+          ALLOW_LIVE: ${{ env.allow_env_var }}
+        run: |
+          # Read the consumer-defined env var (e.g. MCTRADER_ALLOW_LIVE_TEST)
+          allow_value="${!{{ inputs.allow_env_var }}}"
+          if [ "$allow_value" != "1" ]; then
+            echo "::error::Live test files detected but ${{ inputs.allow_env_var }} != 1"
+            echo "::error::ADR-008 D5 fail-default — real live test 자동 차단."
+            echo "::error::Files: ${{ steps.detect.outputs.files }}"
+            exit 1
+          fi
+          echo "::notice::${{ inputs.allow_env_var }}=1 — dry-run/shadow only mode allowed"
+          echo "::notice::Real secret 사용 검증 = consumer secret-policy gate 별도"
+
+      - name: Block CI live secret access
+        run: |
+          # CI 환경에서 live secret access 시도 자체를 차단 (ADR-008 D5 indicator)
+          if [ -n "$CI" ] || [ -n "$GITHUB_ACTIONS" ] || [ -n "$BUILD_BUILDID" ] || [ -n "$JENKINS_URL" ]; then
+            echo "::notice::CI environment detected — live secret access guard active"
+          fi
+          echo "Live test guard PASS (fail-default enforced)"

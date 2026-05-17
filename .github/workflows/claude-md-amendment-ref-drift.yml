@@ -1,0 +1,69 @@
+name: claude-md-amendment-ref-drift
+# CFP-708 / ADR-074 -- CLAUDE.md Amendment ref drift detection lint
+# Tier: warning (continue-on-error, non-required check — ADR-060 §결정 5 default)
+# Trigger: CLAUDE.md 또는 docs/adr/** 변경 시 Amendment cross-ref 정합성 검증
+# Bypass channel: hotfix-bypass:claude-md-amendment-ref label (ADR-024 Amendment 3 §결정 6.A)
+#
+# 승격 path (blocking-on-pr 진입 시 동반 의무):
+#   1. continue-on-error: true 제거
+#   2. branch protection required_status_checks.contexts 에 job name 추가
+#   3. evidence 3 산출물 제출 (ADR-060 §결정 6 (d) + evidence-checks-registry.yaml promotion_criteria)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    paths:
+      - 'CLAUDE.md'
+      - 'docs/adr/**'
+      - 'templates/github-workflows/claude-md-amendment-ref-drift.yml'
+      - '.github/workflows/claude-md-amendment-ref-drift.yml'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    continue-on-error: true  # warning tier -- branch protection 차단 안 함 (ADR-060 §결정 5)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pyyaml (선택적 -- 없어도 fallback 동작)
+        run: python3 -m pip install --quiet pyyaml || true
+
+      - name: Check hotfix-bypass label
+        id: bypass
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const labels = context.payload.pull_request.labels.map(l => l.name);
+            if (labels.includes('hotfix-bypass:claude-md-amendment-ref')) {
+              core.setOutput('skip', 'true');
+            } else {
+              core.setOutput('skip', 'false');
+            }
+
+      - name: Run CLAUDE.md amendment ref drift lint
+        if: steps.bypass.outputs.skip != 'true'
+        run: |
+          bash scripts/check-claude-md-amendment-ref.sh \
+            --claude-md CLAUDE.md \
+            --adr-dir docs/adr
+
+      - name: Audit comment on bypass
+        if: steps.bypass.outputs.skip == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: 'audit: `hotfix-bypass:claude-md-amendment-ref` label 적용 -- CLAUDE.md amendment ref drift lint 건너뜀. ADR-074 / ADR-060 §결정 7 audit 의무. PR description `### Bypass reason` 섹션 기재 필수. (CFP-708 Phase 2)'
+            });

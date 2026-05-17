@@ -1,0 +1,124 @@
+name: Bootstrap labels (warning mode)
+# CFP-662 / ADR-060 Amendment 10 — consumer repo PR open 시 codeforge 필수 label set 자동 bootstrap.
+# RETRO-MCT-104 carrier: mctrader-data MCT-104 Phase 2 PR #14 (2026-05-09) recurrence 방지.
+#
+# Tier: warning (continue-on-error: true, non-required check — ADR-060 §결정 5 default)
+#   → chicken-and-egg deadlock 회피: first-PR-ever 가 본 workflow 자체를 required check 부착 시
+#     영원히 PASS 못 함 방지. advisory only.
+#
+# hotfix-bypass: hotfix-bypass:bootstrap-labels label → conditional skip + audit comment 자동 발의
+#
+# 승격 path:
+#   warning → blocking-on-pr 승격 시 CFP-NNN carrier PR 가 다음 변경 동반 의무:
+#     1. 본 workflow 의 `continue-on-error: true` 제거
+#     2. branch protection `required_status_checks.contexts` 에 본 workflow job name 추가
+#        (ADR-024 Amendment 2 / branch-protection-manifest.yaml SSOT 정합)
+#     3. evidence 3 산출물 제출 (ADR-060 §결정 6 (d) + evidence-checks-registry.yaml promotion_criteria)
+
+on:
+  pull_request:
+    types: [opened]
+    # opened only — synchronize 제외 (chicken-and-egg + 무한 루프 회피, Change Plan §3.1)
+    # synchronize 이벤트 미등록: 재실행 시에는 opened 가 아니므로 자동 dedup
+
+permissions:
+  issues: write
+  pull-requests: write
+  contents: read
+
+# concurrency: PR당 1 실행만 허용 (dual-fire 차단, Change Plan §3.1 R4)
+concurrency:
+  group: bootstrap-labels-${{ github.event.pull_request.number }}
+  cancel-in-progress: false  # idempotent — race 시에도 데이터 무결성 보장
+
+jobs:
+  bootstrap-labels:
+    runs-on: ubuntu-latest
+    # warning mode (ADR-060 §결정 5) — lint fail 이 PR merge 차단하지 않음.
+    # required_status_checks.contexts 부착 X (chicken-and-egg deadlock 회피).
+    continue-on-error: true
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Check hotfix-bypass label
+        id: bypass_check
+        run: |
+          labels="${{ join(github.event.pull_request.labels.*.name, ',') }}"
+          if echo "$labels" | grep -qF "hotfix-bypass:bootstrap-labels"; then
+            echo "bypassed=true" >> "$GITHUB_OUTPUT"
+            echo "hotfix-bypass:bootstrap-labels label detected — skip bootstrap"
+          else
+            echo "bypassed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Bootstrap codeforge labels
+        id: bootstrap
+        if: steps.bypass_check.outputs.bypassed == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.CODEFORGE_CROSS_REPO_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          bash "${{ github.workspace }}/scripts/bootstrap-labels.sh"
+          exit_code=$?
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+          if [ $exit_code -eq 0 ]; then
+            echo "Bootstrap completed successfully."
+          else
+            echo "Bootstrap failed (exit $exit_code) — warning advisory only (continue-on-error: true)."
+          fi
+          exit 0  # continue-on-error 정합 — warning advisory tier
+
+      - name: Emit bypass audit comment (hotfix-bypass:bootstrap-labels detected)
+        if: steps.bypass_check.outputs.bypassed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.CODEFORGE_CROSS_REPO_PAT || secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # Step A — audit comment 직접 발의 (ADR-024 Amendment 3 §결정 6.C)
+          # label applied_by — 가장 최근 labeled event 의 actor
+          LABEL_USER=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/events" \
+            --jq '[.[] | select(.event == "labeled" and .label.name == "hotfix-bypass:bootstrap-labels")] | last | .actor.login' \
+            2>/dev/null || echo "unknown")
+
+          # bypass reason 추출 — PR description 의 `### Bypass reason` 섹션 본문
+          REASON=$(gh pr view "$PR_NUMBER" --json body --jq '.body' 2>/dev/null \
+            | awk '/^### Bypass reason/{flag=1;next} /^##/{flag=0} flag' \
+            | sed '/^$/d' | head -n 5 | tr '\n' ' ' | sed 's/  */ /g;s/^ *//;s/ *$//')
+          if [ -z "$REASON" ]; then
+            REASON="(PR description '### Bypass reason' 섹션 부재 — 후속 보완 의무)"
+          fi
+
+          # ISO8601 UTC Z suffix (fix-event-v1 schema clarification 정합)
+          TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          AUDIT="[hotfix-bypass-audit] PR=${PR_NUMBER} label_applied_by=${LABEL_USER} reason=${REASON} workflow=bootstrap-labels timestamp=${TS}"
+
+          BODY=$(printf '%s\n\n%s' \
+            "$AUDIT" \
+            "> ⓘ ADR-024 Amendment 3 §결정 6.C — audit trail 3중 안전망 1차 (audit comment 자동 발의). assertion lint = \`scripts/check-bypass-audit-comment.sh\`. hotfix-bypass:bootstrap-labels label 부착 시 bootstrap-labels workflow skip.")
+          gh pr comment "$PR_NUMBER" --body "$BODY"
+
+      - name: Audit assertion (bypass label 부착 시)
+        if: steps.bypass_check.outputs.bypassed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.CODEFORGE_CROSS_REPO_PAT || secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          # Step B — check-bypass-audit-comment.sh 로 Step A 가 발의한 comment 존재 verify
+          # (assertion verifier — comment 미발의 시 WARN, warning mode 정합)
+          set +e
+          bash "${{ github.workspace }}/scripts/check-bypass-audit-comment.sh" \
+            "$PR_NUMBER" \
+            "hotfix-bypass:bootstrap-labels" \
+            "bootstrap-labels workflow skip"
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "⚠ audit assertion FAIL (warning mode — PR merge 미차단)"
+          fi
+          exit 0  # continue-on-error 정합 — warning advisory tier

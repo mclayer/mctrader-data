@@ -1,0 +1,153 @@
+name: Parallel Epic Conflict Check
+# ADR-050: 병렬 에픽 파일 충돌 감지 — non-blocking warning
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  conflict-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get changed files in this PR
+        run: |
+          git diff --name-only origin/${{ github.base_ref }}...HEAD \
+            | sort > /tmp/current_files.txt
+          echo "=== 이 PR 변경 파일 ==="
+          cat /tmp/current_files.txt
+
+      - name: Get other open PRs' changed files
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CURRENT=${{ github.event.pull_request.number }}
+          : > /tmp/other_pr_files.txt
+          gh pr list --state open --json number \
+            --jq ".[] | select(.number != $CURRENT) | .number" \
+          | while IFS= read -r num; do
+              gh pr view "$num" --json files \
+                --jq ".files[].path | \"${num}:\(.)\"" \
+                >> /tmp/other_pr_files.txt 2>/dev/null || true
+            done
+          echo "=== 다른 open PR 변경 파일 ==="
+          cat /tmp/other_pr_files.txt
+
+      - name: Detect overlap
+        id: check
+        run: |
+          cut -d: -f2- /tmp/other_pr_files.txt | sort -u > /tmp/other_only.txt
+          OVERLAP=$(comm -12 /tmp/current_files.txt /tmp/other_only.txt)
+
+          if [ -z "$OVERLAP" ]; then
+            echo "overlap=false" >> $GITHUB_OUTPUT
+            echo "충돌 없음"
+            exit 0
+          fi
+
+          echo "overlap=true" >> $GITHUB_OUTPUT
+          echo "$OVERLAP" > /tmp/overlap.txt
+          echo "=== 충돌 파일 ==="
+          cat /tmp/overlap.txt
+
+          # ADR-RESERVATION.md 충돌 여부
+          grep -q "^docs/adr/ADR-RESERVATION.md$" /tmp/overlap.txt \
+            && echo "adr=true" >> $GITHUB_OUTPUT || echo "adr=false" >> $GITHUB_OUTPUT
+
+          # locked 섹션 파일 충돌 여부
+          if [ -f "docs/parallel-work/section-ownership.yaml" ]; then
+            LOCKED=$(python3 -c "
+          import yaml
+          data = yaml.safe_load(open('docs/parallel-work/section-ownership.yaml'))
+          print('\n'.join(s['file'] for s in data.get('owned_sections',[]) if s.get('parallel_edit')=='locked'))
+          " 2>/dev/null || echo "")
+            SECTION_HIT=false
+            while IFS= read -r lf; do
+              grep -qF "$lf" /tmp/overlap.txt && SECTION_HIT=true && break
+            done <<< "$LOCKED"
+            echo "section=$SECTION_HIT" >> $GITHUB_OUTPUT
+          else
+            echo "section=false" >> $GITHUB_OUTPUT
+          fi
+
+          # 충돌 PR 번호 수집
+          CONFLICT_PRS=$(grep -F -f /tmp/overlap.txt /tmp/other_pr_files.txt \
+            | cut -d: -f1 | sort -u | tr '\n' ',' | sed 's/,$//')
+          echo "prs=$CONFLICT_PRS" >> $GITHUB_OUTPUT
+
+          # ADR-050 Amendment 1 (CFP-534) — cross-section conflict detection
+          # inter-plugin-contracts / MANIFEST 영역 동시 수정 검출
+          CONTRACT_HIT=false
+          REGISTRY_HIT=false
+          while IFS= read -r path; do
+            case "$path" in
+              docs/inter-plugin-contracts/*.md|docs/inter-plugin-contracts/MANIFEST.yaml)
+                CONTRACT_HIT=true
+                ;;
+            esac
+            if [ "$path" = "docs/inter-plugin-contracts/label-registry-v2.md" ]; then
+              REGISTRY_HIT=true
+            fi
+          done < /tmp/overlap.txt
+          echo "contract=$CONTRACT_HIT" >> $GITHUB_OUTPUT
+          echo "registry=$REGISTRY_HIT" >> $GITHUB_OUTPUT
+
+      - name: Apply labels
+        if: steps.check.outputs.overlap == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR=${{ github.event.pull_request.number }}
+          gh pr edit "$PR" --add-label "conflict:file-overlap"
+          [ "${{ steps.check.outputs.adr }}" = "true" ] \
+            && gh pr edit "$PR" --add-label "conflict:adr-number" || true
+          [ "${{ steps.check.outputs.section }}" = "true" ] \
+            && gh pr edit "$PR" --add-label "conflict:section-locked" || true
+          # ADR-050 Amendment 1 (CFP-534) — cross-section conflict labels
+          [ "${{ steps.check.outputs.contract }}" = "true" ] \
+            && gh pr edit "$PR" --add-label "conflict:contract-overlap" || true
+          [ "${{ steps.check.outputs.registry }}" = "true" ] \
+            && gh pr edit "$PR" --add-label "conflict:registry-bump-overlap" || true
+
+      - name: Post comment
+        if: steps.check.outputs.overlap == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR=${{ github.event.pull_request.number }}
+          OVERLAP_LIST=$(sed 's/^/- /' /tmp/overlap.txt)
+          CONFLICT_PRS="${{ steps.check.outputs.prs }}"
+
+          ADR_MSG=""
+          [ "${{ steps.check.outputs.adr }}" = "true" ] && \
+            ADR_MSG=$'\n⚠️ **ADR-RESERVATION.md 충돌**: GitOpsAgent가 번호 재정렬을 수행해야 합니다.'
+
+          SEC_MSG=""
+          [ "${{ steps.check.outputs.section }}" = "true" ] && \
+            SEC_MSG=$'\n🔒 **locked 섹션 충돌**: merge 순서를 조율하세요 (`conflict:section-locked`).'
+
+          # ADR-050 Amendment 1 (CFP-534) — cross-section conflict messages
+          CONTRACT_MSG=""
+          [ "${{ steps.check.outputs.contract }}" = "true" ] && \
+            CONTRACT_MSG=$'\n📜 **inter-plugin-contracts 충돌**: contract file 또는 MANIFEST.yaml 동시 수정 (`conflict:contract-overlap`). GitOpsAgent merge-order 자동 부여 — lower CFP 번호 PR 선행 merge 의무.'
+
+          REGISTRY_MSG=""
+          [ "${{ steps.check.outputs.registry }}" = "true" ] && \
+            REGISTRY_MSG=$'\n🏷️ **label-registry-v2.md frontmatter 충돌**: 3-location (`version` / `bumped_at` / `amendments[]` row) 동시 수정 가능 (`conflict:registry-bump-overlap`). semantic versioning 우선순위 결정 필요 — GitOpsAgent escalate.'
+
+          CONFLICT_PRS_FMT="#$(echo "$CONFLICT_PRS" | tr ',' ', #')"
+          BODY="$(printf '%s\n\n%s %s\n\n%s\n%s\n%s%s%s%s\n\n%s\n\n%s' \
+            "## ⚠️ 병렬 에픽 파일 충돌 감지" \
+            "**충돌 PR**:" "$CONFLICT_PRS_FMT" \
+            "**중복 변경 파일**:" "$OVERLAP_LIST" \
+            "$ADR_MSG" "$SEC_MSG" "$CONTRACT_MSG" "$REGISTRY_MSG" \
+            "**권장 조치**: 낮은 CFP 번호 PR을 먼저 merge한 후 이 PR에서 \`git rebase main\`을 수행하세요." \
+            "> ⓘ 이 경고는 **non-blocking**입니다. merge는 가능하지만 충돌 해소 책임은 작업자에게 있습니다.")"
+          gh pr comment "$PR" --body "$BODY"

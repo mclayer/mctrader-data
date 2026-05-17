@@ -1,0 +1,116 @@
+name: post-merge-followup success rate KPI (CFP-688 / ADR-026 §5.G.d)
+# CFP-688 / ADR-026 Amendment 3 §결정 5.G.d — KPI post-detection layer
+# Tier: warning (ADR-060 §결정 5 — 첫 도입 = warning mode)
+# evidence-checks-registry.yaml entry: post-merge-followup-workflow-success-rate-kpi
+#
+# 목적:
+#   post-merge-followup.yml workflow 의 rolling 14-day success rate sentinel 측정.
+#   sentinel ≥ 90% — breach 시 Issue 자동 생성 (born-broken 재발 조기 감지).
+#   ADR-026 §7.3 KPI metric SSOT 준수.
+#
+# 트리거:
+#   schedule: cron weekly (매주 월요일 09:00 UTC)
+#   workflow_dispatch: ad-hoc manual measurement
+#
+# 결과:
+#   PASS → notice annotation
+#   BREACH → GitHub Issue 자동 생성 (hotfix-bypass:post-merge-followup-success-rate label)
+#
+# Permissions: minimum (top-level deny-all + job override, ADR-060 Amendment 8)
+
+on:
+  schedule:
+    - cron: '0 9 * * 1'  # weekly Monday 09:00 UTC
+  workflow_dispatch:        # ad-hoc manual measurement (ADR-026 §7.3)
+
+permissions: {}  # top-level deny-all (ADR-060 Amendment 8 §결정 21 / CFP-300 least-privilege)
+
+concurrency:
+  group: post-merge-followup-success-rate-kpi
+  cancel-in-progress: false  # 진행 중 run 완료 보장
+
+jobs:
+  measure-success-rate:
+    runs-on: ubuntu-latest
+    continue-on-error: true  # warning tier — metric failure does not block CI
+    permissions:
+      contents: read   # workflow run list read
+      issues: write    # Issue auto-create on sentinel breach
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Ensure jq + gh
+        run: |
+          set -euo pipefail
+          which jq && jq --version
+          which gh && gh --version | head -1
+
+      - name: Measure success rate
+        id: measure
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SENTINEL_PCT: "90"
+          WINDOW_DAYS: "14"
+        run: |
+          set +e
+          bash scripts/check-post-merge-followup-success-rate.sh 2>&1 | tee /tmp/kpi.out
+          STATUS=${PIPESTATUS[0]}
+          echo "exit_status=$STATUS" >> "$GITHUB_OUTPUT"
+          KPI_OUT="$(cat /tmp/kpi.out)"
+          echo "kpi_summary<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$KPI_OUT" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          exit 0  # always continue to result step
+
+      - name: Handle sentinel breach — create Issue
+        if: steps.measure.outputs.exit_status == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KPI_SUMMARY: ${{ steps.measure.outputs.kpi_summary }}
+        run: |
+          set -euo pipefail
+          TITLE="[KPI BREACH] post-merge-followup success rate < 90% (rolling 14-day)"
+          BODY="## post-merge-followup KPI sentinel breach
+
+ADR-026 Amendment 3 §결정 5.G.d — success rate sentinel ≥ 90% (rolling 14-day window) breach.
+
+### 측정 결과
+
+\`\`\`
+${KPI_SUMMARY}
+\`\`\`
+
+### 조치 방향
+
+1. \`gh run list --workflow=post-merge-followup.yml --status=failure\` 로 최근 실패 run 확인
+2. 실패 원인 분류 (parse defect / API error / config error)
+3. CFP 제안 또는 \`hotfix-bypass:post-merge-followup-success-rate\` label bypass
+
+### References
+
+- ADR-026 §결정 5.G.d (KPI sentinel SSOT)
+- ADR-060 evidence-enforceable framework (warning tier)
+- evidence-checks-registry entry: \`post-merge-followup-workflow-success-rate-kpi\`
+- bypass channel: \`hotfix-bypass:post-merge-followup-success-rate\` (ADR-024 Amendment 3 §결정 6.A, **24번째 hotfix-bypass:* family member**)
+
+_자동 생성 by post-merge-followup-success-rate-kpi.yml (CFP-688)_"
+          gh issue create \
+            --title "$TITLE" \
+            --body "$BODY" \
+            --label "hotfix-bypass:post-merge-followup-success-rate" \
+            --label "codeforge-kpi-alert" \
+            || echo "::warning::Issue creation failed — check gh permissions / label existence"
+
+      - name: Log PASS result
+        if: steps.measure.outputs.exit_status == '0'
+        run: |
+          echo "::notice::post-merge-followup KPI sentinel PASS — success rate ≥ 90% (rolling 14-day)"
+          cat /tmp/kpi.out
+
+      - name: Log setup error
+        if: steps.measure.outputs.exit_status == '2'
+        run: |
+          echo "::warning::post-merge-followup KPI measurement setup error — check gh/jq/run data availability"
+          cat /tmp/kpi.out || true

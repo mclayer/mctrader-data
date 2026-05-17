@@ -1,0 +1,73 @@
+name: branch-protection-drift-check
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/**"
+      - "templates/branch-protection-manifest.yaml"
+  schedule:
+    - cron: "0 9 * * 1"  # 매주 월요일 09:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift-check:
+    name: "branch-protection contexts drift check"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch actual contexts from branch protection
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api \
+            "repos/${{ github.repository }}/branches/main/protection/required_status_checks" \
+            --jq '.contexts[]' \
+          | sort > /tmp/actual_contexts.txt
+
+          echo "=== Actual contexts ==="
+          cat /tmp/actual_contexts.txt
+
+      - name: Extract expected contexts from manifest
+        run: |
+          python3 "${GITHUB_WORKSPACE}/scripts/lib/workflow_branch_protection_drift_check.py"
+
+          echo "=== Expected contexts ==="
+          cat /tmp/expected_contexts.txt
+
+      - name: Compare contexts
+        run: |
+          STALE=$(comm -23 /tmp/actual_contexts.txt /tmp/expected_contexts.txt)
+          MISSING=$(comm -13 /tmp/actual_contexts.txt /tmp/expected_contexts.txt)
+
+          FAIL=0
+
+          if [ -n "$STALE" ]; then
+            echo "::error::Stale contexts (in branch protection but NOT in manifest):"
+            echo "$STALE" | while IFS= read -r line; do
+              echo "  - $line"
+            done
+            FAIL=1
+          fi
+
+          if [ -n "$MISSING" ]; then
+            echo "::error::Missing contexts (in manifest but NOT in branch protection):"
+            echo "$MISSING" | while IFS= read -r line; do
+              echo "  - $line"
+            done
+            FAIL=1
+          fi
+
+          if [ "$FAIL" -eq 1 ]; then
+            echo ""
+            echo "Fix: update branch protection via gh api AND update templates/branch-protection-manifest.yaml"
+            echo "Both changes must be in the same PR (ADR-024 Amendment 2 §결정 C)."
+            exit 1
+          fi
+
+          echo "OK: branch protection contexts match manifest exactly."

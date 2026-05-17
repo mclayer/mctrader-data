@@ -2,6 +2,8 @@ name: Story
 description: 신규 사용자 요구사항 (Story 1건 = PR 1쌍 = Phase 1 + Phase 2)
 title: "[STORY] "
 labels: ["type:story", "phase:요구사항"]
+# CFP-140 / ADR-049: native Issue Type "Story" attached by story-init.yml Action via API
+# (GitHub Issue Forms do not support issue_type field natively — workflow-based attachment)
 body:
   - type: markdown
     attributes:
@@ -44,5 +46,36 @@ body:
         주 영향 component 1개. `.claude/_overlay/project.yaml` 의 `labels.components` 에 정의된 값과 정확히 일치해야 함.
         목록에 없는 값은 무시되며, 비워두면 component 라벨 미부착.
       placeholder: 예) backend
+    validations:
+      required: false
+
+  - type: textarea
+    id: spec_link
+    attributes:
+      label: Brainstorming spec link (선택)
+      description: |
+        Stage 0 pre-Issue brainstorming spec 의 path 또는 URL (ADR-034 / CFP-129).
+        - Consumer: `docs/superpowers/specs/...`
+        - Plugin dogfood (codeforge family): `<internal-docs>/<plugin-folder>/specs/...` (ADR-013 / ADR-017 enforced)
+        미사용 시 비워두세요 — Stage 0 는 옵션입니다 (CI 강제 없음).
+      placeholder: 예) docs/superpowers/specs/2026-05-07-my-feature-design.md
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: decision_principle_compliance
+    attributes:
+      label: 결정 원칙 (ADR-064) 준수 확인 (advisory)
+      description: |
+        본 Story 의 사용자 요구사항 본문이 [ADR-064](https://github.com/mclayer/plugin-codeforge/blob/main/docs/adr/ADR-064-decision-principle-mandate.md) 결정 원칙을 준수하는지 self-attest.
+        advisory checkbox — submission 차단 없음. mechanical lint 는 [CFP-449](https://github.com/mclayer/plugin-codeforge/issues/449) (warning tier, ADR-060 §결정 5).
+        false positive 회피 channel = `hotfix-bypass:decision-principle-vocab` label (ADR-024 Amendment 3).
+      options:
+        - label: forbid-list 어휘 회피 확인 (`임시` / `단계적` / `일단` / `우선[시간 우선순위]` / `잠정` / `가벼운` / `minimal viable` / `quick win`)
+          required: false
+        - label: derived default 우선 적용 확인 (가치 판단 / 미공개 컨텍스트 영역만 `AskUserQuestion`)
+          required: false
+        - label: 식별자 사전 요약 첨부 확인 (ADR / CFP / 코드 식별자 인용 시 핵심 결정 1 문장 요약 사전 제시)
+          required: false
     validations:
       required: false

@@ -1,0 +1,290 @@
+name: Retro alert pickup KPI (ADR-045 §D-5 sunset gate measurement)
+# CFP-628 Story 2 / ADR-045 Amendment 4 §D-5 / ADR-060 evidence-enforceable framework
+# Tier: warning (runtime metric pattern — advisory dashboard, no PR block)
+# evidence-checks-registry.yaml entry: `retro-alert-pickup-rate` (current_tier=warning)
+#
+# 책임:
+#   - Monthly cron 으로 지난 30일 `[PMO] retro alert` comment 수 (분모) /
+#     30일 안 retro file 생성된 alert 수 (분자) 를 측정
+#   - docs/kpi/retro-alert-pickup-rate.json 갱신 (auto-PR — ADR-024 §결정 6 정합, direct push 금지)
+#   - sunset_gate metric ≥ 90% (3 month window) / who PMOAgent / how cron workflow
+#
+# permissions: minimum (top-level deny-all + job override).
+# concurrency: race 차단 (cron + workflow_dispatch 동시 발화 시 single instance).
+
+on:
+  schedule:
+    # 매월 1일 00:00 UTC
+    - cron: '0 0 1 * *'
+  workflow_dispatch:
+    inputs:
+      as_of:
+        description: "Override 시계 (YYYY-MM, 빈 값이면 now). 디버깅 / backfill 용."
+        required: false
+        default: ""
+
+permissions: {}
+
+concurrency:
+  group: retro-alert-pickup-kpi
+  cancel-in-progress: false
+
+jobs:
+  measure-and-update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: read
+    steps:
+      - name: Checkout wrapper repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure jq + gh
+        run: |
+          set -euo pipefail
+          which jq
+          jq --version
+          which gh
+          gh --version | head -1
+
+      - name: Compute measurement window
+        id: window
+        env:
+          AS_OF_INPUT: ${{ github.event.inputs.as_of }}
+        run: |
+          set -euo pipefail
+          if [ -n "${AS_OF_INPUT:-}" ]; then
+            WINDOW_KEY="${AS_OF_INPUT}"
+          else
+            WINDOW_KEY="$(date -u +%Y-%m)"
+          fi
+          # 30일 전 기준 ISO 8601 timestamp
+          SINCE_TS="$(date -u -d '30 days ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -v-30d '+%Y-%m-%dT%H:%M:%SZ')"
+          echo "window_key=${WINDOW_KEY}" >> "$GITHUB_OUTPUT"
+          echo "since_ts=${SINCE_TS}" >> "$GITHUB_OUTPUT"
+          echo "Window: ${WINDOW_KEY}, since: ${SINCE_TS}"
+
+      - name: Count alert comments (denominator)
+        id: denominator
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SINCE_TS: ${{ steps.window.outputs.since_ts }}
+        run: |
+          set -uo pipefail
+
+          # phase:완료 label open/closed issue 에서 지난 30일 [PMO] retro alert comment 수집
+          # gh issue list → per-issue comments → filter by prefix + created_at >= SINCE_TS
+          ALERT_COUNT=0
+
+          # closed phase:완료 issue 도 포함 (retro 처리 후 close 된 case)
+          ISSUES=$(gh issue list \
+            --state all \
+            --label "phase:완료" \
+            --json "number,comments" \
+            --limit 200 \
+            2>/dev/null || echo "[]")
+
+          SINCE_EPOCH=$(date -u -d "${SINCE_TS}" +%s 2>/dev/null || \
+            python3 -c "
+from datetime import datetime, timezone
+ts = datetime.strptime('${SINCE_TS}', '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+print(int(ts.timestamp()))
+")
+
+          while IFS= read -r issue; do
+            [ -z "$issue" ] && continue
+            COMMENTS=$(echo "$issue" | jq -c '.comments[]?' 2>/dev/null || true)
+            while IFS= read -r comment; do
+              [ -z "$comment" ] && continue
+              BODY=$(echo "$comment" | jq -r '.body // ""')
+              CREATED_AT=$(echo "$comment" | jq -r '.created_at // ""')
+              [ -z "$CREATED_AT" ] && continue
+              # prefix 매칭
+              [[ "$BODY" != "[PMO] retro alert"* ]] && continue
+              # created_at >= SINCE_TS
+              COMMENT_EPOCH=$(date -u -d "$CREATED_AT" +%s 2>/dev/null || \
+                python3 -c "
+from datetime import datetime, timezone
+ts = datetime.strptime('$CREATED_AT', '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+print(int(ts.timestamp()))
+" 2>/dev/null || echo 0)
+              if [ "$COMMENT_EPOCH" -ge "$SINCE_EPOCH" ]; then
+                ALERT_COUNT=$((ALERT_COUNT + 1))
+              fi
+            done <<< "$COMMENTS"
+          done < <(echo "$ISSUES" | jq -c '.[]?' 2>/dev/null || true)
+
+          echo "alert_count=${ALERT_COUNT}" >> "$GITHUB_OUTPUT"
+          echo "Denominator (alert comments in last 30d): ${ALERT_COUNT}"
+
+      - name: Count retro files created (numerator)
+        id: numerator
+        env:
+          SINCE_TS: ${{ steps.window.outputs.since_ts }}
+        run: |
+          set -euo pipefail
+          # docs/retros/*.md 파일 중 지난 30일 생성된 것 = retro pickup 완료 count
+          RETRO_COUNT=0
+          SINCE_EPOCH=$(date -u -d "${SINCE_TS}" +%s 2>/dev/null || \
+            python3 -c "
+from datetime import datetime, timezone
+ts = datetime.strptime('${SINCE_TS}', '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+print(int(ts.timestamp()))
+")
+          for f in docs/retros/*.md; do
+            [ -f "$f" ] || continue
+            FILE_EPOCH=$(date -u -r "$f" +%s 2>/dev/null || stat -c '%Y' "$f" 2>/dev/null || echo 0)
+            if [ "$FILE_EPOCH" -ge "$SINCE_EPOCH" ]; then
+              RETRO_COUNT=$((RETRO_COUNT + 1))
+            fi
+          done
+          echo "retro_count=${RETRO_COUNT}" >> "$GITHUB_OUTPUT"
+          echo "Numerator (retro files in last 30d): ${RETRO_COUNT}"
+
+      - name: Compute KPI rate + update JSON
+        id: compute
+        env:
+          WINDOW_KEY: ${{ steps.window.outputs.window_key }}
+          ALERT_COUNT: ${{ steps.denominator.outputs.alert_count }}
+          RETRO_COUNT: ${{ steps.numerator.outputs.retro_count }}
+        run: |
+          set -euo pipefail
+          mkdir -p docs/kpi
+
+          ALERT_COUNT="${ALERT_COUNT:-0}"
+          RETRO_COUNT="${RETRO_COUNT:-0}"
+
+          # rate 계산 (분모 0 시 null)
+          if [ "$ALERT_COUNT" -eq 0 ]; then
+            RATE="null"
+            GATE="insufficient_data"
+          else
+            # bash 정수 연산으로 100분율 계산 (소수점은 python3 fallback)
+            RATE=$(python3 -c "print(round(${RETRO_COUNT} / ${ALERT_COUNT} * 100, 1))" 2>/dev/null || echo "null")
+            # sunset_gate: ≥ 90.0% = ok, < 90.0% = violated
+            GATE=$(python3 -c "
+rate = ${RATE:-0}
+print('ok' if rate >= 90.0 else 'violated')
+" 2>/dev/null || echo "unknown")
+          fi
+
+          MEASURED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+          # 기존 JSON 읽기 (history 보존)
+          EXISTING_JSON_FILE="docs/kpi/retro-alert-pickup-rate.json"
+          if [ -f "$EXISTING_JSON_FILE" ]; then
+            OLD_HISTORY=$(jq '.history // []' "$EXISTING_JSON_FILE" 2>/dev/null || echo "[]")
+          else
+            OLD_HISTORY="[]"
+          fi
+
+          # history append (same window = replace last)
+          NEW_ENTRY="{\"window\": \"${WINDOW_KEY}\", \"rate\": ${RATE}, \"denominator\": ${ALERT_COUNT}, \"numerator\": ${RETRO_COUNT}, \"measured_at\": \"${MEASURED_AT}\"}"
+          NEW_HISTORY=$(echo "$OLD_HISTORY" | jq --argjson entry "$NEW_ENTRY" --arg wk "$WINDOW_KEY" '
+            [.[] | select(.window != $wk)] + [$entry]
+          ')
+
+          # JSON 갱신
+          jq -n \
+            --arg value "$RATE" \
+            --arg gate "$GATE" \
+            --arg measured_at "$MEASURED_AT" \
+            --arg window "$WINDOW_KEY" \
+            --argjson denominator "$ALERT_COUNT" \
+            --argjson numerator "$RETRO_COUNT" \
+            --argjson history "$NEW_HISTORY" \
+            '{
+              "schema_version": "1.1",
+              "introduced_by": "CFP-628",
+              "value": (if $value == "null" then null else ($value | tonumber) end),
+              "gate_status": $gate,
+              "measured_at": $measured_at,
+              "window_months": 1,
+              "last_window": $window,
+              "denominator": $denominator,
+              "numerator": $numerator,
+              "history": $history
+            }' > "$EXISTING_JSON_FILE"
+
+          echo "rate=${RATE}" >> "$GITHUB_OUTPUT"
+          echo "gate=${GATE}" >> "$GITHUB_OUTPUT"
+          echo "=== KPI JSON ==="
+          cat "$EXISTING_JSON_FILE"
+
+      - name: Check JSON changed (no-op short-circuit)
+        id: diff
+        run: |
+          set -euo pipefail
+          if git diff --quiet docs/kpi/retro-alert-pickup-rate.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "JSON unchanged — no-op."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "JSON changed:"
+            git diff --stat docs/kpi/retro-alert-pickup-rate.json
+          fi
+
+      - name: Create auto-PR (JSON changed)
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WINDOW_KEY: ${{ steps.window.outputs.window_key }}
+          RATE: ${{ steps.compute.outputs.rate }}
+          GATE: ${{ steps.compute.outputs.gate }}
+        run: |
+          set -euo pipefail
+          BRANCH="kpi/retro-alert-pickup/${WINDOW_KEY}-$(date -u +%H%M%S)"
+          git config user.name "codeforge-bot[bot]"
+          git config user.email "codeforge-bot@users.noreply.github.com"
+
+          git checkout -b "$BRANCH"
+          git add docs/kpi/retro-alert-pickup-rate.json
+          git commit -m "chore(kpi): retro-alert-pickup monthly refresh (${WINDOW_KEY})" \
+                     -m "Automated by templates/github-workflows/retro-alert-pickup-kpi.yml" \
+                     -m "evidence-checks-registry entry: retro-alert-pickup-rate (CFP-628 / ADR-045 §D-5)"
+          git push origin "$BRANCH"
+
+          PR_BODY=$(cat <<EOF
+## CFP-628 — ADR-045 §D-5 retro alert pickup KPI monthly refresh
+
+docs/kpi/retro-alert-pickup-rate.json 갱신 (monthly cron / workflow_dispatch).
+
+### KPI summary
+
+- Window: ${WINDOW_KEY}
+- Rate: ${RATE}%
+- Gate: ${GATE} (sunset_gate threshold ≥ 90%)
+
+### 정책 cross-ref
+
+- ADR-045 §D-5 — Orchestrator SessionStart retro alert scan mandate
+- ADR-024 §결정 6 — main 직접 push 금지, auto-PR 패턴 정합
+- ADR-060 — evidence-enforceable framework (warning tier — advisory only, no merge block)
+- evidence-checks-registry.yaml entry: retro-alert-pickup-rate
+
+### Auto-merge 가능 여부
+
+본 PR = data-only refresh. lint 영향 0건. 사용자가 검토 후 merge 가능.
+EOF
+          )
+
+          gh pr create --title "chore(kpi): retro-alert-pickup monthly refresh (${WINDOW_KEY})" \
+                       --body "$PR_BODY" \
+                       --base main \
+                       --head "$BRANCH" \
+                       --label codeforge-kpi-update
+
+      - name: Summary (always)
+        if: always()
+        run: |
+          echo "=== Retro alert pickup KPI workflow summary ==="
+          echo "window_key  = ${{ steps.window.outputs.window_key }}"
+          echo "denominator = ${{ steps.denominator.outputs.alert_count }}"
+          echo "numerator   = ${{ steps.numerator.outputs.retro_count }}"
+          echo "rate        = ${{ steps.compute.outputs.rate }}"
+          echo "gate_status = ${{ steps.compute.outputs.gate }}"
+          echo "json_changed= ${{ steps.diff.outputs.changed }}"

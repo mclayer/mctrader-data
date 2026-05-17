@@ -1,0 +1,84 @@
+name: sibling-workflow-parity
+# CFP-685 / ADR-065 §결정 1 row 3 — wrapper templates ↔ self-app byte-identical parity
+# evidence-checks-registry.yaml entry: auto-phase-label-sibling-parity
+# Tier: warning (ADR-060 §결정 5 — 첫 도입 = warning mode, continue-on-error: true)
+#
+# 검증:
+#   templates/github-workflows/*.yml ↔ .github/workflows/*.yml SHA-256 byte-identical
+#   drift 발견 시 GitHub Issue 자동 생성 (sibling sync 강제 forcing function)
+#
+# 트리거:
+#   schedule: cron weekly Monday 10:00 UTC (ADR-065 §결정 6 — weekly SLA)
+#   workflow_dispatch: manual override for ad-hoc verification
+#
+# Hotfix bypass:
+#   hotfix-bypass:auto-phase-label-sibling-parity label 부착 시 skip + audit comment
+#   (ADR-024 Amendment 3 §결정 6.A per-entry namespace 정합, 22번째 hotfix-bypass:* family member)
+#
+# Permissions: minimum (top-level deny-all + job override, ADR-060 Amendment 8)
+
+on:
+  schedule:
+    - cron: '0 10 * * 1'  # weekly Monday 10:00 UTC
+  workflow_dispatch:       # Manual override for ad-hoc verification
+
+permissions: {}  # top-level deny-all (ADR-060 Amendment 8 §결정 21)
+
+jobs:
+  sibling-parity-check:
+    runs-on: ubuntu-latest
+    continue-on-error: true  # warning tier — drift does not block CI (ADR-060 §결정 5)
+    permissions:
+      contents: read   # templates + .github/workflows fetch
+      issues: write    # Issue auto-create on drift
+
+    concurrency:
+      group: sibling-workflow-parity
+      cancel-in-progress: false  # 진행 중 run 완료 보장
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check hotfix-bypass label
+        id: bypass
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BYPASS="false"
+          if gh issue list \
+            --label "hotfix-bypass:auto-phase-label-sibling-parity" \
+            --state open \
+            --limit 1 \
+            --json number \
+            --jq '.[0].number' \
+            2>/dev/null | grep -qE '^[0-9]+$'; then
+            BYPASS="true"
+          fi
+          echo "bypass=$BYPASS" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
+
+      - name: Run sibling-workflow-parity check
+        id: parity_check
+        if: steps.bypass.outputs.bypass != 'true'
+        run: |
+          chmod +x scripts/check-sibling-workflow-parity.sh
+          bash scripts/check-sibling-workflow-parity.sh
+        continue-on-error: true  # warning tier — drift output captured for Issue
+
+      - name: Create drift alert Issue
+        if: steps.bypass.outputs.bypass != 'true' && steps.parity_check.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "[governance] sibling-workflow-parity drift detected $(date -u +%Y-%m-%d)" \
+            --body "Weekly sibling-workflow-parity check detected SHA-256 mismatch between templates/github-workflows/ and .github/workflows/. Run: \`cp templates/github-workflows/<name>.yml .github/workflows/<name>.yml\` to fix (ADR-065 §결정 1 row 3).$(printf '\n\n')Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --label "codeforge-improvement,governance" \
+            --repo "${{ github.repository }}" \
+          || echo "::warning::Could not create drift alert Issue (label may not exist)"
+
+      - name: Bypass audit comment
+        if: steps.bypass.outputs.bypass == 'true'
+        run: |
+          echo "::warning::sibling-workflow-parity bypass active (hotfix-bypass:auto-phase-label-sibling-parity label detected) — audit comment required (ADR-024 Amendment 3 §결정 6.A)"

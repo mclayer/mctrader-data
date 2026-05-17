@@ -1,0 +1,81 @@
+name: Carrier bootstrap check (warning mode)
+# CFP-407 / ADR-062 / ADR-060 — carrier Story bootstrap dependency mechanical lint
+# Tier: warning (continue-on-error, non-required check)
+#
+# 승격 path:
+#   warning → blocking-on-pr 승격 시 CFP-NNN carrier PR 가 다음 변경 동반 의무:
+#     1. 본 workflow 의 `continue-on-error: true` 제거
+#     2. branch protection `required_status_checks.contexts` 에 본 workflow job name 추가
+#        (ADR-024 Amendment 2 / branch-protection-manifest.yaml SSOT 정합)
+#     3. evidence 3 산출물 제출 (ADR-060 §결정 6 (d) + evidence-checks-registry.yaml promotion_criteria)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'docs/stories/**.md'
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  carrier-bootstrap-check:
+    runs-on: ubuntu-latest
+    # warning mode (ADR-060 §결정 5) — lint fail 이 PR merge 차단하지 않음.
+    # required_status_checks.contexts 부착 X.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install pyyaml
+        run: python3 -m pip install --user pyyaml
+
+      - name: Detect changed Story files
+        id: changed
+        run: |
+          set -euo pipefail
+          git diff --name-only origin/${{ github.base_ref }}...HEAD \
+            | grep -E '^docs/stories/.+\.md$' \
+            > /tmp/changed_stories.txt || true
+          if [ -s /tmp/changed_stories.txt ]; then
+            echo "has_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "=== Changed Story files ==="
+          cat /tmp/changed_stories.txt || echo "(none)"
+
+      - name: Run carrier bootstrap lint
+        id: lint
+        if: steps.changed.outputs.has_changed == 'true'
+        run: |
+          set +e
+          mapfile -t stories < /tmp/changed_stories.txt
+          bash scripts/check-carrier-bootstrap.sh "${stories[@]}" 2>&1 | tee /tmp/lint.out
+          status=${PIPESTATUS[0]}
+          echo "exit_status=$status" >> "$GITHUB_OUTPUT"
+          exit 0  # continue-on-error 정합 — fail 이어도 다음 step 진행
+
+      - name: Post lint result comment (sticky)
+        if: steps.changed.outputs.has_changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          LINT_STATUS: ${{ steps.lint.outputs.exit_status }}
+        run: |
+          set -euo pipefail
+          LINT_OUT="$(cat /tmp/lint.out 2>/dev/null || echo '(lint output 부재)')"
+          if [ "${LINT_STATUS:-1}" = "0" ]; then
+            HEADER="## ✓ Carrier bootstrap lint — PASS (warning mode)"
+            FOOTER="violation 0건. ADR-062 §결정 1-2 정합."
+          else
+            HEADER="## ⚠ Carrier bootstrap lint — violation 감지 (warning mode)"
+            FOOTER=$'**warning mode (CFP-407 / ADR-062 / ADR-060 §결정 5)**: lint fail 이 PR merge 를 차단하지 않습니다. 의도된 결과인지 확인 + 다음 commit 으로 해소.\n\ncarrier Story 작성 시 `carrier_story: <KEY>` + `bootstrap_exempt_protocols: ["<type>:<identifier>"]` typed key list 의무. 5 standard type prefix: adr / contract / policy / workflow / script.'
+          fi
+          BODY=$(printf '%s\n\n```\n%s\n```\n\n%s\n\n%s' \
+            "$HEADER" "$LINT_OUT" "$FOOTER" \
+            "> ⓘ 본 workflow = **warning mode** (continue-on-error). PR merge 미차단. 승격 gate (ADR-060 §결정 6) 통과 후 blocking 전환.")
+          gh pr comment "$PR_NUMBER" --body "$BODY"

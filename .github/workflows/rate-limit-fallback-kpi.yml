@@ -1,0 +1,374 @@
+name: Rate-limit fallback KPI (ADR-057 sunset gate measurement)
+# CFP-393 / ADR-057 Amendment 2 / ADR-060 evidence-enforceable framework 첫 non-sunset application
+# Tier: warning (runtime metric pattern — advisory dashboard, no PR block)
+# evidence-checks-registry.yaml entry: `rate-limit-fallback-rate` (current_tier=warning)
+#
+# 책임:
+#   - Monthly cron 으로 §14 Lane Evidence 의 [rate-limit-fallback:sonnet→opus] 태그를 aggregate
+#   - docs/kpi/rate-limit-fallback.json 갱신 (auto-PR — ADR-024 §결정 6 정합, direct push 금지)
+#   - threshold violation 시 `codeforge-kpi-alert` label Issue auto-open (dedup: 동일 month 1회만)
+#
+# permissions: minimum (top-level deny-all + job override).
+# concurrency: race 차단 (cron + workflow_dispatch 동시 발화 시 single instance).
+
+on:
+  schedule:
+    # 매월 1일 00:00 UTC
+    - cron: '0 0 1 * *'
+  workflow_dispatch:
+    inputs:
+      as_of:
+        description: "Override 시계 (YYYY-MM, 빈 값이면 now). 디버깅 / backfill 용."
+        required: false
+        default: ""
+
+permissions: {}
+
+concurrency:
+  group: rate-limit-fallback-kpi
+  cancel-in-progress: false
+
+jobs:
+  measure-and-update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Checkout wrapper repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Clone codeforge-internal-docs (best-effort, graceful fallback)
+        id: clone_internal
+        continue-on-error: true
+        env:
+          # CFP-450 / ADR-013 Amendment 6 — internal-docs visibility=PRIVATE (audit 2026-05-12).
+          # CODEFORGE_CROSS_REPO_PAT secret 가 internal-docs read 권한 보유 (단일 PAT scope consolidation, Option B).
+          # PAT 부재 시 GITHUB_TOKEN fallback (private 시 fail → graceful partial_data=true).
+          INTERNAL_DOCS_PAT: ${{ secrets.CODEFORGE_CROSS_REPO_PAT }}
+        run: |
+          set +e
+          if [ -n "${INTERNAL_DOCS_PAT:-}" ]; then
+            git clone --depth=1 "https://x-access-token:${INTERNAL_DOCS_PAT}@github.com/mclayer/codeforge-internal-docs.git" .internal-docs 2>&1 | tee /tmp/clone.log
+            echo "[clone_internal] PAT path 사용 (CFP-450 Option B)"
+          else
+            # Fallback path — PAT secret 미설정 (degraded mode).
+            # internal-docs 가 private 상태에서 GITHUB_TOKEN 사용 시 fail 예상 → partial_data=true.
+            git clone --depth=1 https://github.com/mclayer/codeforge-internal-docs.git .internal-docs 2>&1 | tee /tmp/clone.log
+            echo "[clone_internal] PAT 부재 — GITHUB_TOKEN fallback (private 시 fail 예상)"
+          fi
+          status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "internal_docs_ready=true" >> "$GITHUB_OUTPUT"
+            echo "internal-docs clone OK"
+          else
+            echo "internal_docs_ready=false" >> "$GITHUB_OUTPUT"
+            echo "internal-docs clone FAILED — wrapper-only mode (partial_data=true)"
+          fi
+          exit 0
+
+      - name: Ensure jq + bash
+        run: |
+          set -euo pipefail
+          which jq
+          jq --version
+          which bash
+          bash --version | head -1
+
+      - name: Run aggregator
+        id: aggregate
+        env:
+          AS_OF_INPUT: ${{ github.event.inputs.as_of }}
+          INTERNAL_READY: ${{ steps.clone_internal.outputs.internal_docs_ready }}
+        run: |
+          set -uo pipefail   # CFP-451: -e 분리 — aggregator exit code capture 의무
+          mkdir -p docs/kpi
+
+          args=()
+          if [ "${INTERNAL_READY:-false}" = "true" ]; then
+            args+=(--internal-docs-path "$(pwd)/.internal-docs")
+          fi
+          if [ -n "${AS_OF_INPUT:-}" ]; then
+            args+=(--as-of "$AS_OF_INPUT")
+          fi
+          args+=(--out docs/kpi/rate-limit-fallback.json)
+          # CFP-453 — history.jsonl append (idempotent, last-line replace if same month)
+          args+=(--history-out docs/kpi/rate-limit-fallback-history.jsonl)
+
+          # CFP-451: capture mode — aggregator exit code 별도 sub-reason 분류 (detect_infra 가 GITHUB_OUTPUT.exit_code 참조).
+          bash scripts/measure-rate-limit-fallback.sh "${args[@]}"
+          exit_code=$?
+
+          # 어떤 case 든 exit_code 를 GITHUB_OUTPUT export — detect_infra step 이 1/2/3/4/unknown 분류.
+          echo "exit_code=${exit_code}" >> "$GITHUB_OUTPUT"
+
+          if [ "$exit_code" -ne 0 ]; then
+            # step.outcome=failure 격상 (exit 후에도 GITHUB_OUTPUT 이미 write 됨)
+            echo "[aggregate] aggregator exit ${exit_code} — step failure 격상. detect_infra 가 sub-reason 분기 처리."
+            exit "$exit_code"
+          fi
+
+          # 정상 path — errexit 복귀 (jq 실패 = real bug, silent fail 차단)
+          set -e
+
+          # gate_status / sample sufficiency 결과 추출 → 다음 step 입력
+          gate=$(jq -r '.gate_status' docs/kpi/rate-limit-fallback.json)
+          sufficient=$(jq -r '.sample_size_sufficient' docs/kpi/rate-limit-fallback.json)
+          win_rate=$(jq -r '.rolling_summary.window_rate // "null"' docs/kpi/rate-limit-fallback.json)
+          partial=$(jq -r '.partial_data' docs/kpi/rate-limit-fallback.json)
+          echo "gate=$gate" >> "$GITHUB_OUTPUT"
+          echo "sufficient=$sufficient" >> "$GITHUB_OUTPUT"
+          echo "win_rate=$win_rate" >> "$GITHUB_OUTPUT"
+          echo "partial=$partial" >> "$GITHUB_OUTPUT"
+
+          echo "=== KPI JSON ==="
+          cat docs/kpi/rate-limit-fallback.json
+
+      - name: Check JSON changed (no-op short-circuit)
+        id: diff
+        run: |
+          set -euo pipefail
+          if git diff --quiet docs/kpi/rate-limit-fallback.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "JSON unchanged — no-op."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "JSON changed:"
+            git diff --stat docs/kpi/rate-limit-fallback.json
+          fi
+
+      - name: Compute KPI window key (YYYY-MM bucket — Issue dedup 용)
+        id: window
+        if: steps.aggregate.outputs.gate == 'violated'
+        run: |
+          # rolling_summary 의 마지막 month bucket 사용 (= window 끝).
+          last_month=$(jq -r '.monthly_data[-1].month' docs/kpi/rate-limit-fallback.json)
+          echo "key=$last_month" >> "$GITHUB_OUTPUT"
+
+      - name: Find existing alert issue (dedup)
+        id: existing_alert
+        if: steps.aggregate.outputs.gate == 'violated'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WINDOW_KEY: ${{ steps.window.outputs.key }}
+        run: |
+          set -euo pipefail
+          # 동일 window (마지막 month bucket) 이미 open Issue 가 있는지 검색.
+          existing=$(gh issue list --state open --label codeforge-kpi-alert \
+            --search "ADR-057 fallback rate gate violated window ending ${WINDOW_KEY} in:title" \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            echo "existing=$existing" >> "$GITHUB_OUTPUT"
+            echo "기존 alert Issue #${existing} 발견 — dedup skip."
+          else
+            echo "existing=" >> "$GITHUB_OUTPUT"
+            echo "기존 alert Issue 없음 — 새로 발의."
+          fi
+
+      - name: Open KPI alert issue (threshold violated)
+        if: steps.aggregate.outputs.gate == 'violated' && steps.existing_alert.outputs.existing == ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WINDOW_KEY: ${{ steps.window.outputs.key }}
+          WIN_RATE: ${{ steps.aggregate.outputs.win_rate }}
+        run: |
+          set -euo pipefail
+          KPI_JSON=$(jq -c . docs/kpi/rate-limit-fallback.json)
+          TITLE="[codeforge-kpi-alert] ADR-057 fallback rate gate violated (window ending ${WINDOW_KEY})"
+          # heredoc with single-quote delimiter — shell variable expansion 만 envsubst-style
+          BODY=$(cat <<EOF
+          ## ADR-057 fallback rate KPI — gate violated
+
+          Window ending: ${WINDOW_KEY}
+          Rolling 3-month rate: ${WIN_RATE}%
+          Threshold: less than 1.0 percent (strict) — greater-or-equal 1.0 percent = violation
+
+          ### Context
+
+          CFP-393 (ADR-057 Amendment 2) sunset gate 2 의 measurement contract 가 violation 임계 (1.0% / 3 month rolling) 을 초과했습니다.
+
+          ### 관련 ADR
+
+          - ADR-057 §결정 2 — sunset gate 정의 (docs/adr/ADR-057-orchestrator-opus-mandate-and-sonnet-opus-fallback.md)
+          - ADR-060 — evidence-enforceable framework SSOT (docs/adr/ADR-060-evidence-enforceable-promotion-framework.md)
+          - evidence-checks-registry.yaml entry rate-limit-fallback-rate (docs/evidence-checks-registry.yaml)
+
+          ### KPI snapshot (full JSON)
+
+          \`\`\`json
+          ${KPI_JSON}
+          \`\`\`
+
+          ### Suggested actions
+
+          1. Sonnet 잔류 5 agent (DeveloperAgent / BackendDeveloperAgent / FrontendDeveloperAgent / IntegrationTestAgent / StatefulTestAgent) rate-limit 발생률 원인 분석.
+          2. ADR-057 §결정 3 agent model tier 재검토 — Opus 격상 candidate 결정.
+          3. 필요 시 ADR-057 Amendment N carrier CFP 발의.
+
+          ---
+
+          본 Issue 는 rate-limit-fallback-kpi.yml workflow 자동 발의 (monthly cron). 동일 window (${WINDOW_KEY}) 기존 open Issue 가 있으면 발의 dedup.
+          EOF
+          )
+          gh issue create --title "$TITLE" --body "$BODY" --label codeforge-kpi-alert
+
+      - name: Create or update auto-PR (JSON changed)
+        id: auto_pr   # CFP-451: detect_infra step 이 outcome 캡처 가능
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          BRANCH="kpi/rate-limit-fallback/$(date -u +%Y%m%d-%H%M%S)"
+          git config user.name "codeforge-bot[bot]"
+          git config user.email "codeforge-bot@users.noreply.github.com"
+
+          git checkout -b "$BRANCH"
+          git add docs/kpi/rate-limit-fallback.json
+          # CFP-453 — history.jsonl 누적 file 도 동일 PR 에 포함 (auto-PR noise 회피).
+          git add docs/kpi/rate-limit-fallback-history.jsonl
+          git commit -m "chore(kpi): rate-limit-fallback monthly refresh ($(date -u +%Y-%m))" \
+                     -m "Automated by templates/github-workflows/rate-limit-fallback-kpi.yml" \
+                     -m "evidence-checks-registry entry: rate-limit-fallback-rate (CFP-393 / ADR-057 Amendment 2)"
+          git push origin "$BRANCH"
+
+          PR_BODY=$(cat <<EOF
+          ## CFP-393 — ADR-057 fallback rate KPI monthly refresh
+
+          docs/kpi/rate-limit-fallback.json 갱신 (monthly cron / workflow_dispatch).
+
+          ### KPI summary
+
+          \`\`\`json
+          $(jq '{schema_version, measured_at, window_months, rolling_summary, sample_size_sufficient, partial_data}' docs/kpi/rate-limit-fallback.json)
+          \`\`\`
+
+          ### 정책 cross-ref
+
+          - ADR-024 §결정 6 — main 직접 push 금지, auto-PR 패턴 정합.
+          - ADR-057 Amendment 2 — KPI dashboard.
+          - ADR-060 — framework SSOT (warning tier — advisory only, no merge block).
+
+          ### Auto-merge 가능 여부
+
+          본 PR = data-only refresh. lint (frontmatter / section / locations / lane-evidence) 영향 0건.
+          사용자가 검토 후 merge 가능. 즉시 merge 강제 X (admin discretion).
+          EOF
+          )
+
+          gh pr create --title "chore(kpi): rate-limit-fallback monthly refresh ($(date -u +%Y-%m))" \
+                       --body "$PR_BODY" \
+                       --base main \
+                       --head "$BRANCH" \
+                       --label codeforge-kpi-update
+
+      - name: Detect infra error
+        id: detect_infra
+        if: always()
+        run: |
+          set -euo pipefail
+          # CFP-451 — infra error vs measurement alert 분리.
+          # clone_internal.continue-on-error=true 라 outcome=success 항상. internal_docs_ready output 와 /tmp/clone.log grep 으로 real failure 분기.
+          clone_ok="${{ steps.clone_internal.outputs.internal_docs_ready }}"
+          agg_outcome="${{ steps.aggregate.outcome }}"
+          pr_outcome="${{ steps.auto_pr.outcome }}"
+          agg_exit="${{ steps.aggregate.outputs.exit_code }}"
+
+          infra_error="false"
+          reasons=""
+
+          # (1) clone fail — network/auth pattern 만 (intentional partial 와 구분).
+          if [ "${clone_ok}" = "false" ] && [ -f /tmp/clone.log ] && grep -qE "fatal:|Could not resolve|Authentication failed" /tmp/clone.log; then
+            infra_error="true"
+            reasons="${reasons}internal-docs clone failure (network/auth); "
+          fi
+
+          # (2) aggregate step failure — exit code 별도 sub-reason.
+          if [ "${agg_outcome}" = "failure" ]; then
+            infra_error="true"
+            case "${agg_exit}" in
+              1) reasons="${reasons}aggregator input validation failure (exit 1); " ;;
+              2) reasons="${reasons}aggregator write failure (exit 2); " ;;
+              3) reasons="${reasons}aggregator internal-docs scan failure (exit 3); " ;;
+              4) reasons="${reasons}aggregator Sonnet agent enum drift (exit 4 — ADR-057 / ADR-042 SSOT mismatch); " ;;
+              *) reasons="${reasons}aggregator step failure (exit ${agg_exit:-unknown}); " ;;
+            esac
+          fi
+
+          # (3) auto-PR failure — id: auto_pr 부여 후 outcome 캡처. skipped (if 조건 미충족) 는 infra 결함 아님.
+          if [ "${pr_outcome}" = "failure" ]; then
+            infra_error="true"
+            reasons="${reasons}auto-PR creation failure; "
+          fi
+
+          echo "infra_error=${infra_error}" >> "$GITHUB_OUTPUT"
+          echo "reasons=${reasons}" >> "$GITHUB_OUTPUT"
+          echo "=== detect_infra 결과 ==="
+          echo "infra_error=${infra_error}"
+          echo "reasons=${reasons}"
+
+      - name: Open infra error issue
+        if: steps.detect_infra.outputs.infra_error == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REASONS: ${{ steps.detect_infra.outputs.reasons }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          WINDOW_KEY=$(date -u +%Y-%m)
+          # dedup — 동일 window infra-error Issue 이미 open 이면 skip.
+          existing=$(gh issue list --state open --label codeforge-kpi-infra-error \
+            --search "rate-limit-fallback-kpi workflow infra error window ${WINDOW_KEY} in:title" \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            echo "기존 infra-error Issue #${existing} 발견 — dedup skip."
+            exit 0
+          fi
+
+          TITLE="[codeforge-kpi-infra-error] rate-limit-fallback-kpi workflow infra error (window ${WINDOW_KEY})"
+          BODY=$(cat <<EOF
+          ## rate-limit-fallback-kpi workflow infra error
+
+          **Window**: ${WINDOW_KEY}
+          **Run URL**: ${RUN_URL}
+          **Detected reasons**: ${REASONS}
+
+          ### Context
+
+          rate-limit-fallback-kpi.yml workflow 가 measurement domain (정책 의사결정) 이 아닌 **infrastructure domain** (운영 환경 결함) failure 를 detect. **oncall 즉시 조치 필요** — measurement alert (\`codeforge-kpi-alert\`) 와 분리된 channel.
+
+          ### Triage 가이드
+
+          1. Run URL 의 step log 확인 (clone_internal / aggregate / auto_pr 중 어느 step failure 인지).
+          2. internal-docs clone fail = network / GITHUB_TOKEN 권한 / repo visibility 점검.
+          3. aggregator script error = measure-rate-limit-fallback.sh exit code 확인 (1/2 또는 3/4).
+          4. auto-PR fail = branch protection / token 권한 / branch name collision 점검.
+
+          ### 관련 ADR
+
+          - ADR-057 §결정 2 — sunset gate measurement contract
+          - ADR-060 — evidence-enforceable framework (배경)
+          - label-registry-v2 v2.3 — monitoring tier sub-axis (alert + infra-error + update)
+
+          ---
+
+          본 Issue 는 rate-limit-fallback-kpi.yml workflow 자동 발의. 동일 window (${WINDOW_KEY}) 기존 open Issue 있으면 dedup.
+          EOF
+          )
+          gh issue create --title "$TITLE" --body "$BODY" --label codeforge-kpi-infra-error
+
+      - name: Summary (always)
+        if: always()
+        run: |
+          echo "=== Rate-limit fallback KPI workflow summary ==="
+          echo "gate_status            = ${{ steps.aggregate.outputs.gate }}"
+          echo "sample_size_sufficient = ${{ steps.aggregate.outputs.sufficient }}"
+          echo "window_rate            = ${{ steps.aggregate.outputs.win_rate }}"
+          echo "partial_data           = ${{ steps.aggregate.outputs.partial }}"
+          echo "json_changed           = ${{ steps.diff.outputs.changed }}"
+          echo "infra_error            = ${{ steps.detect_infra.outputs.infra_error }}"
+          echo "infra_error_reasons    = ${{ steps.detect_infra.outputs.reasons }}"

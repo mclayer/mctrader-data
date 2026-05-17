@@ -1,0 +1,703 @@
+name: Retro mandatory (CFP-138 / ADR-045)
+# Security: third-party actions are SHA-pinned per CFP-300 policy.
+
+# Story 완료 회고 의무화 — Phase 2 PR merge 후 4 attempts (1 initial + 3 retries) cumulative offset.
+#
+# Trigger flow (ADR-045 D-1, D-4 — FIX iter 1 F-1 alignment):
+#   1. Phase 2 PR merge (closed + merged=true) → workflow 발화
+#   2. Story Issue 추출 (PR title CFP-NNN regex + title 정확 매칭 — F-2 hardening)
+#   3. First attempt at PR merge + 5min (grace period) — PMOAgent retro write 시도
+#   4. retry 1 at PR merge + 10min  (Phase 2 implementation — state machine 영역)
+#   5. retry 2 at PR merge + 20min  (Phase 2 implementation — state machine 영역)
+#   6. retry 3 at PR merge + 35min  (Phase 2 implementation — state machine 영역)
+#   7. retry 3 fail → ESCALATE 사용자 + gate:retro-complete 미부착 (Story close 차단 유지)
+#
+# Total attempts = 4 (1 initial + 3 retries).
+# Total max latency from PR merge to ESCALATE = 35min (5min grace + 5+10+15 retry waits).
+#
+# Phase 1 PR scope (본 workflow):
+#   - First attempt (5min grace) + close-blocking (Issue close auto-reopen) 만 implement
+#   - retry 1/2/3 state machine = Phase 2 PR scope deferred (ADR-045 §D-4 Phase 2 implementation spec)
+#
+# Disable safety (ADR-045 D-7):
+#   .codeforge/post-merge-automation.disabled flag 활성 시 no-op
+#   (post-merge-followup.yml 와 같은 flag 공유 — single disable = both off)
+#
+# Idempotency (ADR-045 §11.6):
+#   - workflow re-run = same result (label 부재 검사 + close-blocking idempotent)
+#   - PMOAgent re-spawn = retro file 존재 검사 후 skip 또는 append
+#   - gh label add = idempotent (이미 부착 시 no-op)
+#   - Issue close-blocking auto-reopen comment = idempotent (EXISTING_ALERT check)
+#
+# Concurrency (ADR-045 §7.4.4):
+#   같은 PR merge 다수 발화 시 single instance 만 active.
+
+on:
+  pull_request:
+    types: [closed]
+  # Issue close 시 reopen 차단 (UC-2 정합)
+  issues:
+    types: [closed]
+  # Phase 2 retry trigger (ADR-045 §D-4 Phase 2 implementation spec — CFP-138):
+  # FIX iter 1 A-2 fix (ADR-045 §D-4 amendment_id=1): workflow_run trigger 제거.
+  # workflow_run self re-trigger ("Retro mandatory" → "Retro mandatory") = GitHub Actions infinite loop + quota exhaustion risk.
+  # cron `*/5 * * * *` 단독 사용 — retry-state-machine job 이 retro-attempts.jsonl state 검사 후 due retry dispatch.
+  # 5min cron interval = 충분한 retry granularity (D-4 cumulative offset 5/10/15min 대비).
+  schedule:
+    - cron: '*/5 * * * *'
+
+permissions:
+  # CFP-300 least-privilege: top-level deny-all; each job overrides only what it needs.
+  # retro-check job needs: issues:write (label add / comment), pull-requests:write (PR comment),
+  #   contents:read (checkout + .codeforge/ flag check).
+  # contents:write is NOT needed at this level — retro-attempts.jsonl writes use
+  #   CODEFORGE_CROSS_REPO_PAT (scoped to mclayer/codeforge-internal-docs only, ADR-026 §결정 2).
+  # close-blocking job needs: issues:write (reopen + comment).
+  # retry-state-machine job needs: issues:write (comment), contents:read (checkout).
+  issues: write
+  pull-requests: write
+  contents: read
+
+concurrency:
+  # Phase 2: schedule/workflow_run events use a different group key (no PR/Issue number)
+  group: retro-mandatory-${{ github.event.pull_request.number || github.event.issue.number || 'cron' }}
+  cancel-in-progress: false
+
+jobs:
+  retro-check:
+    # Phase 2 PR merge event 처리 — first attempt at PR merge + 5min grace
+    if: |
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Disable check (ADR-045 D-7)
+        id: enabled
+        run: |
+          if [ -f .codeforge/post-merge-automation.disabled ]; then
+            echo "disabled=true" >> $GITHUB_OUTPUT
+            echo "::warning::Retro mandatory workflow disabled by .codeforge/post-merge-automation.disabled"
+          else
+            echo "disabled=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Extract PR metadata
+        if: steps.enabled.outputs.disabled != 'true'
+        id: meta
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_LABELS_JSON: ${{ toJson(github.event.pull_request.labels) }}
+        run: |
+          # Skip chore PRs and multi-CFP aggregating PRs (post-merge-followup.yml mirror).
+          # CFP-NNN regex (case-insensitive uppercase normalize) + multi-CFP detection.
+          CFP_COUNT=$(echo "$PR_TITLE" | grep -oiE 'CFP-[0-9]+' | tr '[:lower:]' '[:upper:]' | sort -u | wc -l)
+          if [[ "$PR_TITLE" =~ ^chore[:\(] ]]; then
+            echo "::notice::Chore PR detected — skip retro check: $PR_TITLE"
+            echo "skip_reason=chore_prefix" >> $GITHUB_OUTPUT
+            echo "story_key=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          if [ "$CFP_COUNT" -gt 1 ]; then
+            echo "::notice::Multi-CFP aggregating PR — skip retro check: $PR_TITLE"
+            echo "skip_reason=multi_cfp" >> $GITHUB_OUTPUT
+            echo "story_key=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          STORY_KEY=$(echo "$PR_TITLE" | grep -oiE 'CFP-[0-9]+' | head -1 | tr '[:lower:]' '[:upper:]' || echo "")
+          PHASE=$(echo "$PR_TITLE" | grep -oE 'Phase [12]' | head -1 | tr -d ' ' || echo "")
+
+          # Phase marker check (D-1, D-3 — F-13 doc-only Story 정의 정합):
+          #   - PR title contains "Phase 2" → trigger (Phase 2 PR merge — primary trigger window)
+          #   - PR carries phase:보안-테스트 label → trigger (Phase 2 alternate marker)
+          #   - PR title contains "Phase 1" + non-Epic + Story file 의 phase=보안-테스트 도달 시 →
+          #     doc-only Story (ADR-027 Amendment 1 — Phase 2 PR scope 부재) 의 retro window (D-3)
+          #     Phase 1 fallback. 단 type:epic PR (Epic 자체 PR) 는 child Story retro 와 분리 (Story §13 EC-3 정합)
+          #
+          # IS_EPIC_PR (FIX iter 1 F-10 + F-13 — variable rename):
+          #   = type:epic label 부착 여부 (Epic 자체 PR 식별)
+          #   PHASE=Phase1 + IS_EPIC_PR=0 fallback 은 doc-only Story 후보 trigger (정확한 doc-only 판정 =
+          #   Story file frontmatter `phase: 보안-테스트` + Phase 2 PR 부재 — 본 workflow 가
+          #   Story file fetch 안 함, Phase 1 PR + non-Epic 가 candidate marker 만).
+          IS_PHASE2_LABEL=$(echo "$PR_LABELS_JSON" | jq -r '[.[] | select(.name == "phase:보안-테스트")] | length')
+          IS_EPIC_PR=$(echo "$PR_LABELS_JSON" | jq -r '[.[] | select(.name == "type:epic")] | length')
+
+          if [ "$PHASE" = "Phase2" ] || [ "$IS_PHASE2_LABEL" -gt 0 ]; then
+            TRIGGER_REASON="Phase 2 PR merge (primary)"
+          elif [ "$PHASE" = "Phase1" ] && [ "$IS_EPIC_PR" -eq 0 ]; then
+            # Phase 1 PR + non-Epic — doc-only Story candidate (D-3 fallback)
+            # 정확 doc-only 판정은 Story file phase 검사 영역 — 본 workflow scope 외 (Phase 2 implementation
+            # 영역에서 cross-repo Story fetch 후 phase 검증 가능).
+            TRIGGER_REASON="Phase 1 PR merge (doc-only Story candidate, D-3 fallback)"
+          elif [ -z "$PHASE" ] && [ "$IS_EPIC_PR" -eq 0 ]; then
+            # L5 fix (CFP-654) — Phase marker 부재 fallback (option C-prime PR convention).
+            # "[CFP-NNN] ..." title 패턴 + non-Epic → retro trigger (Phase marker 부재도 retro 의무 default).
+            # option C-prime PR = CFP-610 이후 single fix PR (Phase 1/2 marker 없는 단일 PR 패턴).
+            TRIGGER_REASON="Phase marker absent (option C-prime PR — L5 fallback, CFP-654)"
+          else
+            # Epic PR + Phase marker 부재 → skip (Epic-level retro 는 child Story 단위 처리)
+            echo "::notice::Epic PR with Phase marker absent — skip retro check (Epic-level retro 영역 외): $PR_TITLE"
+            echo "skip_reason=epic_pr_phase_marker_absent" >> $GITHUB_OUTPUT
+            echo "story_key=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "story_key=$STORY_KEY" >> $GITHUB_OUTPUT
+          echo "phase=$PHASE" >> $GITHUB_OUTPUT
+          echo "trigger_reason=$TRIGGER_REASON" >> $GITHUB_OUTPUT
+          echo "::notice::Extracted: story=$STORY_KEY, phase=$PHASE, trigger=$TRIGGER_REASON"
+
+      - name: Grace period wait (5min — ADR-045 D-1, first attempt at PR merge + 5min)
+        if: steps.enabled.outputs.disabled != 'true' && steps.meta.outputs.story_key != ''
+        run: |
+          echo "::notice::Waiting 5min grace period for PMOAgent retro write (first attempt at PR merge + 5min)..."
+          sleep 300
+
+      - name: Check gate:retro-complete label (FIX iter 1 F-2 — title 정확 매칭)
+        if: steps.enabled.outputs.disabled != 'true' && steps.meta.outputs.story_key != ''
+        id: gate_check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STORY_KEY: ${{ steps.meta.outputs.story_key }}
+        run: |
+          # L6 fix (CFP-659) — codeforge convention: CFP-NNN ↔ Issue #NNN direct mapping.
+          # search logic 제거 (title prefix + type:story label assumption systematic mismatch 차단).
+          # 이전 prefix collision 우려 (CFP-138 vs CFP-1380) 는 direct mapping 안전 (exact ID).
+          STORY_NUM=$(echo "$STORY_KEY" | grep -oE '[0-9]+')
+
+          if [ -z "$STORY_NUM" ]; then
+            echo "::warning::Failed to extract Issue number from STORY_KEY=${STORY_KEY}"
+            echo "outcome=skip_no_issue" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Verify Issue exists (CFP-NNN ↔ Issue #N mapping)
+          ISSUE_STATE=$(gh issue view "$STORY_NUM" --json state --jq '.state' 2>/dev/null || echo "NOT_FOUND")
+          if [ "$ISSUE_STATE" = "NOT_FOUND" ]; then
+            echo "::warning::Issue #${STORY_NUM} not found (CFP-NNN ↔ Issue #N mapping fail)"
+            echo "outcome=skip_no_issue" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          ISSUE_NUM=$STORY_NUM
+
+          # Check if gate:retro-complete label attached
+          ISSUE_LABELS=$(gh issue view "$ISSUE_NUM" --json labels --jq '[.labels[].name] | join(",")')
+          GATE_PRESENT=$(echo "$ISSUE_LABELS" | grep -q "gate:retro-complete" && echo "true" || echo "false")
+
+          # L3 fix (CFP-650) — actual retro file 존재 cross-validate (gate label ↔ file mismatch 차단)
+          # internal-docs repo 안 wrapper/retros/ 디렉터리 file 검색
+          # file naming convention: <YYYY-MM-DD>-cfp-<NNN>.md / EPIC-RESULTS-CFP-<NNN>.md / cfp-<NNN>-slug.md 등
+          RETRO_FILE_EXISTS="false"
+          if [ -n "${GH_TOKEN:-}" ]; then
+            STORY_NUM=$(echo "$STORY_KEY" | grep -oE '[0-9]+')
+            if [ -n "$STORY_NUM" ]; then
+              RETRO_HITS=$(gh api repos/mclayer/codeforge-internal-docs/contents/wrapper/retros \
+                --jq "[.[] | select(.name | test(\"cfp-${STORY_NUM}\"; \"i\"))] | length" 2>/dev/null || echo "0")
+              [ "$RETRO_HITS" -gt 0 ] && RETRO_FILE_EXISTS="true"
+            fi
+          fi
+
+          # Outcome 분기 (L3 추가):
+          # - gate ✓ + file ✓ → pass (정상 retro 완료)
+          # - gate ✓ + file ✗ → missing_file_despite_gate (L3 mismatch — false positive gate label, retry trigger)
+          # - gate ✗ → missing_gate (기존 logic)
+          if [ "$GATE_PRESENT" = "true" ] && [ "$RETRO_FILE_EXISTS" = "true" ]; then
+            echo "::notice::Issue #$ISSUE_NUM has gate:retro-complete + retro file ✓ — retro write confirmed"
+            echo "outcome=pass" >> $GITHUB_OUTPUT
+          elif [ "$GATE_PRESENT" = "true" ] && [ "$RETRO_FILE_EXISTS" = "false" ]; then
+            echo "::warning::Issue #$ISSUE_NUM has gate:retro-complete but retro file MISSING (L3 mismatch — CFP-650)"
+            echo "outcome=missing_file_despite_gate" >> $GITHUB_OUTPUT
+          else
+            echo "::warning::Issue #$ISSUE_NUM missing gate:retro-complete after 5min grace (first attempt)"
+            echo "outcome=missing_gate" >> $GITHUB_OUTPUT
+          fi
+          echo "issue_num=$ISSUE_NUM" >> $GITHUB_OUTPUT
+
+      - name: Auto-attach gate:retro-complete label (L4 fix — CFP-650)
+        if: |
+          steps.enabled.outputs.disabled != 'true' &&
+          steps.gate_check.outputs.outcome == 'pass' &&
+          steps.meta.outputs.story_key != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ISSUE_NUM='${{ steps.gate_check.outputs.issue_num }}'
+          # L4 fix (CFP-650) — gate ✓ + file ✓ 시 idempotent label add (이미 부착 시 no-op)
+          # 본 step 은 outcome=pass 시에만 실행 — false positive label 부착 방지
+          gh issue edit "$ISSUE_NUM" --add-label "gate:retro-complete" 2>/dev/null || true
+          echo "::notice::Auto-attached gate:retro-complete to Issue #$ISSUE_NUM (idempotent)"
+
+      - name: Post comment + mark for retry (ADR-045 D-4)
+        if: |
+          steps.enabled.outputs.disabled != 'true' &&
+          (steps.gate_check.outputs.outcome == 'missing_gate' || steps.gate_check.outputs.outcome == 'missing_file_despite_gate')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ISSUE_NUM='${{ steps.gate_check.outputs.issue_num }}'
+
+          # Idempotent comment — check if [PMO] retro alert already posted (avoid spam on retry)
+          EXISTING_ALERT=$(gh issue view "$ISSUE_NUM" --json comments --jq '[.comments[] | select(.body | startswith("[PMO] Retro mandatory check"))] | length')
+
+          if [ "$EXISTING_ALERT" -eq 0 ]; then
+            PR_NUM="${{ github.event.pull_request.number }}"
+            TRIGGER_REASON="${{ steps.meta.outputs.trigger_reason }}"
+            COMMENT_BODY=$(printf '%s\n\n%s\n%s\n\n%s\n%s\n%s\n%s\n%s\n\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n\n%s\n\n%s' \
+              "[PMO] Retro mandatory check (CFP-138 / ADR-045)" \
+              "Phase 2 PR #${PR_NUM} merged ${TRIGGER_REASON}." \
+              "First attempt (PR merge + 5min grace) 후에도 gate:retro-complete label 부재 — retro 자동 작성 trigger 필요." \
+              "**Action required**:" \
+              "1. PMOAgent re-spawn (Orchestrator 자동 또는 사용자 요청)" \
+              "2. retro file 작성 → <internal-docs>/wrapper/retros/<sprint>-cfp-NNN-<slug>.md" \
+              "3. Story §11 schema update (retro_file / retro_summary / learnings_count / feedback_back_to_codeforge)" \
+              "4. gate:retro-complete label add (PMOAgent self-write)" \
+              "**Retry policy** (ADR-045 D-4 cumulative offset from PR merge):" \
+              "- First attempt: PR merge + 5min  (grace period — 본 attempt fail)" \
+              "- Retry 1:        PR merge + 10min (5min wait)" \
+              "- Retry 2:        PR merge + 20min (10min wait)" \
+              "- Retry 3:        PR merge + 35min (15min wait, final attempt)" \
+              "- Total attempts = 4 (1 initial + 3 retries)" \
+              "- Total max latency = 35min from PR merge → ESCALATE 사용자 + Story close 차단 유지" \
+              "본 alert 는 retry 시 중복 게시 안 함 (idempotent)." \
+              "NOTE: Phase 1 PR scope 본 workflow = first attempt 만 implement. retry 1/2/3 state machine = Phase 2 PR scope deferred (ADR-045 §D-4 Phase 2 implementation spec).")
+            gh issue comment "$ISSUE_NUM" --body "$COMMENT_BODY"
+            echo "::notice::[PMO] retro alert posted on Issue #$ISSUE_NUM"
+          else
+            echo "::notice::[PMO] retro alert already posted on Issue #$ISSUE_NUM (idempotent skip)"
+          fi
+
+      - name: Write initial attempt to retro-attempts.jsonl (ADR-045 §D-4 Phase 2)
+        # Phase 2 addition: record first attempt in internal-docs retro-attempts.jsonl.
+        # Uses CODEFORGE_CROSS_REPO_PAT (contents:write on mclayer/codeforge-internal-docs).
+        # FIX iter 1 C-1 fix: git clone+commit+push → Pattern A (Contents API SHA-based optimistic concurrency).
+        # Long-lived branch `retro-attempts-state` (mirrors telemetry-counters pattern from ADR-026 / post-merge-telemetry.sh).
+        # Idempotent: check if same story_key already recorded before appending.
+        if: |
+          steps.enabled.outputs.disabled != 'true' &&
+          steps.gate_check.outputs.outcome == 'missing_gate'
+        env:
+          GH_TOKEN: ${{ secrets.CODEFORGE_CROSS_REPO_PAT }}
+          STORY_KEY: ${{ steps.meta.outputs.story_key }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # CFP-645 fix — secrets context if-conditional 제거 (Actions runtime parse error 해소).
+          # PAT 부재 시 graceful skip (ADR-066 정합).
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning::CODEFORGE_CROSS_REPO_PAT secret not configured — skipping retro-attempts.jsonl append"
+            exit 0
+          fi
+          INTERNAL_DOCS_REPO="mclayer/codeforge-internal-docs"
+          JSONL_BRANCH="retro-attempts-state"
+          JSONL_PATH="wrapper/retro-attempts.jsonl"
+          TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          ENTRY="{\"story_key\": \"$STORY_KEY\", \"pr_ref\": \"mclayer/plugin-codeforge#${PR_NUM}\", \"attempt_n\": 1, \"last_attempted_at\": \"$TIMESTAMP\", \"status\": \"in_flight\"}"
+
+          # Ensure long-lived retro-attempts-state branch exists (idempotent)
+          MAIN_SHA=$(gh api "repos/${INTERNAL_DOCS_REPO}/git/refs/heads/main" --jq '.object.sha')
+          gh api -X POST "repos/${INTERNAL_DOCS_REPO}/git/refs" \
+            -f ref="refs/heads/${JSONL_BRANCH}" -f sha="$MAIN_SHA" 2>/dev/null || true
+
+          # Pattern A: Contents API SHA-based optimistic concurrency (retry max 3, jitter sleep)
+          # Mirror of post-merge-telemetry.sh (ADR-026 §결정 4 / domain-knowledge/jsonl-write/race-condition-handling-pattern.md)
+          # CFP-289: 4xx → no-retry immediate fail; 5xx → exponential backoff (2s/4s/8s);
+          #          exhausted → stderr ::error:: + exit 1 (never silent drop);
+          #          all diagnostic output → stderr (>&2).
+          MAX_RETRIES=3
+          BACKOFF_DELAYS=(2 4 8)
+          WRITE_SUCCESS=0
+          for ATTEMPT in $(seq 1 $((MAX_RETRIES + 1))); do
+            # Fetch current file content + SHA from retro-attempts-state branch
+            RESPONSE=$(gh api "repos/${INTERNAL_DOCS_REPO}/contents/${JSONL_PATH}?ref=${JSONL_BRANCH}" 2>/dev/null || echo "null")
+            if [ "$RESPONSE" = "null" ]; then
+              # File does not exist yet
+              EXISTING=""
+              CURRENT_SHA=""
+            else
+              EXISTING=$(echo "$RESPONSE" | python3 -c "import json,sys,base64; d=json.load(sys.stdin); print(base64.b64decode(d['content']).decode())" 2>/dev/null || echo "")
+              CURRENT_SHA=$(echo "$RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin)['sha'])" 2>/dev/null || echo "")
+            fi
+
+            # Idempotency: check if same story_key already recorded
+            if echo "$EXISTING" | grep -q "\"story_key\": \"$STORY_KEY\"" 2>/dev/null; then
+              echo "::notice::retro-attempts.jsonl already has entry for $STORY_KEY — idempotent skip"
+              exit 0
+            fi
+
+            # Build new content (append ENTRY)
+            if [[ -n "$EXISTING" ]]; then
+              NEW_CONTENT=$(printf '%s\n%s\n' "${EXISTING%$'\n'}" "$ENTRY")
+            else
+              NEW_CONTENT=$(printf '%s\n' "$ENTRY")
+            fi
+            NEW_CONTENT_B64=$(printf '%s' "$NEW_CONTENT" | base64 -w0)
+
+            # PUT with SHA (create or update) — 409 on SHA conflict = concurrent write, retry
+            PUT_ARGS=(-X PUT "repos/${INTERNAL_DOCS_REPO}/contents/${JSONL_PATH}"
+              -f message="retro-attempts: record first attempt for $STORY_KEY (CFP-138 / ADR-045 §D-4)"
+              -f content="$NEW_CONTENT_B64"
+              -f branch="${JSONL_BRANCH}")
+            if [[ -n "$CURRENT_SHA" ]]; then
+              PUT_ARGS+=(-f sha="$CURRENT_SHA")
+            fi
+
+            # Capture response header (avoid pipefail on 4xx/5xx)
+            mkdir -p /tmp/retro-state
+            gh api "${PUT_ARGS[@]}" -i > /tmp/retro-state/put-response.txt 2>/dev/null || true
+            HTTP_CODE=$(head -1 /tmp/retro-state/put-response.txt | grep -o '[0-9]\{3\}' || echo "0")
+            if echo "$HTTP_CODE" | grep -qE '^(200|201)$'; then
+              echo "::notice::retro-attempts.jsonl updated (attempt $ATTEMPT): $ENTRY"
+              WRITE_SUCCESS=1
+              break
+            elif echo "$HTTP_CODE" | grep -q '^409$'; then
+              # SHA conflict — re-fetch SHA on next iteration, jitter sleep
+              echo "::warning::SHA conflict (HTTP 409) on attempt $ATTEMPT — re-fetch SHA + jitter retry" >&2
+              sleep $(( RANDOM % 5 + 1 ))
+            elif echo "$HTTP_CODE" | grep -qE '^4[0-9]{2}$'; then
+              # 4xx client error — no retry (CFP-289 Pattern A semantics)
+              echo "::error::4xx client error (HTTP ${HTTP_CODE}) on attempt $ATTEMPT — no retry, aborting" >&2
+              exit 1
+            else
+              # 5xx or network error — exponential backoff (CFP-289 Pattern A semantics)
+              IDX=$(( ATTEMPT - 1 ))
+              DELAY=${BACKOFF_DELAYS[$IDX]:-8}
+              echo "::warning::5xx/network error (HTTP ${HTTP_CODE}) on attempt $ATTEMPT — backoff ${DELAY}s" >&2
+              [ "$ATTEMPT" -lt $((MAX_RETRIES + 1)) ] && sleep "$DELAY"
+            fi
+          done
+          if [ "$WRITE_SUCCESS" -ne 1 ]; then
+            echo "::error::Pattern A retries exhausted for $STORY_KEY write (attempt_n=1) — entry NOT written" >&2
+            exit 1
+          fi
+
+  close-blocking:
+    # Issue close event 처리 — gate:retro-complete 부재 시 자동 reopen (UC-2 정합)
+    if: github.event_name == 'issues' && github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Disable check
+        id: enabled
+        run: |
+          if [ -f .codeforge/post-merge-automation.disabled ]; then
+            echo "disabled=true" >> $GITHUB_OUTPUT
+          else
+            echo "disabled=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Validate retro before allowing close
+        if: steps.enabled.outputs.disabled != 'true'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const labels = issue.labels.map(l => l.name);
+
+            // Skip non-Story issues
+            const isStory = labels.includes('type:story');
+            if (!isStory) {
+              core.info(`Issue #${issue.number} is not type:story — skip retro check`);
+              return;
+            }
+
+            // Skip Issues that are not at terminal phase (early-close already handled by phase-label-invariant.yml)
+            const isTerminalPhase = labels.includes('phase:보안-테스트');
+            const isEarlyClose = labels.some(l => l.startsWith('early-close:'));
+
+            if (isEarlyClose) {
+              core.info(`Issue #${issue.number} early-close — skip retro mandate (out-of-scope)`);
+              return;
+            }
+
+            if (!isTerminalPhase) {
+              core.info(`Issue #${issue.number} not at terminal phase — phase-label-invariant.yml handles`);
+              return;
+            }
+
+            // Check gate:retro-complete
+            const hasRetroGate = labels.includes('gate:retro-complete');
+            if (hasRetroGate) {
+              core.info(`Issue #${issue.number} has gate:retro-complete — close allowed`);
+              return;
+            }
+
+            // ADR-045 D-4: close-blocking via auto-reopen (idempotent — workflow re-run시 same result)
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              state: 'open'
+            });
+
+            const body = `[PMO] Retro mandatory close-block (CFP-138 / ADR-045)\n\n` +
+              `Story Issue close attempted without \`gate:retro-complete\` label.\n\n` +
+              `**Auto-reopened** — retro 작성 후 close 가능 (forcing function, ADR-045 D-4).\n\n` +
+              `**Action required**:\n` +
+              `1. PMOAgent retro write 완료\n` +
+              `2. \`gate:retro-complete\` label 부착\n` +
+              `3. Issue close 재시도\n\n` +
+              `**Retry policy** (ADR-045 D-4 — cumulative offset):\n` +
+              `- First attempt: PR merge + 5min (grace) — fail\n` +
+              `- Retry 1: PR merge + 10min  /  Retry 2: PR merge + 20min  /  Retry 3: PR merge + 35min\n` +
+              `- Total = 4 attempts (1 initial + 3 retries) / max latency 35min from PR merge → ESCALATE\n\n` +
+              `면제 경로: \`early-close:*\` label 부착 (Epic rolled-up / duplicate / reclassified — ADR-026 / phase-label-invariant.yml 정합).`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              body: body
+            });
+
+            core.warning(`Issue #${issue.number} auto-reopened — retro mandatory missing`);
+
+  retry-state-machine:
+    # Phase 2 retry job (ADR-045 §D-4 Phase 2 implementation spec — CFP-138).
+    # Triggers on schedule only (cron */5 * * * *).
+    # FIX iter 1 A-2 fix: workflow_run trigger 제거 (infinite loop risk — ADR-045 §D-4 amendment_id=1).
+    # Reads retro-attempts.jsonl from internal-docs via Contents API (Pattern A — no git clone).
+    # State machine: attempt_n 1→2: 5min wait, 2→3: 10min wait, 3→4: 15min wait.
+    # After attempt_n=4 fail: ESCALATE comment + status=escalated.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: PAT presence check (CFP-645 fix — secrets context job-if 제거)
+        id: pat_check
+        env:
+          GH_TOKEN: ${{ secrets.CODEFORGE_CROSS_REPO_PAT }}
+        run: |
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning::CODEFORGE_CROSS_REPO_PAT secret not configured — retry-state-machine job skipped (ADR-066 정합)"
+            echo "pat_present=false" >> $GITHUB_OUTPUT
+          else
+            echo "pat_present=true" >> $GITHUB_OUTPUT
+          fi
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        if: steps.pat_check.outputs.pat_present == 'true'
+
+      - name: Disable check (ADR-045 D-7)
+        id: enabled
+        if: steps.pat_check.outputs.pat_present == 'true'
+        run: |
+          if [ -f .codeforge/post-merge-automation.disabled ]; then
+            echo "disabled=true" >> $GITHUB_OUTPUT
+            echo "::warning::Retro retry state machine disabled by .codeforge/post-merge-automation.disabled"
+          else
+            echo "disabled=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Fetch retro-attempts.jsonl via Contents API + run retry helper
+        # FIX iter 1 C-1 fix: git clone → Contents API (Pattern A read path).
+        # Write path (success/escalated/retry) also Pattern A below.
+        if: steps.pat_check.outputs.pat_present == 'true' && steps.enabled.outputs.disabled != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.CODEFORGE_CROSS_REPO_PAT }}
+        run: |
+          set -euo pipefail
+          INTERNAL_DOCS_REPO="mclayer/codeforge-internal-docs"
+          JSONL_BRANCH="retro-attempts-state"
+          JSONL_PATH="wrapper/retro-attempts.jsonl"
+
+          # Fetch retro-attempts.jsonl from retro-attempts-state branch via Contents API
+          RESPONSE=$(gh api "repos/${INTERNAL_DOCS_REPO}/contents/${JSONL_PATH}?ref=${JSONL_BRANCH}" 2>/dev/null || echo "null")
+          if [ "$RESPONSE" = "null" ]; then
+            echo "::notice::retro-attempts.jsonl not found on ${JSONL_BRANCH} branch — no pending retries"
+            exit 0
+          fi
+
+          JSONL_CONTENT=$(echo "$RESPONSE" | python3 -c "import json,sys,base64; d=json.load(sys.stdin); print(base64.b64decode(d['content']).decode())" 2>/dev/null || echo "")
+          if [ -z "$JSONL_CONTENT" ]; then
+            echo "::notice::retro-attempts.jsonl is empty — no pending retries"
+            exit 0
+          fi
+
+          # Write content to temp file for retry helper
+          mkdir -p /tmp/retro-state
+          printf '%s' "$JSONL_CONTENT" > /tmp/retro-state/retro-attempts.jsonl
+
+          # Run retry helper to find due entries
+          CURRENT_EPOCH=$(date +%s)
+          DUE_ENTRIES=$(bash "$GITHUB_WORKSPACE/scripts/retro-retry-helper.sh" "/tmp/retro-state/retro-attempts.jsonl" "$CURRENT_EPOCH")
+
+          if [ -z "$DUE_ENTRIES" ]; then
+            echo "::notice::No due retry entries found"
+            exit 0
+          fi
+
+          # Store due entries for subsequent Pattern A write steps
+          printf '%s' "$DUE_ENTRIES" > /tmp/retro-state/due-entries.jsonl
+          echo "::notice::Due entries found: $(echo "$DUE_ENTRIES" | wc -l) line(s)"
+
+      - name: Process due retries with Pattern A JSONL writes
+        # FIX iter 1 C-1 fix: 3 git push points (success/escalated/retry) → Pattern A.
+        # Contents API PUT with SHA-based optimistic concurrency, retry max 3, jitter sleep.
+        # Long-lived branch `retro-attempts-state` (ADR-026 §결정 4 — main 직접 push 금지).
+        if: steps.pat_check.outputs.pat_present == 'true' && steps.enabled.outputs.disabled != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.CODEFORGE_CROSS_REPO_PAT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          INTERNAL_DOCS_REPO="mclayer/codeforge-internal-docs"
+          JSONL_BRANCH="retro-attempts-state"
+          JSONL_PATH="wrapper/retro-attempts.jsonl"
+          MAX_RETRIES=3
+
+          DUE_FILE="/tmp/retro-state/due-entries.jsonl"
+          if [ ! -f "$DUE_FILE" ]; then
+            echo "::notice::No due-entries.jsonl — nothing to process"
+            exit 0
+          fi
+
+          # Helper: Pattern A write — update single story_key record in JSONL via Contents API
+          # Args: $1=story_key $2=new_status $3=new_attempt_n $4=timestamp $5=commit_msg
+          # CFP-289: 4xx → no-retry immediate fail; 5xx → exponential backoff (2s/4s/8s);
+          #          exhausted → stderr ::error:: + return 1 (never silent drop);
+          #          all diagnostic output → stderr (>&2).
+          pattern_a_write() {
+            local STORY_KEY="$1"
+            local NEW_STATUS="$2"
+            local NEW_ATTEMPT_N="$3"
+            local TIMESTAMP="$4"
+            local COMMIT_MSG="$5"
+            local BACKOFF_DELAYS=(2 4 8)
+            local WRITE_SUCCESS=0
+
+            for PUT_ATTEMPT in $(seq 1 $((MAX_RETRIES + 1))); do
+              # Fetch latest content + SHA from retro-attempts-state branch
+              RESPONSE=$(gh api "repos/${INTERNAL_DOCS_REPO}/contents/${JSONL_PATH}?ref=${JSONL_BRANCH}" 2>/dev/null || echo "null")
+              if [ "$RESPONSE" = "null" ]; then
+                echo "::error::retro-attempts.jsonl vanished during update for $STORY_KEY" >&2
+                return 1
+              fi
+              CURRENT_SHA=$(echo "$RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin)['sha'])" 2>/dev/null || echo "")
+              # Write current JSONL content to temp file (avoids shell quoting issues with JSON data in heredocs)
+              echo "$RESPONSE" | python3 -c "import json,sys,base64; d=json.load(sys.stdin); open('/tmp/retro-state/current.jsonl','w').write(base64.b64decode(d['content']).decode())" 2>/dev/null || true
+
+              # Update target story_key record via env vars + file I/O (safe from quoting)
+              # ADR-061 §결정 1 — multi-line Python 외부 스크립트 위임
+              export _SK="$STORY_KEY" _NS="$NEW_STATUS" _TS="$TIMESTAMP" _NA="$NEW_ATTEMPT_N"
+              NEW_CONTENT=$(python3 "$GITHUB_WORKSPACE/scripts/retro-attempts-update.py")
+              NEW_CONTENT_B64=$(printf '%s' "$NEW_CONTENT" | base64 -w0)
+
+              # PUT with current SHA (409 = concurrent write → retry with jitter)
+              PUT_ARGS=(-X PUT "repos/${INTERNAL_DOCS_REPO}/contents/${JSONL_PATH}"
+                -f message="$COMMIT_MSG"
+                -f content="$NEW_CONTENT_B64"
+                -f branch="${JSONL_BRANCH}")
+              if [[ -n "$CURRENT_SHA" ]]; then
+                PUT_ARGS+=(-f sha="$CURRENT_SHA")
+              fi
+
+              # PUT with current SHA — capture response header + body; avoid pipefail triggering on 4xx/5xx
+              gh api "${PUT_ARGS[@]}" -i > /tmp/retro-state/put-response.txt 2>/dev/null || true
+              HTTP_CODE=$(head -1 /tmp/retro-state/put-response.txt | grep -o '[0-9]\{3\}' || echo "0")
+              if echo "$HTTP_CODE" | grep -qE '^(200|201)$'; then
+                echo "::notice::Pattern A write success (${STORY_KEY} → status=${NEW_STATUS}, attempt_n=${NEW_ATTEMPT_N}, put_attempt=${PUT_ATTEMPT})"
+                WRITE_SUCCESS=1
+                break
+              elif echo "$HTTP_CODE" | grep -q '^409$'; then
+                # SHA conflict — re-fetch SHA on next iteration, jitter sleep
+                echo "::warning::SHA conflict (HTTP 409) on put_attempt ${PUT_ATTEMPT} for ${STORY_KEY} — re-fetch + jitter retry" >&2
+                sleep $(( RANDOM % 5 + 1 ))
+              elif echo "$HTTP_CODE" | grep -qE '^4[0-9]{2}$'; then
+                # 4xx client error — no retry (CFP-289 Pattern A semantics)
+                echo "::error::4xx client error (HTTP ${HTTP_CODE}) on put_attempt ${PUT_ATTEMPT} for ${STORY_KEY} — no retry" >&2
+                return 1
+              else
+                # 5xx or network error — exponential backoff (CFP-289 Pattern A semantics)
+                IDX=$(( PUT_ATTEMPT - 1 ))
+                DELAY=${BACKOFF_DELAYS[$IDX]:-8}
+                echo "::warning::5xx/network error (HTTP ${HTTP_CODE}) on put_attempt ${PUT_ATTEMPT} for ${STORY_KEY} — backoff ${DELAY}s" >&2
+                [ "$PUT_ATTEMPT" -lt $((MAX_RETRIES + 1)) ] && sleep "$DELAY"
+              fi
+            done
+            if [ "$WRITE_SUCCESS" -ne 1 ]; then
+              echo "::error::Pattern A retries exhausted for ${STORY_KEY} (status=${NEW_STATUS}) — entry NOT written" >&2
+              return 1
+            fi
+            return 0
+          }
+
+          while IFS= read -r entry; do
+            [ -z "$entry" ] && continue
+            STORY_KEY=$(echo "$entry" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['story_key'])" 2>/dev/null || echo "")
+            ATTEMPT_N=$(echo "$entry" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['attempt_n'])" 2>/dev/null || echo "0")
+            PR_REF=$(echo "$entry" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['pr_ref'])" 2>/dev/null || echo "")
+
+            if [ -z "$STORY_KEY" ]; then
+              echo "::warning::Skipping malformed entry: $entry"
+              continue
+            fi
+
+            NEW_ATTEMPT_N=$((ATTEMPT_N + 1))
+            TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+            # Find Story Issue (L6 fix CFP-659 — CFP-NNN ↔ Issue #NNN direct mapping)
+            STORY_NUM_RETRY=$(echo "$STORY_KEY" | grep -oE '[0-9]+')
+            if [ -z "$STORY_NUM_RETRY" ]; then
+              echo "::warning::Failed to extract Issue number from STORY_KEY=${STORY_KEY} — skip retry"
+              continue
+            fi
+            ISSUE_STATE_RETRY=$(gh issue view "$STORY_NUM_RETRY" --json state --jq '.state' 2>/dev/null || echo "NOT_FOUND")
+            if [ "$ISSUE_STATE_RETRY" = "NOT_FOUND" ]; then
+              echo "::warning::Issue #${STORY_NUM_RETRY} not found for $STORY_KEY — skip retry"
+              continue
+            fi
+            ISSUE_NUM=$STORY_NUM_RETRY
+
+            # Check if gate:retro-complete already attached (success case)
+            ISSUE_LABELS=$(gh issue view "$ISSUE_NUM" --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+            if echo "$ISSUE_LABELS" | grep -q "gate:retro-complete"; then
+              echo "::notice::Issue #$ISSUE_NUM ($STORY_KEY) has gate:retro-complete — marking success"
+              # Pattern A write: status=success (attempt_n unchanged = 0 sentinel → skip update)
+              pattern_a_write "$STORY_KEY" "success" "0" "$TIMESTAMP" \
+                "retro-attempts: mark $STORY_KEY success (gate:retro-complete detected)"
+              continue
+            fi
+
+            # Determine if this is final attempt (attempt_n=4 = retry 3) → ESCALATE
+            if [ "$ATTEMPT_N" -ge 4 ]; then
+              echo "::warning::$STORY_KEY retry 3 (attempt_n=4) failed — ESCALATE"
+              ESCALATE_BODY=$(printf '%s\n\n%s\n\n%s\n%s\n%s\n%s\n%s\n\n%s' \
+                "[PMO] Retro automation failed after 3 retries (CFP-138 / ADR-045)" \
+                "Story ${STORY_KEY} has been through 4 attempts (1 initial + 3 retries) without gate:retro-complete label." \
+                "**ESCALATE — manual intervention required**:" \
+                "1. Orchestrator 또는 사용자 manual PMOAgent spawn" \
+                "2. retro file 작성 → <internal-docs>/wrapper/retros/<date>-cfp-NNN-<slug>.md" \
+                "3. Story §11 4-field schema 갱신" \
+                "4. gate:retro-complete label 수동 부착" \
+                "Story close 차단 유지 (forcing function — ADR-045 D-4).")
+              gh issue comment "$ISSUE_NUM" --body "$ESCALATE_BODY"
+
+              # Pattern A write: status=escalated
+              pattern_a_write "$STORY_KEY" "escalated" "0" "$TIMESTAMP" \
+                "retro-attempts: mark $STORY_KEY escalated (4 attempts exhausted)"
+              continue
+            fi
+
+            # Post retry comment to trigger PMOAgent
+            RETRY_NUM=$((ATTEMPT_N))
+            STORY_KEY_LOWER=$(echo "$STORY_KEY" | tr '[:upper:]' '[:lower:]')
+            REMAINING=$(( 4 - NEW_ATTEMPT_N ))
+            RETRY_BODY=$(printf '%s\n\n%s\n\n%s\n%s\n%s\n%s\n\n%s' \
+              "[PMO] Retro mandatory retry ${RETRY_NUM} (CFP-138 / ADR-045)" \
+              "Story ${STORY_KEY} — retry ${RETRY_NUM} of 3. gate:retro-complete label still absent after attempt ${ATTEMPT_N}." \
+              "**Action required**:" \
+              "1. PMOAgent retro write (Orchestrator 또는 사용자 요청)" \
+              "2. retro file → <internal-docs>/wrapper/retros/<date>-${STORY_KEY_LOWER}-<slug>.md" \
+              "3. Story §11 4-field schema update / 4. gate:retro-complete label 부착" \
+              "(Retry ${RETRY_NUM} / 3 — remaining: ${REMAINING} retry(s) + ESCALATE if all fail)")
+            gh issue comment "$ISSUE_NUM" --body "$RETRY_BODY"
+
+            # Pattern A write: advance attempt_n + status=in_flight
+            pattern_a_write "$STORY_KEY" "in_flight" "$NEW_ATTEMPT_N" "$TIMESTAMP" \
+              "retro-attempts: advance $STORY_KEY to attempt_n=$NEW_ATTEMPT_N (retry $RETRY_NUM)"
+
+            echo "::notice::$STORY_KEY retry $RETRY_NUM dispatched (attempt_n advanced to $NEW_ATTEMPT_N)"
+          done < "$DUE_FILE"

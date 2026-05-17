@@ -1,0 +1,62 @@
+name: CFP reservation cleanup (30-day auto-close)
+
+# CFP-260 / ADR-036 결정 4 — 30 일 미진행 reservation Issue 자동 close.
+# Trigger: daily cron (02:00 UTC) + manual dispatch.
+# Filter: state:open + label phase:reservation + created_at < 30 days ago.
+# Action: comment + close (reason=not_planned).
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Close stale reservations (>30 days)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # 30-day cutoff (ISO 8601)
+          CUTOFF=$(date -u -d '30 days ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+                  || date -u -v-30d '+%Y-%m-%dT%H:%M:%SZ')
+
+          echo "::notice::cutoff = $CUTOFF — reservations created before this auto-close"
+
+          # Search open phase:reservation Issues created before cutoff
+          STALE=$(gh issue list \
+                    --repo "$REPO" \
+                    --label "phase:reservation" \
+                    --state open \
+                    --search "created:<${CUTOFF}" \
+                    --limit 100 \
+                    --json number,title,createdAt \
+                    --jq '.[].number')
+
+          if [[ -z "$STALE" ]]; then
+            echo "::notice::no stale reservations found"
+            exit 0
+          fi
+
+          for n in $STALE; do
+            echo "::notice::closing reservation #$n (>30 days)"
+            COMMENT_BODY=$(printf '%s\n\n%s\n\n%s\n%s\n%s\n%s\n\n%s' \
+              "## [reservation-cleanup] Auto-close (30-day TTL expired)" \
+              "본 reservation Issue 는 30 일 동안 promotion 없이 유지되어 자동 close 됩니다 (ADR-036 / CFP-260 Option B)." \
+              "재 활성화 필요 시:" \
+              "1. 본 Issue 재 open" \
+              "2. body 갱신 + label phase:reservation 유지 또는 phase:요구사항 + type:story 로 promote" \
+              "3. 새 30-day TTL 시작 (재 open 시점 기준)" \
+              "원본 KEY (CFP-<#>) 는 GitHub Issue # 보존 정책에 따라 영구 보존 — 다른 Story 가 재사용 불가.")
+            gh issue comment "$n" --repo "$REPO" --body "$COMMENT_BODY"
+            gh issue close "$n" --repo "$REPO" --reason "not_planned"
+          done
+
+          echo "::notice::closed $(echo "$STALE" | wc -l) stale reservation(s)"

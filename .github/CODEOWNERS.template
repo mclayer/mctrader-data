@@ -1,0 +1,20 @@
+# CodeForge plugin이 권장하는 CODEOWNERS template
+# consumer가 자기 organization team으로 placeholder 치환 후 .github/CODEOWNERS로 복사
+
+# 설계 결정 (ADR) — architect team 의무 review
+docs/adr/**                                   @ORG/ARCHITECT_TEAM
+
+# 변경 계획 (Change Plan) — architect team 의무 review
+docs/change-plans/**                          @ORG/ARCHITECT_TEAM
+
+# Story 페이지 — architect team review (Phase 1 PR 자동 결재)
+docs/stories/**                               @ORG/ARCHITECT_TEAM
+
+# Domain Knowledge — domain expert team review
+docs/domain-knowledge/**                      @ORG/DOMAIN_EXPERT_TEAM
+
+# GitHub Workflow 변경 — architect team review (security-sensitive)
+.github/workflows/**                          @ORG/ARCHITECT_TEAM
+
+# Plugin overlay 설정 — architect team review
+.claude/_overlay/**                           @ORG/ARCHITECT_TEAM

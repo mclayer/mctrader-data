@@ -15,9 +15,7 @@ env:
   # story_uri (PR-body self-declared) 의 host+owner/repo 를 이 목록과 strict match.
   # consumer overlay: .claude/_overlay/project.yaml phase_gate.allowed_hub_repos[] 로 확장 가능 (ADR-057 정합 — 축소 불가).
   # 화이트리스트 미일치 시 즉시 cond2=false (fail-closed). PR body derive 절대 금지 (zero-trust).
-  # consumer overlay (mctrader-data): mctrader-hub 가 본 repo 의 Story SSOT 보유 — MCT-NNN.md §10 FIX Ledger binding source.
-  # dogfood default codeforge-internal-docs 유지 + mctrader-hub 확장 (ADR-057 정합 — 축소 불가, 확장 only).
-  ALLOWED_HUB_REPOS: "github.com/mclayer/codeforge-internal-docs,github.com/mclayer/mctrader-hub"
+  ALLOWED_HUB_REPOS: "github.com/mclayer/codeforge-internal-docs"
 
 jobs:
   check-gate:

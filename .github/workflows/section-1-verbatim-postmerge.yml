@@ -1,0 +1,193 @@
+name: section-1-verbatim-postmerge
+# CFP-658 Phase 2 / ADR-027 Amendment 2 §결정 6.C / ADR-060 evidence-enforceable framework
+# Tier: warning (advisory — hard block 아님, ADR-060 §결정 5 first-intro mode)
+# evidence-checks-registry.yaml entry: section-1-verbatim-postmerge (current_tier=warning)
+#
+# 책임:
+#   Phase 2 PR merge 직후 Story §1 ↔ Issue body §1 byte-identical 검증.
+#   manual fallback path (ADR-027 §결정 6.A) 에서 §1 임의 변조 vector 차단 forcing function.
+#   drift 발견 시 hotfix-bypass:section-1-verbatim-postmerge label audit comment 자동 발의.
+#
+# 검증 흐름:
+#   1. PR merge 이벤트에서 Story KEY 추출 (PR title regex — CFP-NNN 또는 KEY-prefix-NNN)
+#   2. docs/stories/<KEY>.md §1 섹션 추출 (## 1. 사용자 요구사항 ~ 다음 ## 전까지)
+#   3. GitHub API 로 연결 Issue body 에서 ### 사용자 요구사항 섹션 추출
+#   4. 두 섹션 byte-identical 비교 (trailing whitespace normalize)
+#   5. drift 시 → warning comment 자동 발의 (block 아님, hotfix-bypass label 채널 안내)
+#
+# Hotfix bypass:
+#   hotfix-bypass:section-1-verbatim-postmerge label 부착 시 warning 만 (blocking 아님)
+#   audit comment 자동 발의 (ADR-024 Amendment 3 hotfix-bypass family 정합)
+#   bypass channel 이 유일한 예외 채널 — self-justification 절차 SSOT:
+#   docs/domain-knowledge/domain/github-actions/workflow-blocked-manual-fallback.md
+#
+# Scope:
+#   codeforge-family consumer: docs/stories/<KEY>.md (single-repo) 또는
+#   internal-docs cross-repo path (codeforge dogfood: codeforge-family detection 미구현 — 본 workflow 단독 이슈)
+#   consumer generic: docs/stories/<KEY>.md 기준
+#
+# Permissions: minimum (top-level deny-all + job override, CFP-530 / ADR-060 Amendment 8)
+# ADR-061: heredoc single-quoted <<'EOF' 사용 (verbatim transmission 보장)
+
+on:
+  pull_request_target:
+    types: [closed]
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: section-1-verbatim-postmerge-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  verify-section-1-verbatim:
+    # merged PR 만 처리 (closed + merged=true)
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout (merged commit)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 1
+
+      - name: Extract Story KEY from PR title
+        id: key
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          # PR title 형식: "[KEY-NNN] <title>" 또는 "[KEY] <title>"
+          KEY=$(printf '%s' "$PR_TITLE" | grep -oP '(?<=\[)[A-Z][A-Z0-9\-]*-[0-9]+(?=\])' | head -1 || true)
+          if [[ -z "$KEY" ]]; then
+            echo "::notice::PR title 에서 Story KEY 추출 실패 — skip (KEY 형식: [PREFIX-NNN])"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "key=$KEY" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Story KEY 감지: $KEY"
+          fi
+
+      - name: Extract Story §1 from story file
+        id: story_section
+        if: steps.key.outputs.skip != 'true'
+        env:
+          KEY: ${{ steps.key.outputs.key }}
+        run: |
+          set -euo pipefail
+          STORY_FILE="docs/stories/${KEY}.md"
+          if [[ ! -f "$STORY_FILE" ]]; then
+            echo "::notice::Story file 부재: $STORY_FILE — skip"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # §1 섹션 추출: "## 1. 사용자 요구사항" ~ 다음 "## " 헤딩 전까지
+          python3 "${GITHUB_WORKSPACE}/scripts/lib/workflow_section1_verbatim_postmerge_a.py"
+
+      - name: Fetch Issue body §1 from GitHub API
+        id: issue_section
+        if: steps.key.outputs.skip != 'true' && steps.story_section.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.CODEFORGE_CROSS_REPO_PAT || github.token }}
+          KEY: ${{ steps.key.outputs.key }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # PR body 에서 Related Issue 번호 추출
+          PR_BODY=$(gh pr view "$PR_NUMBER" --json body --jq '.body' 2>/dev/null || true)
+          ISSUE_NUMBER=$(printf '%s' "$PR_BODY" | grep -oP '(?<=#)[0-9]+' | head -1 || true)
+
+          if [[ -z "$ISSUE_NUMBER" ]]; then
+            echo "::notice::PR body 에서 Issue 번호 추출 실패 — skip"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
+
+          # Issue body fetch (ADR-027 §결정 6.E — shell injection 차단)
+          ISSUE_BODY=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}" --jq '.body' 2>/dev/null || true)
+          if [[ -z "$ISSUE_BODY" ]]; then
+            echo "::notice::Issue #$ISSUE_NUMBER body fetch 실패 — skip"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Issue body §1 섹션 추출 — /tmp/issue-body.txt pre-written above (shell injection 차단)
+          printf '%s' "$ISSUE_BODY" > /tmp/issue-body.txt
+          python3 "${GITHUB_WORKSPACE}/scripts/lib/workflow_section1_verbatim_postmerge_b.py"
+
+      - name: Compare §1 byte-identical
+        id: compare
+        if: >
+          steps.key.outputs.skip != 'true' &&
+          steps.story_section.outputs.skip != 'true' &&
+          steps.issue_section.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          if diff -q /tmp/story-section-1.txt /tmp/issue-section-1.txt > /dev/null 2>&1; then
+            echo "drift=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::§1 byte-identical 검증 PASS — drift 없음"
+          else
+            echo "drift=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::§1 verbatim drift 감지 — Story §1 ≠ Issue body §1"
+            diff /tmp/story-section-1.txt /tmp/issue-section-1.txt || true
+          fi
+
+      - name: Post warning comment on drift
+        if: steps.compare.outputs.drift == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          KEY: ${{ steps.key.outputs.key }}
+          ISSUE_NUMBER: ${{ steps.issue_section.outputs.issue_number }}
+        run: |
+          set -euo pipefail
+          # ADR-061: heredoc single-quoted <<'EOF'
+          gh pr comment "$PR_NUMBER" --body "$(cat <<'COMMENT_EOF'
+          **[section-1-verbatim-postmerge] §1 verbatim drift 감지 (warning tier)**
+
+          Story `docs/stories/${KEY}.md` §1 이 Issue #${ISSUE_NUMBER} body 와 다릅니다.
+
+          ADR-027 Amendment 2 §결정 6.C: §1 사용자 요구사항은 Issue body verbatim 을 유지해야 합니다.
+          SecurityArch T1 위협 mitigation — manual fallback path 에서 §1 임의 변조 차단.
+
+          **조치 방법:**
+          1. `docs/stories/${KEY}.md` §1 을 Issue #${ISSUE_NUMBER} body 의 `### 사용자 요구사항` 섹션과 동일하게 복원
+          2. Phase 2 PR 에 commit push
+          3. 해당 drift 가 의도적인 경우 (예: 요구사항 명세 보완): Issue body 먼저 수정 → Story §1 sync
+
+          **Bypass** (긴급 시 한정):
+          `hotfix-bypass:section-1-verbatim-postmerge` label 부착 → 24시간 이내 §1 복원 의무
+          (ADR-024 Amendment 3 hotfix-bypass family, audit-trailed)
+
+          Source: `templates/github-workflows/section-1-verbatim-postmerge.yml` (CFP-658 Phase 2 / ADR-027 Amendment 2 §결정 6.C)
+          COMMENT_EOF
+          )"
+
+      - name: Bypass audit comment (if bypass label present)
+        if: contains(github.event.pull_request.labels.*.name, 'hotfix-bypass:section-1-verbatim-postmerge')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh pr comment "$PR_NUMBER" --body "$(cat <<'COMMENT_EOF'
+          **[section-1-verbatim-postmerge] hotfix-bypass 감지 (audit)**
+
+          `hotfix-bypass:section-1-verbatim-postmerge` label 부착 — §1 verbatim check skip 됨.
+
+          **의무** (ADR-024 Amendment 3 hotfix-bypass family):
+          - 24시간 이내 §1 verbatim 복원 commit + push
+          - bypass 사유를 Issue 또는 PR comment 에 명시
+
+          Source: `templates/github-workflows/section-1-verbatim-postmerge.yml` (CFP-658 Phase 2)
+          COMMENT_EOF
+          )"

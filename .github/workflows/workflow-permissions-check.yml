@@ -1,0 +1,32 @@
+name: workflow-permissions-presence (CFP-530 / ADR-060 Amendment 8 §결정 21)
+# Security: third-party actions are SHA-pinned per CFP-300 policy.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/**.yml'
+      - 'templates/github-workflows/**.yml'
+      - 'scripts/check-workflow-permissions-presence.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    continue-on-error: true  # warning tier
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - name: Check hotfix-bypass label
+        id: bypass
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7.1.0
+        with:
+          script: |
+            const labels = context.payload.pull_request.labels.map(l => l.name);
+            return labels.includes('hotfix-bypass:workflow-permissions');
+      - name: Workflow permissions presence check
+        if: steps.bypass.outputs.result != 'true'
+        run: bash scripts/check-workflow-permissions-presence.sh
+      - name: Audit comment (bypass label)
+        if: steps.bypass.outputs.result == 'true'
+        run: bash scripts/check-bypass-audit-comment.sh "workflow-permissions"

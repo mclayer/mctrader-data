@@ -1,0 +1,99 @@
+name: Evidence registry anomaly check (warning mode)
+# CFP-442 / ADR-060 Amendment 11 §결정 25 — meta anomaly (inventory) lint workflow
+# Tier: warning (continue-on-error, non-required check) — §결정 5 첫 도입
+# Bypass channel: omit (§결정 16 — warning tier optional)
+#
+# 검증 대상:
+#   sub-check 1: docs/evidence-checks-registry.yaml entries[] ↔
+#                ADR-060 §결정 13 표 Group A 18 entry 1:1 inventory parity
+#   sub-check 2: scripts/check-*.sh + .github/workflows/*.yml +
+#                templates/github-workflows/*.yml 4-criteria AND 후보 식별 + registry 미등록 감지
+#
+# Exit code 3-tier (ADR-060 Amendment 2 §결정 15):
+#   exit 0 = PASS (anomaly 0건)
+#   exit 1 = anomaly DETECTED (sub-check 1 OR sub-check 2 violation)
+#   exit 2 = META-ERROR (pyyaml 미설치 / yaml parse 실패 / ADR-060 §결정 13 표 parse 실패 / ALLOWLIST drift)
+#
+# 승격 path:
+#   warning → blocking-on-pr 승격 시 CFP-NNN carrier PR 가 다음 변경 동반 의무:
+#     1. 본 workflow 의 `continue-on-error: true` 제거
+#     2. branch protection `required_status_checks.contexts` 에 본 workflow job name 추가
+#        (ADR-024 Amendment 2 / branch-protection-manifest.yaml SSOT 정합)
+#     3. evidence 3 산출물 제출 (ADR-060 §결정 6 (d) + evidence-checks-registry.yaml promotion_criteria)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'scripts/check-*.sh'
+      - '.github/workflows/*.yml'
+      - 'templates/github-workflows/*.yml'
+      - 'docs/evidence-checks-registry.yaml'
+      - 'docs/adr/ADR-060-*.md'
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  evidence-registry-anomaly-check:
+    runs-on: ubuntu-latest
+    # warning mode (ADR-060 §결정 5) — lint fail 이 PR merge 차단하지 않음.
+    # required_status_checks.contexts 부착 X.
+    continue-on-error: true
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install pyyaml
+        run: python3 -m pip install --user pyyaml
+
+      - name: Run evidence registry anomaly lint
+        id: lint
+        run: |
+          set +e
+          bash scripts/check-evidence-registry-anomaly.sh 2>&1 | tee /tmp/lint.out
+          status=${PIPESTATUS[0]}
+          echo "exit_status=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Post lint result comment (sticky)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          LINT_STATUS: ${{ steps.lint.outputs.exit_status }}
+        run: |
+          set -euo pipefail
+          LINT_OUT="$(cat /tmp/lint.out 2>/dev/null || echo '(lint output 부재)')"
+          case "${LINT_STATUS:-2}" in
+            0)
+              HEADER="## PASS — Evidence registry anomaly check (warning mode)"
+              FOOTER="anomaly 0건. ADR-060 Amendment 11 §결정 25 정합."
+              ;;
+            1)
+              HEADER="## WARN — Evidence registry anomaly DETECTED (warning mode)"
+              FOOTER="**warning mode (CFP-442 / ADR-060 §결정 5)**: lint fail 이 PR merge 를 차단하지 않습니다. registry 미등록 신규 패턴 등록 또는 owner_adr 정합 ADR 발의 의무. 승격 carrier 시점 = blocking-on-pr 전환."
+              ;;
+            2)
+              HEADER="## WARN — Evidence registry anomaly META-ERROR (warning mode)"
+              FOOTER="**META-ERROR (ADR-060 Amendment 2 §결정 15)**: validation FAIL 과 분리된 meta-error. pyyaml 미설치 / registry yaml 부재 / ADR-060 §결정 13 표 parse 실패 / ALLOWLIST drift 등."
+              ;;
+            *)
+              HEADER="## WARN — Evidence registry anomaly unknown status"
+              FOOTER="exit status = ${LINT_STATUS}."
+              ;;
+          esac
+          {
+            printf '%s\n\n' "$HEADER"
+            printf '```\n%s\n```\n\n' "$LINT_OUT"
+            printf '%s\n\n' "$FOOTER"
+            printf '> Note: 본 workflow = **warning mode** (continue-on-error). PR merge 미차단.\n'
+          } > /tmp/pr-comment.md
+          gh pr comment "$PR_NUMBER" --body-file /tmp/pr-comment.md

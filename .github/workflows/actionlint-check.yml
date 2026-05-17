@@ -1,0 +1,138 @@
+name: actionlint-check (CFP-688 / ADR-026 Amendment 3 §결정 5.G.b)
+# CFP-688 / ADR-026 Amendment 3 §결정 5.G.b — actionlint prevention layer
+# Tier: warning (ADR-060 §결정 5 — 첫 도입 = warning mode, continue-on-error: true)
+# evidence-checks-registry.yaml entry: workflow-actionlint-precommit
+#
+# 목적:
+#   .github/workflows/*.yml + templates/github-workflows/*.yml YAML parse defect 차단.
+#   actionlint binary (rhysd/actionlint v1.7.12) 로 workflow syntax validation.
+#   born-broken 재발 (CFP-688 P0 incident — post-merge-followup.yml 100% FAILURE 17h) 차단.
+#
+# 트리거:
+#   pull_request: opened, synchronize — paths: .github/workflows/** + templates/github-workflows/**
+#
+# 승격 path (blocking-on-pr):
+#   warning → blocking-on-pr 승격 시 CFP-NNN carrier PR 가 다음 변경 동반 의무:
+#     1. 본 workflow 의 `continue-on-error: true` 제거
+#     2. branch protection `required_status_checks.contexts` 에 본 workflow job name 추가
+#     3. evidence 3 산출물 제출 (ADR-060 §결정 6 (d) + evidence-checks-registry.yaml promotion_criteria)
+#
+# Tier reconciliation (ADR-060 §결정 5 vs ADR-026 §5.G.b prose):
+#   ADR-026 §5.G.b 본문 "exit non-zero = fail-closed PR merge 차단" = eventual blocking-on-pr target.
+#   첫 도입 = ADR-060 §결정 5 default warning tier. 승격은 별도 CFP carrier 의무.
+#
+# Hotfix bypass:
+#   hotfix-bypass:actionlint label 부착 시 skip + audit comment
+#   (ADR-024 Amendment 3 §결정 6.A per-entry namespace 정합)
+#
+# actionlint install:
+#   pip install 없음 (actionlint = Go binary, PyPI 미배포).
+#   rhysd/actionlint v1.7.12 공식 download-actionlint.bash 스크립트로 설치.
+#   install 실패 시 continue (warning tier 정합 — 설치 실패 자체가 PR 차단하면 안 됨).
+#
+# Permissions: minimum (top-level deny-all + job override, ADR-060 Amendment 8)
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    paths:
+      - '.github/workflows/**'
+      - 'templates/github-workflows/**'
+
+permissions: {}  # top-level deny-all (ADR-060 Amendment 8 §결정 21 / CFP-300 least-privilege)
+
+jobs:
+  actionlint-check:
+    runs-on: ubuntu-latest
+    # warning mode (ADR-060 §결정 5) — lint fail 이 PR merge 차단하지 않음.
+    # blocking-on-pr 승격 시 continue-on-error 제거 의무 (ADR-060 §결정 6).
+    continue-on-error: true
+    permissions:
+      contents: read          # workflow file read
+      pull-requests: write    # PR comment post
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Check hotfix-bypass label
+        id: bypass
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          LABELS=$(gh pr view "$PR_NUMBER" --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+          if echo ",${LABELS}," | grep -q ",hotfix-bypass:actionlint,"; then
+            echo "bypass=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::hotfix-bypass:actionlint label detected — skipping actionlint check"
+          else
+            echo "bypass=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install actionlint v1.7.12
+        id: install
+        if: steps.bypass.outputs.bypass != 'true'
+        run: |
+          # actionlint is a Go binary distributed via GitHub releases (not PyPI).
+          # Install via official download-actionlint.bash (rhysd/actionlint).
+          # Pin: v1.7.12 (latest stable 2026-05-15). Pass version arg to download script.
+          # continue-on-error for install step — absent binary → warning emit + skip lint.
+          set +e
+          bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) 1.7.12 2>/dev/null
+          status=$?
+          if [ $status -eq 0 ] && [ -f "./actionlint" ]; then
+            echo "$PWD" >> "$GITHUB_PATH"
+            echo "installed=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::actionlint v1.7.12 installed successfully"
+          else
+            echo "installed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::actionlint install failed — workflow lint step will be skipped (warning tier)"
+          fi
+
+      - name: Run actionlint
+        id: lint
+        if: steps.bypass.outputs.bypass != 'true' && steps.install.outputs.installed == 'true'
+        run: |
+          set +e
+          ./actionlint .github/workflows/*.yml 2>&1 | tee /tmp/actionlint.out
+          status=${PIPESTATUS[0]}
+          echo "exit_status=$status" >> "$GITHUB_OUTPUT"
+          exit 0  # continue-on-error 정합 — fail 이어도 다음 step 진행
+
+      - name: Post lint result comment
+        if: steps.bypass.outputs.bypass != 'true' && steps.install.outputs.installed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          LINT_STATUS: ${{ steps.lint.outputs.exit_status }}
+        run: |
+          set -euo pipefail
+          LINT_OUT="$(cat /tmp/actionlint.out 2>/dev/null || echo '(lint output 부재)')"
+          if [ "${LINT_STATUS:-1}" = "0" ]; then
+            BODY="## OK actionlint-check — PASS (warning mode)
+
+actionlint v1.7.12 — violation 0건. 모든 workflow yml YAML parse + syntax PASS.
+
+_evidence-checks-registry entry: \`workflow-actionlint-precommit\` (ADR-060 warning tier)_"
+          else
+            BODY="## WARN actionlint-check — YAML syntax FAIL 감지 (warning mode)
+
+actionlint v1.7.12 — born-broken 재발 위험 감지. 아래 violation 확인 후 수정 요청.
+
+\`\`\`
+${LINT_OUT}
+\`\`\`
+
+bypass: \`hotfix-bypass:actionlint\` label (ADR-024 Amendment 3 §결정 6.A, \`hotfix-bypass:*\` 24번째 family member)
+_evidence-checks-registry entry: \`workflow-actionlint-precommit\` (ADR-060 warning tier — ADR-026 §5.G.b blocking target)_"
+          fi
+          gh pr comment "$PR_NUMBER" --body "$BODY" || true
+
+      - name: Emit bypass audit comment
+        if: steps.bypass.outputs.bypass == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          bash scripts/check-bypass-audit-comment.sh "hotfix-bypass:actionlint" "$PR_NUMBER" || true

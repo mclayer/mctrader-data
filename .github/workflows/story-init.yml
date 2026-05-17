@@ -1,17 +1,32 @@
 name: Story Init
+# Security: third-party actions are SHA-pinned per CFP-300 policy.
 
-# Consumer-distributable single-repo flavor (CFP-65 / F2 Phase 1).
+# CFP-596 / ADR-013 Amendment 5: codeforge family detection + cross-repo write branch.
+# codeforge family (project.name ^codeforge): cross-repo write to mclayer/codeforge-internal-docs.
+# Generic consumer (project.name != ^codeforge): local mkdir/commit/push (기존 동작 보존 — AC-5).
 # story_key_prefix 는 project.yaml `github.story_key_prefix` 에서 fetch (yq 우선 + Python fallback).
-# Path = docs/stories/<KEY>.md (single-repo 가정 — codeforge family monorepo flavor 는 internal-docs 별도 유지).
+#
+# CFP-671 / ADR-036 Amendment 1: KEY title regex precedence + Issue # fallback.
+# Title `[<PREFIX>-<N>]` or `<PREFIX>-<N>` pattern matched + prefix matched → title KEY 우선 (cfp-reserve.yml reservation 정합).
+# Title pattern absent OR prefix MISMATCH → Issue # fallback (ADR-036 결정 1 race-free guarantee 보존).
+#
+# CFP-661 / ADR-027 Amendment 2 §결정 6: PR create step `continue-on-error: true` + post-fail Issue comment.
+# Enterprise default_workflow_permissions: read 차단 환경에서 silent skip 회피 + CFP-658 Wave 1 fallback path 자동 활성.
 
 on:
   issues:
-    types: [opened]
+    types: [opened, labeled]   # was: [opened]  — CFP-280 race fix
 
 permissions:
   contents: write
   issues: write
   pull-requests: write
+
+# CFP-260 / ADR-036 Option B safety net — per-Issue concurrency group.
+# 같은 Issue 의 reopen / re-trigger race 만 직렬화. 병렬 Issue (다른 #) 는 영향 없음.
+concurrency:
+  group: story-init-${{ github.event.issue.number }}
+  cancel-in-progress: false
 
 jobs:
   story-init:
@@ -23,11 +38,11 @@ jobs:
       ISSUE_NUMBER: ${{ github.event.issue.number }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
 
-      - name: Read project.yaml story_key_prefix
+      - name: Read project.yaml story_key_prefix + family detection
         id: project_config
         shell: bash
         run: |
@@ -41,23 +56,10 @@ jobs:
 
           if command -v yq >/dev/null 2>&1; then
             story_key_prefix="$(yq -r '.github.story_key_prefix // ""' "$cfg")"
+            project_name="$(yq -r '.project.name // ""' "$cfg")"
           else
-            story_key_prefix="$(python3 - "$cfg" <<'PY'
-          import re, sys
-          path = sys.argv[1]
-          in_github = False
-          for raw in open(path, encoding="utf-8"):
-              line = raw.rstrip("\n")
-              if re.match(r"^[A-Za-z_][\w-]*:\s*$", line):
-                  in_github = line.split(":", 1)[0] == "github"
-                  continue
-              if in_github:
-                  m = re.match(r"^\s{2}story_key_prefix:\s*(.*?)\s*$", line)
-                  if m:
-                      print(m.group(1).strip().strip('"').strip("'"))
-                      break
-          PY
-          )"
+            story_key_prefix="$(CFG_PATH="$cfg" python3 "${GITHUB_WORKSPACE}/scripts/lib/workflow_story_init_project_config_key_prefix.py")"
+            project_name="$(CFG_PATH="$cfg" python3 "${GITHUB_WORKSPACE}/scripts/lib/workflow_story_init_project_config_name.py")"
           fi
 
           if [[ -z "$story_key_prefix" ]]; then
@@ -65,33 +67,42 @@ jobs:
             exit 1
           fi
 
-          echo "story_key_prefix=$story_key_prefix" >> "$GITHUB_OUTPUT"
+          if [[ -z "$project_name" ]]; then
+            echo "::error::project.name missing in $cfg — project-config-schema.md §1.f 참조 (CFP-596 family detection 필수)"
+            exit 1
+          fi
 
-      - name: Compute next story key
+          echo "story_key_prefix=$story_key_prefix" >> "$GITHUB_OUTPUT"
+          echo "project_name=$project_name" >> "$GITHUB_OUTPUT"
+
+          # codeforge family detection sentinel — Change Plan §3.1
+          if [[ "$project_name" =~ ^codeforge ]]; then
+            echo "is_codeforge_family=true" >> "$GITHUB_OUTPUT"
+            # plugin folder mapping — Change Plan §3.2
+            folder=$(printf '%s' "$project_name" | sed 's/^codeforge-//;s/^codeforge$/wrapper/')
+            echo "dogfood_folder=$folder" >> "$GITHUB_OUTPUT"
+            echo "::notice::codeforge family detected (project.name=$project_name) — cross-repo write branch active (folder=$folder)"
+          else
+            echo "is_codeforge_family=false" >> "$GITHUB_OUTPUT"
+            echo "dogfood_folder=" >> "$GITHUB_OUTPUT"
+            echo "::notice::generic consumer detected (project.name=$project_name) — local write branch active (AC-5 정합)"
+          fi
+
+      - name: Compute story key (CFP-260 / ADR-036 Option B + CFP-671 / ADR-036 Amendment 1 — title regex precedence + Issue# fallback)
         id: key
         env:
           PREFIX: ${{ steps.project_config.outputs.story_key_prefix }}
         run: |
-          # docs/stories/<PREFIX>-N.md 파일 스캔 → max(N) + 1
-          mkdir -p docs/stories
-          LAST=$(find docs/stories -maxdepth 1 -name "${PREFIX}-*.md" 2>/dev/null \
-                 | sed -E "s|.*/${PREFIX}-([0-9]+)\.md|\1|" \
-                 | sort -n | tail -1)
-          NEXT=$(( ${LAST:-0} + 1 ))
-          echo "key=${PREFIX}-${NEXT}" >> "$GITHUB_OUTPUT"
+          # CFP-260 / ADR-036 결정 1: GitHub atomic Issue numbering 위임 (race-free baseline).
+          # CFP-671 / ADR-036 Amendment 1: title pattern `[<PREFIX>-<N>]` or `<PREFIX>-<N>` 우선 추출 (cfp-reserve.yml reservation 정합).
+          #   - Title pattern matched + prefix matched → title KEY 우선
+          #   - Title pattern absent OR prefix MISMATCH → Issue # fallback (race-free guarantee 보존 + cross-project KEY injection 차단)
 
-          PYOUT=$(python3 - <<'PYEOF'
-          import os, re
-          title = os.environ.get("ISSUE_TITLE", "")
-          title_clean = re.sub(r"^\[STORY\]\s*", "", title).strip()
-          slug = re.sub(r"[^A-Za-z0-9가-힣]+", "-", title_clean, flags=re.UNICODE)
-          slug = slug.strip("-")[:40].rstrip("-")
-          print(slug)
-          print(title_clean)
-          PYEOF
-          )
-          SLUG=$(printf '%s' "$PYOUT" | sed -n '1p')
-          TITLE_CLEAN=$(printf '%s' "$PYOUT" | sed -n '2p')
+          PYOUT=$(python3 "${GITHUB_WORKSPACE}/scripts/lib/workflow_story_init_compute_key.py")
+          KEY=$(printf '%s' "$PYOUT" | sed -n '1p')
+          SLUG=$(printf '%s' "$PYOUT" | sed -n '2p')
+          TITLE_CLEAN=$(printf '%s' "$PYOUT" | sed -n '3p')
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
           echo "slug=$SLUG" >> "$GITHUB_OUTPUT"
           {
             echo "title_clean<<TITLE_EOF"
@@ -99,8 +110,79 @@ jobs:
             echo "TITLE_EOF"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Skip if first firing already published (two-stage existence_check — CFP-596 / ADR-013 Amendment 5)
+        id: existence_check
+        env:
+          GH_TOKEN: ${{ secrets.CODEFORGE_CROSS_REPO_PAT }}
+          KEY: ${{ steps.key.outputs.key }}
+          SLUG: ${{ steps.key.outputs.slug }}
+          IS_CODEFORGE_FAMILY: ${{ steps.project_config.outputs.is_codeforge_family }}
+          DOGFOOD_FOLDER: ${{ steps.project_config.outputs.dogfood_folder }}
+        run: |
+          # CFP-596 / ADR-013 Amendment 5 — two-stage existence_check (Change Plan §3.5)
+          # codeforge family: internal-docs 측 branch + Story file 양 stage check.
+          # consumer branch: single-stage (기존 동작 보존).
+          # fail-closed: 4xx/5xx → exit 1 (PAT scope 또는 unreachable).
+
+          if [[ "$IS_CODEFORGE_FAMILY" == "true" ]]; then
+            TARGET_REPO="mclayer/codeforge-internal-docs"
+          else
+            TARGET_REPO="${GITHUB_REPOSITORY}"
+          fi
+          BRANCH="feat/${KEY}-${SLUG}"
+          STORY_PATH="${DOGFOOD_FOLDER}/stories/${KEY}.md"
+
+          # Stage 1 — branch existence
+          http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${TARGET_REPO}/branches/${BRANCH}" 2>/dev/null || echo "000")
+
+          if [[ "$http_code" == "200" ]]; then
+            STAGE1_PRESENT=true
+          elif [[ "$http_code" == "404" ]]; then
+            STAGE1_PRESENT=false
+          else
+            echo "::error::existence_check Stage 1 실패 — HTTP ${http_code}. PAT scope 또는 ${TARGET_REPO} unreachable (ADR-066 §결정 2 참조)"
+            exit 1
+          fi
+
+          if [[ "$IS_CODEFORGE_FAMILY" == "true" && "$STAGE1_PRESENT" == "true" ]]; then
+            # Stage 2 — Story file existence on the branch (codeforge family only)
+            file_http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${TARGET_REPO}/contents/${STORY_PATH}?ref=${BRANCH}" 2>/dev/null || echo "000")
+
+            if [[ "$file_http_code" == "200" ]]; then
+              echo "::notice::idempotent skip — branch + Story file 모두 존재 (CFP-596 two-stage check §3.5 정합)"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "auto_recovered=false" >> "$GITHUB_OUTPUT"
+              echo "skip_branch_create=true" >> "$GITHUB_OUTPUT"
+            elif [[ "$file_http_code" == "404" ]]; then
+              echo "::warning::automated reconcile path — branch 존재 + Story file 부재 (Disconnect edge case 복구 — Change Plan §3.5)"
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+              echo "auto_recovered=true" >> "$GITHUB_OUTPUT"
+              echo "skip_branch_create=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "::error::existence_check Stage 2 실패 — HTTP ${file_http_code}. PAT scope 또는 ${TARGET_REPO} unreachable (ADR-066 §결정 2 참조)"
+              exit 1
+            fi
+          elif [[ "$STAGE1_PRESENT" == "true" ]]; then
+            # consumer branch — Stage 1 only (기존 동작 보존)
+            echo "::notice::Remote branch ${BRANCH} already exists — skipping (idempotent re-entry, CFP-280 Iter 1 FIX)"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "auto_recovered=false" >> "$GITHUB_OUTPUT"
+            echo "skip_branch_create=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "auto_recovered=false" >> "$GITHUB_OUTPUT"
+            echo "skip_branch_create=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Parse user requirement from Issue body
         id: parse
+        if: steps.existence_check.outputs.skip != 'true'
         run: |
           REQ=$(printf '%s' "$ISSUE_BODY" \
                  | awk '/^### 사용자 요구사항/{flag=1; next} /^### /{flag=0} flag' \
@@ -121,7 +203,120 @@ jobs:
                         | sed '/^$/d' | head -1)
           echo "component=$COMPONENT" >> "$GITHUB_OUTPUT"
 
-      - name: Create branch + docs/stories/<KEY>.md
+      - name: Render Story file content
+        id: render
+        if: steps.existence_check.outputs.skip != 'true'
+        env:
+          KEY: ${{ steps.key.outputs.key }}
+          TITLE_CLEAN: ${{ steps.key.outputs.title_clean }}
+          REQUIREMENT: ${{ steps.parse.outputs.requirement }}
+        run: |
+          # Story file content rendering — shared between codeforge family and consumer branches.
+          # base64 encode 는 codeforge family branch (REST API PUT contents 요구).
+          STORY_CONTENT=$(python3 "${GITHUB_WORKSPACE}/scripts/lib/workflow_story_init_render_story.py")
+          # base64 encode (REST API PUT contents 용 — codeforge family branch)
+          CONTENT_B64=$(printf '%s' "$STORY_CONTENT" | base64 -w 0)
+          echo "content_b64=$CONTENT_B64" >> "$GITHUB_OUTPUT"
+
+      - name: Create branch + Story file (codeforge family — cross-repo write)
+        if: >
+          steps.existence_check.outputs.skip != 'true' &&
+          steps.project_config.outputs.is_codeforge_family == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.CODEFORGE_CROSS_REPO_PAT }}
+          KEY: ${{ steps.key.outputs.key }}
+          SLUG: ${{ steps.key.outputs.slug }}
+          TITLE_CLEAN: ${{ steps.key.outputs.title_clean }}
+          DOGFOOD_FOLDER: ${{ steps.project_config.outputs.dogfood_folder }}
+          CONTENT_B64: ${{ steps.render.outputs.content_b64 }}
+          SKIP_BRANCH_CREATE: ${{ steps.existence_check.outputs.skip_branch_create }}
+          AUTO_RECOVERED: ${{ steps.existence_check.outputs.auto_recovered }}
+        run: |
+          set -euo pipefail
+          TARGET_REPO="mclayer/codeforge-internal-docs"
+          BRANCH="feat/${KEY}-${SLUG}"
+          STORY_PATH="${DOGFOOD_FOLDER}/stories/${KEY}.md"
+          COMMIT_MSG="[${KEY}] feat: Story init — §1 verbatim, §2-11 placeholder"
+
+          if [[ "$SKIP_BRANCH_CREATE" != "true" ]]; then
+            # Get main sha
+            MAIN_SHA=$(gh api "repos/${TARGET_REPO}/git/refs/heads/main" --jq '.object.sha')
+            if [[ -z "$MAIN_SHA" ]]; then
+              echo "::error::internal-docs main sha fetch 실패 — PAT scope 또는 ${TARGET_REPO} unreachable"
+              exit 1
+            fi
+
+            # Create branch ref in internal-docs
+            if ! gh api -X POST "repos/${TARGET_REPO}/git/refs" \
+              -f "ref=refs/heads/${BRANCH}" \
+              -f "sha=${MAIN_SHA}"; then
+              echo "::error::branch create 실패 (${BRANCH} in ${TARGET_REPO}) — PAT repo:write scope 확인 필요 (ADR-066 §결정 2)"
+              exit 1
+            fi
+            echo "::notice::branch created: ${BRANCH} in ${TARGET_REPO}"
+          else
+            echo "::notice::branch create skip (skip_branch_create=true — auto_recovered=${AUTO_RECOVERED})"
+          fi
+
+          # PUT contents — create Story file on branch
+          if ! gh api -X PUT "repos/${TARGET_REPO}/contents/${STORY_PATH}" \
+            -f "branch=${BRANCH}" \
+            -f "message=${COMMIT_MSG}" \
+            -f "content=${CONTENT_B64}"; then
+            echo "::error::Story file PUT 실패 (${STORY_PATH} on ${BRANCH}) — PAT scope 또는 conflict"
+            exit 1
+          fi
+          echo "::notice::Story file created: ${TARGET_REPO}/${STORY_PATH} on ${BRANCH}"
+
+      - name: Create Phase 1 PR (codeforge family — internal-docs PR)
+        if: >
+          steps.existence_check.outputs.skip != 'true' &&
+          steps.project_config.outputs.is_codeforge_family == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.CODEFORGE_CROSS_REPO_PAT }}
+          KEY: ${{ steps.key.outputs.key }}
+          SLUG: ${{ steps.key.outputs.slug }}
+          TITLE_CLEAN: ${{ steps.key.outputs.title_clean }}
+          DOGFOOD_FOLDER: ${{ steps.project_config.outputs.dogfood_folder }}
+          AUTO_RECOVERED: ${{ steps.existence_check.outputs.auto_recovered }}
+        run: |
+          set -euo pipefail
+          TARGET_REPO="mclayer/codeforge-internal-docs"
+          BRANCH="feat/${KEY}-${SLUG}"
+
+          # PR existence check (auto_recovered 분기 — PR list idempotency, Change Plan §3.5 + §4.1)
+          EXISTING_PR_URL=$(gh pr list \
+            --repo "${TARGET_REPO}" \
+            --head "mclayer:${BRANCH}" \
+            --base "main" \
+            --state open \
+            --json url \
+            --jq '.[0].url' 2>/dev/null || true)
+
+          if [[ -n "$EXISTING_PR_URL" ]]; then
+            echo "::notice::PR already exists (idempotent skip) — ${EXISTING_PR_URL}"
+            echo "pr_url=${EXISTING_PR_URL}" >> "$GITHUB_OUTPUT" 2>/dev/null || true
+            exit 0
+          fi
+
+          BODY=$(printf 'Story SSOT: `%s/stories/%s.md`\n\nThis is the Phase 1 PR (요구사항+설계+설계리뷰 lane).\n\nRelated: %s#%s\n' \
+            "$DOGFOOD_FOLDER" "$KEY" "$GITHUB_REPOSITORY" "$ISSUE_NUMBER")
+
+          PR_URL=$(gh pr create \
+            --repo "${TARGET_REPO}" \
+            --base "main" \
+            --head "${BRANCH}" \
+            --title "[${KEY}] ${TITLE_CLEAN}" \
+            --body "$BODY" \
+            --label "type:story,phase:요구사항")
+
+          echo "::notice::Phase 1 PR created in ${TARGET_REPO}: ${PR_URL}"
+        id: create_pr_family
+
+      - name: Create branch + docs/stories/<KEY>.md (generic consumer — local write)
+        if: >
+          steps.existence_check.outputs.skip != 'true' &&
+          steps.project_config.outputs.is_codeforge_family != 'true'
         env:
           KEY: ${{ steps.key.outputs.key }}
           SLUG: ${{ steps.key.outputs.slug }}
@@ -200,7 +395,15 @@ jobs:
           git commit -m "[${KEY}] feat: Story init — §1 verbatim, §2-11 placeholder"
           git push origin "$BRANCH"
 
-      - name: Create Phase 1 PR
+      - name: Create Phase 1 PR (generic consumer — wrapper repo PR)
+        id: pr_create_consumer
+        if: >
+          steps.existence_check.outputs.skip != 'true' &&
+          steps.project_config.outputs.is_codeforge_family != 'true'
+        # CFP-661 Wave 3 graceful degradation — enterprise `default_workflow_permissions: read` 차단 시 step 실패 흡수.
+        # 후속 step `Post manual PR fallback comment` 가 Issue comment 로 CFP-658 Wave 1 fallback path 안내 자동 게시.
+        # SSOT: docs/consumer-guide.md §1i Enterprise environment setup + ADR-027 Amendment 2 §결정 6.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           KEY: ${{ steps.key.outputs.key }}
@@ -219,17 +422,92 @@ jobs:
             --body "$BODY" \
             --label "type:story,phase:요구사항"
 
-      - name: Update Issue body to docs link
+      - name: Post manual PR fallback comment (CFP-661 Wave 3 graceful degradation)
+        if: >
+          steps.existence_check.outputs.skip != 'true' &&
+          steps.project_config.outputs.is_codeforge_family != 'true' &&
+          steps.pr_create_consumer.outcome == 'failure'
+        # CFP-661 Wave 3 — pr_create step `continue-on-error: true` 실패 흡수 시 Issue comment 로 manual fallback path 안내.
+        # Enterprise default_workflow_permissions: read 차단 환경에서 silent skip 회피 + CFP-658 Wave 1 fallback path 자동 활성 trigger.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           KEY: ${{ steps.key.outputs.key }}
+          SLUG: ${{ steps.key.outputs.slug }}
         run: |
-          BASE="main"
-          gh issue edit "$ISSUE_NUMBER" \
-            --body "Story SSOT: [\`docs/stories/${KEY}.md\`](../blob/${BASE}/docs/stories/${KEY}.md)"
+          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<EOF
+          ## Enterprise GitHub Actions PR create permission 차단 — manual fallback 의무 (CFP-661 graceful degradation)
+
+          본 workflow 의 \`Create Phase 1 PR\` step 이 enterprise \`default_workflow_permissions: read\` 차단으로 실패. **CFP-658 Wave 1 fallback path 활성화 의무**:
+
+          1. \`.claude/_overlay/project.yaml\` 에 \`bootstrap.fallback_mode: action_blocked\` 설정 (영구 차단 환경 default, declarative trigger A)
+          2. RequirementsPL / ArchitectPL 가 manual fallback path 호출: \`bash templates/scripts/manual-story-init-fallback.sh ${ISSUE_NUMBER}\`
+          3. 또는 \`fallback:manual\` label 부착 (per-Issue ad-hoc override trigger C, ADR-027 Amendment 2 §결정 6.A)
+          4. 4 required check 통과 의무 — admin override 차단 (\`enforce_admins: true\` ratchet 유지, CFP-70)
+
+          **Enterprise admin 권한 보유 시 prerequisite 활성 권장** (fallback 회피 정상 경로):
+
+          \`\`\`bash
+          gh api --method PUT repos/${GITHUB_REPOSITORY}/actions/permissions/workflow \\
+            -f default_workflow_permissions=write \\
+            -F can_approve_pull_request_reviews=true
+          \`\`\`
+
+          참조 SSOT:
+          - [docs/consumer-guide.md §1h Action 차단 환경 fallback](../blob/main/docs/consumer-guide.md)
+          - [docs/consumer-guide.md §1i Enterprise environment setup](../blob/main/docs/consumer-guide.md)
+          - [ADR-027 Amendment 2 §결정 6](../blob/main/docs/adr/ADR-027-consumer-adoption-protocol.md)
+          - CFP-658 Phase 2 \`templates/scripts/manual-story-init-fallback.sh\`
+          - Branch: \`feat/${KEY}-${SLUG}\` (이미 push 완료 — manual PR open 만 필요)
+
+          Story init 진행 무중단 — fallback path 활성 시 정상 4 required check 통과 시 merge gate 통과.
+          EOF
+          )"
+
+      - name: Post worktree-create reminder comment
+        if: steps.existence_check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          STORY_KEY: ${{ steps.key.outputs.key }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<'EOF'
+          ## 작업 환경 준비 — worktree-first 의무 reminder
+
+          이 Story 진입 직전 worktree 생성 의무. 본 Issue 가 Phase 1 PR 으로 진척하기 전 다음 명령 실행:
+
+          \`\`\`bash
+          bash templates/scripts/worktree-create.sh ${STORY_KEY} origin/main
+          \`\`\`
+
+          Story 작업 모두 worktree 안에서 수행 — main working tree 직접 편집 금지.
+
+          참조:
+          - ADR-040 §결정 5 (Stale GC) + Amendment 3 §결정 7 (Normative ↔ mechanical boundary mandate)
+          - playbook §3.0.11 worktree-first normative + §3.5 worktree dispatch
+          - CFP-425 Epic (worktree-first mechanical enforcement 영구화) — 본 Story = child / parent
+          EOF
+          )"
+
+      - name: Update Issue body to docs link
+        if: steps.existence_check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEY: ${{ steps.key.outputs.key }}
+          IS_CODEFORGE_FAMILY: ${{ steps.project_config.outputs.is_codeforge_family }}
+          DOGFOOD_FOLDER: ${{ steps.project_config.outputs.dogfood_folder }}
+        run: |
+          if [[ "$IS_CODEFORGE_FAMILY" == "true" ]]; then
+            # cross-repo internal-docs URL (Change Plan §4.3)
+            gh issue edit "$ISSUE_NUMBER" \
+              --body "Story SSOT: [\`${DOGFOOD_FOLDER}/stories/${KEY}.md\`](https://github.com/mclayer/codeforge-internal-docs/blob/main/${DOGFOOD_FOLDER}/stories/${KEY}.md)"
+          else
+            BASE="main"
+            gh issue edit "$ISSUE_NUMBER" \
+              --body "Story SSOT: [\`docs/stories/${KEY}.md\`](../blob/${BASE}/docs/stories/${KEY}.md)"
+          fi
 
       - name: Assign Milestone (if specified)
-        if: steps.parse.outputs.milestone != ''
+        if: steps.existence_check.outputs.skip != 'true' && steps.parse.outputs.milestone != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MILESTONE: ${{ steps.parse.outputs.milestone }}
@@ -237,9 +515,31 @@ jobs:
           gh issue edit "$ISSUE_NUMBER" --milestone "$MILESTONE"
 
       - name: Add component label
-        if: steps.parse.outputs.component != ''
+        if: steps.existence_check.outputs.skip != 'true' && steps.parse.outputs.component != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COMPONENT: ${{ steps.parse.outputs.component }}
         run: |
           gh issue edit "$ISSUE_NUMBER" --add-label "component:$COMPONENT"
+
+      - name: Attach native Issue Type (CFP-140 / ADR-049)
+        if: steps.existence_check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Attach native Issue Type "Story" to newly created Issue.
+          # Idempotent: if type already set, PATCH is a no-op.
+          # Graceful fallback: if Issue Types not configured for org, emit warning and continue.
+          REPO_OWNER="${GITHUB_REPOSITORY%%/*}"
+          # Get org Issue Types to find "Story" type ID
+          TYPE_ID=$(gh api "/orgs/${REPO_OWNER}/issue-types" \
+            --jq '.[] | select(.name == "Story") | .id' 2>/dev/null || true)
+          if [[ -z "$TYPE_ID" ]]; then
+            echo "::warning::Issue Types not configured for org ${REPO_OWNER} — label fallback active (ADR-049 §결정 3)"
+            exit 0
+          fi
+          # PATCH issue to set type (idempotent — same type_id = no-op)
+          gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}" \
+            --field "type_id=${TYPE_ID}" 2>/dev/null \
+            && echo "Issue Type 'Story' attached to #${ISSUE_NUMBER}" \
+            || echo "::warning::Issue Type attachment failed (may already be set or API unsupported)"

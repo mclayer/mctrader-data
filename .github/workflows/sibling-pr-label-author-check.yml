@@ -1,0 +1,160 @@
+name: sibling-pr label anti-misuse check (warning mode)
+# CFP-521 / ADR-010 Amendment 4 §결정 5 (anti-misuse 안전망) / ADR-060 evidence-enforceable framework
+# Tier: warning (continue-on-error, non-required check)
+# Bypass channel: hotfix-bypass:sibling-pr-author-check label (ADR-024 Amendment 3 §결정 6 + ADR-060 §결정 7)
+# Trigger: pull_request types=[opened, reopened, labeled, synchronize] — label 부착 시점 즉시 검증
+#
+# 검증 logic (ADR-010 Amendment 4 §결정 5 verbatim — Orchestrator self-write 만 적법):
+#   sibling-pr label 부착 PR 의 body 에 paired wrapper PR link
+#   (mclayer/plugin-codeforge#NNN 패턴) 존재 검증.
+#   부재 시 audit comment 부착 + workflow failure (advisory, PR merge 미차단).
+#
+# False-positive 회피:
+#   - sibling-pr label 미부착 PR = skip (검증 대상 아님)
+#   - hotfix-bypass:sibling-pr-author-check label 부착 PR = skip + audit comment 의무
+#     (check-bypass-audit-comment.sh reuse 패턴)
+#   - mclayer/plugin-codeforge repo 자체 PR = skip (sibling 부재 — self-referential 영역)
+#
+# 승격 path:
+#   warning → blocking-on-pr 승격 시 CFP-NNN carrier PR 가 다음 변경 동반 의무:
+#     1. 본 workflow 의 `continue-on-error: true` 제거
+#     2. branch protection `required_status_checks.contexts` 에 본 workflow job name 추가
+#        (ADR-024 Amendment 2 / branch-protection-manifest.yaml SSOT 정합)
+#     3. evidence 3 산출물 제출 (ADR-060 §결정 6 (d) + evidence-checks-registry.yaml promotion_criteria)
+
+on:
+  pull_request:
+    types: [opened, reopened, labeled, synchronize]
+
+permissions:
+  pull-requests: write
+  issues: read
+  contents: read
+
+# Race 직렬화 (PR 동일 번호 중복 fire 방지):
+concurrency:
+  group: sibling-pr-author-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  check-sibling-pr-label:
+    runs-on: ubuntu-latest
+    # warning mode (ADR-060 §결정 5) — workflow fail 이 PR merge 차단하지 않음.
+    # required_status_checks.contexts 부착 X.
+    continue-on-error: true
+    # Guard 1: sibling-pr label 부착 PR 만 검증 (skip 외 모든 경우)
+    # Guard 2: hotfix-bypass:sibling-pr-author-check label 부착 PR 은 skip (audit-trailed exception channel)
+    if: |
+      contains(github.event.pull_request.labels.*.name, 'sibling-pr') &&
+      !contains(github.event.pull_request.labels.*.name, 'hotfix-bypass:sibling-pr-author-check')
+    steps:
+      - name: Verify paired wrapper PR link
+        id: verify
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const body = pr.body || '';
+            const prRepo = `${context.repo.owner}/${context.repo.repo}`;
+
+            // ─── Guard 3: wrapper repo 자체 PR = skip (sibling 부재 영역) ───
+            // mclayer/plugin-codeforge 안의 PR 은 sibling 이 아닌 wrapper 본체.
+            // sibling-pr label 부착 자체가 mislabel 이지만 본 lint 영역 외 (별도 invariant lint 처리).
+            if (prRepo === 'mclayer/plugin-codeforge') {
+              core.info(`[skip] wrapper repo self-PR (${prRepo}#${pr.number}) — sibling 부재 영역`);
+              core.setOutput('verdict', 'skip');
+              core.setOutput('reason', 'wrapper-self-pr');
+              return;
+            }
+
+            // ─── 검증 1: PR body 에 paired wrapper PR link 존재 ───
+            // 패턴 1: `mclayer/plugin-codeforge#NNN` (GitHub auto-link short form)
+            // 패턴 2: `https://github.com/mclayer/plugin-codeforge/pull/NNN` (URL form)
+            // 패턴 3: `https://github.com/mclayer/plugin-codeforge/issues/NNN` (Issue → PR 자동 연결 케이스)
+            const shortFormRegex = /mclayer\/plugin-codeforge#(\d+)/gi;
+            const urlPullRegex = /https?:\/\/github\.com\/mclayer\/plugin-codeforge\/pull\/(\d+)/gi;
+            const urlIssueRegex = /https?:\/\/github\.com\/mclayer\/plugin-codeforge\/issues\/(\d+)/gi;
+
+            const matches = [];
+            let m;
+            while ((m = shortFormRegex.exec(body)) !== null) matches.push(`#${m[1]}`);
+            while ((m = urlPullRegex.exec(body)) !== null) matches.push(`#${m[1]}`);
+            while ((m = urlIssueRegex.exec(body)) !== null) matches.push(`#${m[1]}`);
+
+            const unique = [...new Set(matches)];
+
+            if (unique.length === 0) {
+              core.warning(`[anti-misuse] sibling-pr label 부착 but paired wrapper PR link 부재 (${prRepo}#${pr.number})`);
+              core.setOutput('verdict', 'fail');
+              core.setOutput('reason', 'paired-wrapper-pr-link-absent');
+              return;
+            }
+
+            core.info(`[verify] paired wrapper PR link detected: ${unique.join(', ')}`);
+            core.setOutput('verdict', 'pass');
+            core.setOutput('matched_refs', unique.join(','));
+
+      - name: Post audit comment on failure
+        if: steps.verify.outputs.verdict == 'fail'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          VERDICT_REASON: ${{ steps.verify.outputs.reason }}
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const reason = process.env.VERDICT_REASON;
+            const ts = new Date().toISOString();
+
+            // Audit comment dedup — `[sibling-pr-anti-misuse]` marker 가 이미 있으면 skip
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              per_page: 100
+            });
+            const alreadyAudited = comments.some(c =>
+              c.body && c.body.includes('[sibling-pr-anti-misuse]')
+            );
+            if (alreadyAudited) {
+              core.info(`[audit] dedup — sibling-pr-anti-misuse comment already exists on PR #${pr.number}`);
+              return;
+            }
+
+            const auditBody = [
+              '[sibling-pr-anti-misuse] PR=' + pr.number + ' reason=' + reason + ' timestamp=' + ts,
+              '',
+              '**`sibling-pr` label anti-misuse 검출** (CFP-521 / ADR-010 Amendment 4 §결정 5).',
+              '',
+              '본 PR 에 `sibling-pr` label 이 부착되었으나 PR body 에 paired wrapper PR link 가 검출되지 않았습니다.',
+              '',
+              '**적법 조건** (ADR-010 Amendment 4 §결정 5):',
+              '- `sibling-pr` label = Orchestrator self-write 영역 (wrapper Story 의 sibling sync PR open 시점 자동 부착)',
+              '- PR body 에 paired wrapper PR link 의무: `mclayer/plugin-codeforge#NNN` 패턴 (또는 동일 repo URL 형식)',
+              '',
+              '**조치 옵션**:',
+              '1. PR body 에 paired wrapper PR link 추가 (예: `Related: mclayer/plugin-codeforge#NNN`)',
+              '2. `sibling-pr` label 부착 자체가 mislabel 인 경우 — label 제거',
+              '3. 예외적으로 bypass 필요 시 — `hotfix-bypass:sibling-pr-author-check` label 부착 (24h audit comment 의무 발의)',
+              '',
+              '**Warning tier**: 본 lint = advisory only (PR merge 차단하지 않음, ADR-060 §결정 5). 단 audit comment trail 보존.'
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              body: auditBody
+            });
+            core.info(`[audit] sibling-pr-anti-misuse comment posted on PR #${pr.number}`);
+
+            // Workflow fail signal (continue-on-error: true 이므로 PR merge 미차단)
+            core.setFailed(`sibling-pr label anti-misuse — paired wrapper PR link absent (reason=${reason})`);
+
+      - name: Audit comment for bypass usage
+        # hotfix-bypass:sibling-pr-author-check label 부착 PR 의 audit comment 의무 발의
+        # 본 job 의 if: 조건 (line 49) 가 bypass label 부착 PR 을 skip 하지만,
+        # 다른 workflow run 에서 동일 PR 의 bypass usage 를 검증할 수 없으므로
+        # 본 step 은 actually skip — bypass usage audit 은 check-bypass-audit-comment.sh 가 처리.
+        # (CFP-389 prior art reuse 패턴 — bypass 검증은 별도 workflow / step 책임 분리).
+        if: false
+        run: echo "bypass audit handled by check-bypass-audit-comment.sh (CFP-389 prior art)"

@@ -2,6 +2,7 @@ name: Bug
 description: 버그 리포트
 title: "[BUG] "
 labels: ["type:bug"]
+# CFP-140 / ADR-049: native Issue Type "Bug" attached by story-init.yml Action via API
 body:
   - type: textarea
     id: summary

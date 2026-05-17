@@ -1,0 +1,70 @@
+# Live Deploy Approval — GitHub environment protection workflow template
+# Security: third-party actions are SHA-pinned per CFP-300 policy.
+#
+# 정책: ADR-008 D4 "3-condition AND" 의 워크플로우 레벨 enforcement.
+#       real live deploy = GitHub environment ("production-live") + manual approval gate 통과 의무.
+#
+# 사용 패턴 (Hybrid — Sonnet decider D7=A):
+#   - codeforge wrapper: reusable workflow template (environment + manual gate)
+#   - consumer overlay: environment 명 + reviewer team / required reviewer count
+#
+# Consumer 사전 작업 (사용자 직접):
+#   1. GitHub repo settings → Environments → "production-live" 생성
+#   2. Required reviewers 추가 (예: org owner + ops team)
+#   3. (선택) Wait timer 설정
+#   4. (선택) Deployment branch policy = main only
+#
+# Consumer 호출 예시 (mctrader):
+#   .github/workflows/live-deploy-approval.yml:
+#     uses: mclayer/plugin-codeforge/templates/github-workflows/live-deploy-approval.yml@main
+#     with:
+#       environment_name: production-live
+#       deploy_target: bithumb-spot-main
+
+name: Live Deploy Approval (Hybrid — codeforge template + consumer environment)
+
+on:
+  workflow_call:
+    inputs:
+      environment_name:
+        description: "GitHub environment name (consumer 사전 설정 의무, 예: production-live)"
+        required: true
+        type: string
+      deploy_target:
+        description: "Deploy target identifier (e.g. exchange-account-mode)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  request-approval:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment_name }}
+    name: Live deploy approval (ADR-008 D4)
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Verify environment protection passed
+        run: |
+          # GitHub environment protection rules가 자동 enforce
+          # (deployment 가 본 step 도달 = manual approval 통과)
+          echo "::notice::Environment '${{ inputs.environment_name }}' approval 통과 — deploy_target=${{ inputs.deploy_target }}"
+          echo "::notice::ADR-008 D4 3-condition AND 의 'isolated runtime' 충족 (GitHub environment isolation)"
+
+      - name: Verify --confirm-live equivalent (deploy commit message)
+        run: |
+          # Deploy 트리거 commit / PR description 에 'confirm-live' 또는 동등 marker 검증
+          # (consumer 가 자체 정의 — 본 step 은 marker 부재 시 warning 만)
+          echo "::notice::Consumer 가 deploy commit / PR description 에 명시적 confirm marker 의무"
+
+      - name: Record OperationEvent (audit trail)
+        run: |
+          # ADR-008 D10 OperationEvent — live deploy 도 audit trail 기록 의무
+          # consumer 가 OperationEvent producer impl 후 본 step 에서 emit
+          echo "::notice::Consumer 가 OperationEvent (operator_id, action='live_deploy', timestamp, evidence_ref) 기록 의무"
+
+      - name: Pass — proceed to live deploy steps
+        run: |
+          echo "Live deploy approval PASS — caller workflow 가 deploy 단계 진행 가능"

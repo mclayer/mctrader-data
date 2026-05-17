@@ -1,0 +1,40 @@
+name: CFP key reservation (1-line)
+description: Brainstorming 시점 KEY 사전 확보 — Issue 생성 = key 확정 atomic moment (ADR-036 / CFP-260 / Option B)
+title: "[reservation] CFP-? — "
+labels: ["phase:reservation"]
+# CFP-140 / ADR-049: no Issue Type attached for reservation (phase:reservation = transient)
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Reservation
+        Issue 생성 직후 발급되는 `#<번호>` 가 KEY 가 됩니다 (`CFP-<#>`).
+
+        **사용 흐름**:
+        1. 본 Form 제출 → Issue 생성 → KEY = `CFP-<Issue#>` 확정
+        2. brainstorming spec / Phase 1 PR / Phase 2 PR 모두 이 KEY 인용 가능 (race-free)
+        3. spec 작성 후 Issue body 갱신 + label 변경: `phase:reservation` → `phase:요구사항` + `type:story` (또는 `type:epic`) → `story-init.yml` 자동 트리거
+        4. **30 일 미진행 시** `reservation-cleanup.yml` 가 자동 close
+
+        > **Race-free 보장**: GitHub Issue numbering 의 atomic guarantee 위임. 두 세션 동시 발의해도 서로 다른 # 받습니다.
+
+  - type: input
+    id: theme
+    attributes:
+      label: Theme (1-2 sentences, 갱신 예정)
+      description: brainstorming 주제 — spec 작성 후 Issue body 갱신 시 정확화
+      placeholder: 예) 결제 시스템 idempotency key 도입
+    validations:
+      required: false
+
+  - type: dropdown
+    id: type
+    attributes:
+      label: 예상 type (Issue body 갱신 시 확정)
+      options:
+        - story
+        - epic
+        - sub-task
+      default: 0
+    validations:
+      required: false

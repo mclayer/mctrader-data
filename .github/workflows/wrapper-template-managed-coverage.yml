@@ -1,0 +1,108 @@
+name: wrapper template managed coverage lint (warning mode)
+# CFP-745 Wave 2 Story-5 — authoring-guard lint
+# Tier: warning (ADR-060 §결정 5 — authoring drift guard, not blocking-on-pr)
+# Bypass channel: hotfix-bypass:wrapper-template-managed-coverage label (ADR-024 §결정 6.A)
+#
+# Purpose: wrapper plugin template overlay 파일 안 wrapper-managed content 가
+#   D4 marker block 또는 sidecar managed_paths 안에 위치하는지 authoring-time lint 검증.
+#   authoring drift (marker 밖으로 wrapper-managed content 이동) 시 early detection.
+#   reconcile-overlay.sh 의 runtime 보완 (authoring-time guard).
+#
+# reconcile-protocol-v1 §4.7 / ADR-027 Amendment 3 §결정 7.D / CFP-745 §8.2
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.claude/_overlay/**'
+      - 'scripts/check-wrapper-template-managed-coverage.sh'
+      - 'scripts/lib/validate_sidecar.py'
+      - 'templates/github-workflows/wrapper-template-managed-coverage.yml'
+      - '.github/workflows/wrapper-template-managed-coverage.yml'
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  wrapper-template-managed-coverage:
+    runs-on: ubuntu-latest
+    # warning tier (ADR-060 §결정 5) — continue-on-error: true
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Check bypass label
+        id: bypass
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          labels=$(gh pr view "$PR_NUMBER" --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+          echo "labels=$labels"
+          case ",$labels," in
+            *,hotfix-bypass:wrapper-template-managed-coverage,*)
+              echo "bypass=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "bypass=false" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Set up Python (for validate_sidecar.py)
+        if: steps.bypass.outputs.bypass == 'false'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Run wrapper template managed coverage lint
+        id: lint
+        if: steps.bypass.outputs.bypass == 'false'
+        env:
+          HOTFIX_BYPASS_WRAPPER_TEMPLATE_MANAGED_COVERAGE: "0"
+        run: |
+          set +e
+          bash scripts/check-wrapper-template-managed-coverage.sh 2>&1 | tee /tmp/coverage-lint.out
+          status=${PIPESTATUS[0]}
+          echo "exit_status=$status" >> "$GITHUB_OUTPUT"
+          # warning tier: always exit 0 (continue-on-error: true 보완)
+          exit 0
+
+      - name: Post lint result comment
+        if: always() && steps.bypass.outputs.bypass == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          LINT_STATUS: ${{ steps.lint.outputs.exit_status || '0' }}
+        run: |
+          set -euo pipefail
+          LINT_OUT="$(cat /tmp/coverage-lint.out 2>/dev/null || echo '(lint output 부재)')"
+          if [ "${LINT_STATUS:-0}" = "0" ]; then
+            HEADER="## wrapper template managed coverage — PASS (warning mode, CFP-745)"
+            FOOTER="authoring drift 없음. wrapper template overlay D4 marker coverage OK."
+          else
+            HEADER="## wrapper template managed coverage — WARN (authoring drift 감지)"
+            FOOTER=$'**warning tier (CFP-745 / ADR-060 §결정 5)**: PR merge 차단 아님.\n\n**authoring drift 가능성**: wrapper template 파일의 wrapper-managed content 가 D4 marker block 밖에 있을 수 있습니다.\n\n**권장**: D4 marker block (`# BEGIN/END wrapper-managed`) 추가 후 재실행.\n\n참조: ADR-027 §결정 7.A.1 (D4 marker syntax) + reconcile-protocol-v1 §4.7 (sidecar manifest schema).'
+          fi
+          BODY=$(printf '%s\n\n```\n%s\n```\n\n%s\n\n> warning mode (continue-on-error: true) — PR merge 차단 아님 (CFP-745 authoring-guard lint, 향후 승격 carrier 별도).' \
+            "$HEADER" "$LINT_OUT" "$FOOTER")
+          gh pr comment "$PR_NUMBER" --body "$BODY" || true  # comment 실패 = non-blocking
+
+      - name: Post bypass audit comment
+        if: steps.bypass.outputs.bypass == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          BODY="## wrapper template managed coverage — BYPASSED (hotfix-bypass:wrapper-template-managed-coverage)
+
+          **hotfix-bypass:wrapper-template-managed-coverage** label 감지 — lint skip.
+
+          **bypass 적용 사유를 PR description 또는 comment 에 명시해야 합니다** (audit trail 의무, ADR-024 §결정 6.A).
+
+          > CFP-745 authoring-guard lint bypass. warning tier — PR merge 차단은 없었으나 audit trail 의무는 유지."
+          gh pr comment "$PR_NUMBER" --body "$BODY" || true
