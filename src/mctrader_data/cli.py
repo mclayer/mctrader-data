@@ -890,6 +890,121 @@ def compact_cmd(
         asyncio.run(_run())
 
 
+# ---------------------------------------------------------------------------
+# WS-A: promote-historical — date-bounded L1→L2→NAS+L3→NAS one-shot promotion
+# ---------------------------------------------------------------------------
+
+
+@main.command("promote-historical")
+@click.option("--root", required=True, help="data root (ex: /var/lib/mctrader/data)")
+@click.option("--start", "start", required=True, help="start date YYYY-MM-DD (inclusive)")
+@click.option("--end", "end", required=True, help="end date YYYY-MM-DD (inclusive)")
+@click.option("--exchange", default=None, help="target exchange only (default: auto-discover)")
+@click.option(
+    "--channel",
+    default="orderbooksnapshot",
+    show_default=True,
+    help="channel to promote (default: orderbooksnapshot, MCT-159 #48 safe)",
+)
+def promote_historical_cmd(
+    root: str,
+    start: str,
+    end: str,
+    exchange: str | None,
+    channel: str,
+) -> None:
+    """WS-A: date-bounded historical L1->L2->NAS+L3->NAS one-shot promotion.
+
+    Promotes historical L1 parquets outside the forward window (today/yesterday)
+    to L2/L3 tiers. exit 1 if counts['errors'] > 0.
+
+    Example::
+
+        python -m mctrader_data.cli promote-historical \\
+            --root /var/lib/mctrader/data \\
+            --start 2026-05-13 --end 2026-05-15 \\
+            --exchange upbit
+    """
+    import logging
+    import sys
+    from datetime import date as _date
+    from pathlib import Path
+
+    from mctrader_data.compactor.runner import run_historical_promotion
+    from mctrader_data.nas_storage.nas_uploader import NASUploader
+    from mctrader_data.nas_storage.dual_writer import DualWriter
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    log = logging.getLogger("mctrader-data.promote-historical")
+
+    try:
+        start_date = _date.fromisoformat(start)
+        end_date = _date.fromisoformat(end)
+    except ValueError as exc:
+        click.echo(f"[ERROR] invalid date: {exc}", err=True)
+        sys.exit(2)
+
+    # NAS dual-write (same env-var contract as compact_cmd)
+    dual_writer = None
+    if os.environ.get("NAS_MINIO_ENDPOINT"):
+        from mctrader_data.nas_storage.retry_queue import RetryQueue
+
+        retry_queue = RetryQueue(path=Path(root) / "nas_retry_queue.sqlite")
+        nas_uploader = NASUploader(
+            endpoint=os.environ["NAS_MINIO_ENDPOINT"],
+            access_key=os.environ["NAS_MINIO_ACCESS_KEY"],
+            secret_key=os.environ["NAS_MINIO_SECRET_KEY"],
+            bucket=os.environ.get("NAS_MINIO_BUCKET", "mctrader-market"),
+            retry_queue=retry_queue,
+        )
+        dual_writer = DualWriter(nas_uploader=nas_uploader, local_root=Path(root))
+        log.info(
+            "[promote-historical] NAS dual-write enabled: endpoint=%s bucket=%s",
+            os.environ["NAS_MINIO_ENDPOINT"],
+            os.environ.get("NAS_MINIO_BUCKET", "mctrader-market"),
+        )
+    else:
+        log.warning(
+            "[promote-historical] NAS_MINIO_ENDPOINT not set — NAS upload disabled (degraded mode)"
+        )
+
+    if dual_writer is None:
+        click.echo(
+            "[ERROR] NAS_MINIO_ENDPOINT env not set — cannot promote without DualWriter",
+            err=True,
+        )
+        sys.exit(1)
+
+    log.info(
+        "[promote-historical] root=%s start=%s end=%s exchange=%s channel=%s",
+        root, start_date, end_date, exchange or "*", channel,
+    )
+
+    counts = run_historical_promotion(
+        Path(root),
+        start_date=start_date,
+        end_date=end_date,
+        dual_writer=dual_writer,
+        exchange=exchange,
+        channel=channel,
+    )
+
+    click.echo(f"[promote-historical] {counts}")
+    log.info(
+        "[promote-historical] DONE partitions=%d l2=%d l3=%d skipped=%d errors=%d",
+        counts["partitions_processed"],
+        counts["l2_compacted"],
+        counts["l3_compacted"],
+        counts["skipped_no_l1"],
+        counts["errors"],
+    )
+
+    sys.exit(0 if counts["errors"] == 0 else 1)
+
+
 # MCT-93 (X4 of MCT-89) — diagnostic surface
 
 
