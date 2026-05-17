@@ -301,6 +301,26 @@ class CompactorRunner:
 _LEGACY_BATCH_DEFAULT = 500
 
 
+def _resolve_legacy_nas_key(parquet: Path, root: Path) -> str:
+    """legacy local parquet → 실제 NAS object key (tier-aware, WS-B / MCT-189 #75 post-merge FIX).
+
+    production 실측 확정 스킴 (docker exec boto3 head_object):
+      - tier=L1   → "l1/" + rel   (DualWriter.put_l1: nas_key = "l1/" + rel.as_posix())
+      - tier=L2/3 → rel (평면)     (_dispatch_dual_write: relative_to(root) 평면)
+      - tier 없음 → rel (평면)     (quarantine 등 — NAS 부재 시 HEAD 404 → preserved 안전망)
+
+    기존 버그: 전 tier 를 평면 rel 로 조회 → tier=L1 객체(NAS=l1/ prefix)는 항상 404
+    → PromotionVerifyError → preserved → 117GB L1 영구 미회수.
+    """
+    relative = parquet.relative_to(root)
+    rel = relative.as_posix()
+    tier = next(
+        (part.split("=", 1)[1] for part in relative.parts if part.startswith("tier=")),
+        "",
+    )
+    return f"l1/{rel}" if tier == "L1" else rel
+
+
 def scan_and_cleanup_legacy(
     root: Path,
     nas_uploader: NASUploader,
@@ -348,7 +368,7 @@ def scan_and_cleanup_legacy(
             break  # 자체 페이싱 — 다음 6-min sweep 에서 이어서 진행
         # local → NAS key 변환: root 기준 relative path, POSIX 경로
         rel = parquet.relative_to(root)
-        nas_key = str(rel).replace("\\", "/")
+        nas_key = _resolve_legacy_nas_key(parquet, root)
         try:
             result = promote_l1(
                 local_path=parquet,
