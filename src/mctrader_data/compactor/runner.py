@@ -306,7 +306,6 @@ class CompactorRunner:
 _LEGACY_BATCH_DEFAULT = 500
 
 
-
 def scan_and_cleanup_legacy(
     root: Path,
     nas_uploader: NASUploader,

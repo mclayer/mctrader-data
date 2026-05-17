@@ -26,6 +26,7 @@ __all__ = [
     "build_nas_prefix",
     "build_legacy_nas_key",
     "build_legacy_l1_prefix",
+    "legacy_key_to_canonical",
 ]
 
 
@@ -227,3 +228,19 @@ def build_legacy_l1_prefix(
         f"l1/market/{channel}/schema_version={schema_ver}/tier=L1/"
         f"exchange={exchange}/symbol={symbol}/date={date_str}/"
     )
+
+
+def legacy_key_to_canonical(key: str) -> str:
+    """alias-overlap canonical key: legacy l1/ prefix → flat canonical.
+
+    Dual-read window 동안 flat key 와 legacy key 가 동일 content 를 가리킬 때
+    canonical dedup + canonical run_id hash input 산출용.
+
+    "l1/market/..." → "market/..."  (legacy L1 prefix strip)
+    "market/..."    → "market/..."  (flat key, no-op)
+
+    l1/ literal 은 본 helper (SSOT) 에서만 — grep gate INV-1 정합 (ADR-034 §결정 2).
+
+    U5 완료(re-key 완료) 후 dual-read fallback 제거 시 build_legacy_* 와 함께 회수.
+    """
+    return key.removeprefix("l1/")
