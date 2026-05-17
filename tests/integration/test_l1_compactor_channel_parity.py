@@ -63,8 +63,10 @@ from __future__ import annotations
 
 import json
 import tempfile
-import pytest
+from collections.abc import Iterator
 from pathlib import Path
+
+import pytest
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -77,12 +79,13 @@ from mctrader_data.compactor.l1 import L1Compactor, _schema_version
 # ============================================================================
 
 @pytest.fixture
-def tmp_wal_root() -> Path:
+def tmp_wal_root() -> Iterator[Path]:
     """Temporary WAL root directory for tests.
 
-    Uses tempfile.mkdtemp() (shorter path than pytest tmp_path) to stay under
-    Windows MAX_PATH=260 limit. The ts-prefix adds ~17 chars to each parquet
-    filename, and the deep Hive partition layout consumes most of the budget.
+    Uses tempfile.TemporaryDirectory() (shorter path than pytest tmp_path) to
+    stay under Windows MAX_PATH=260 limit. The ts-prefix adds ~17 chars to each
+    parquet filename, and the deep Hive partition layout consumes most of the
+    budget.
     """
     with tempfile.TemporaryDirectory() as d:
         yield Path(d)

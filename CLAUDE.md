@@ -77,9 +77,7 @@ _CHANNEL_SCHEMA_VERSION = {
 - channel 추가 시 `_CHANNEL_SCHEMA_VERSION` + `_convert_to_arrow` + `_arrow_schema_for_channel` 동시 갱신 의무
 - **NAS object key 평면 cross-ref (ADR-034 §결정 1)**: compactor 출력 NAS key = `market/<channel>/schema_version=*/tier=L{1,2,3}/...` (`l1/` prefix 제거, 전 tier 균질 layout). nas_key 산출 = 단일 helper `src/mctrader_data/nas_storage/nas_key.py::build_nas_key()` 경유 의무 (U2-HELPER LAND 후, U5 grep gate 박제).
 
-## nas_key SSOT 규약 (EPIC-nas-key-unification, U1-ADR LAND 2026-05-17)
-
-**Plan section (U2-HELPER LAND 시 본 section 활성 — U1-ADR PR 가 plan 박제)**.
+## nas_key SSOT 규약 (EPIC-nas-key-unification, U2-HELPER LAND 2026-05-18)
 
 ### Layout (ADR-034 §결정 1)
 
@@ -96,16 +94,22 @@ market/<channel>/schema_version=*/tier=L{1,2,3}/exchange=*/symbol=*/date=*/[hour
 
 **API**:
 ```python
-build_nas_key(parquet_path, root, *, tier=None)  # 평면 단일 SSOT
-build_l1_prefix(channel, schema_ver, exchange, symbol, date_str)  # L2 GET source prefix
-build_legacy_nas_key(parquet_path, root)  # [Deprecated U5 회수] dual-read 윈도우 fallback
+build_nas_key(parquet_path, root, *, tier=None)  # 평면 단일 SSOT (PUT: SSOT-1/2/5)
+build_l1_prefix(*, channel, schema_ver, exchange, symbol, date_str)  # L2 GET flat prefix (SSOT-4)
+build_nas_prefix(*, tier, channel, schema_ver, exchange, symbol, date_str)  # tier-agnostic GET (SSOT-6)
+build_legacy_nas_key(parquet_path, root)  # [Deprecated U5 회수] cleanup HEAD (SSOT-3)
+build_legacy_l1_prefix(*, channel, ...)  # [Deprecated U5 회수] L2 GET legacy fallback (§11.2-A Option A)
 ```
 
-**Caller 흡수 4 분산점** (모두 helper 1줄 호출):
-- `dual_writer.py::put_l1` (line 371)
-- `runner.py::_dispatch_dual_write` (line 265)
-- `runner.py::scan_and_cleanup_legacy` (line 350-351, Phase 1 WS-B helper 흡수)
-- `l2.py::_l1_nas_source` (line 157-160)
+**Caller 흡수 6 분산점** (모두 helper 1줄 호출, ADR-034 §결정 2 6-row amendment):
+- `dual_writer.py::put_l1` — `build_nas_key(path, local_root, tier="L1")` (SSOT-1)
+- `runner.py::_dispatch_dual_write` — `build_nas_key(parquet, root, tier=tier)` (SSOT-2)
+- `runner.py::scan_and_cleanup_legacy` — `build_legacy_nas_key(parquet, root)` (SSOT-3)
+- `l2.py::_l1_nas_source` — `build_l1_prefix(...) + build_legacy_l1_prefix(...)` dual-list (SSOT-4)
+- `runner.py::_historical_dual_write` — `build_nas_key(parquet, root, tier=tier)` (SSOT-5)
+- `l3.py::_compact_day_nas` — `build_nas_prefix(tier="L2", ...)` (SSOT-6)
+
+**grep 가드**: `tests/integration/test_nas_key_ssot.py` INV-1 (패턴 A/B/C 0-hits 박제)
 
 ### Dual-read 윈도우 (ADR-034 §결정 3)
 

@@ -8,7 +8,7 @@ production 실측 (docker exec boto3 head_object):
 """
 from pathlib import Path
 
-from mctrader_data.compactor.runner import _resolve_legacy_nas_key
+from mctrader_data.nas_storage.nas_key import build_legacy_nas_key as _resolve_legacy_nas_key
 
 
 def test_l1_gets_l1_prefix(tmp_path: Path) -> None:
