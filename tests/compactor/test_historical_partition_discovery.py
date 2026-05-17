@@ -79,6 +79,33 @@ def test_discovery_empty_when_no_match(tmp_path: Path) -> None:
     assert found == []
 
 
+def test_discovery_finds_files_under_node_subdir(tmp_path: Path) -> None:
+    """Production L1 layout includes node=<id>/ subdir — discovery must use rglob (not glob).
+
+    Regression guard against the non-recursive bug that would return 0 partitions
+    on every real production root (L1Compactor.compact_segment writes
+    date=<d>/node=<node_id>/part-<run_id>.parquet — see src/mctrader_data/compactor/l1.py
+    around the _output_path build).
+    """
+    d = (
+        tmp_path
+        / "market" / "orderbooksnapshot"
+        / "schema_version=orderbook_snapshot.v1" / "tier=L1"
+        / "exchange=upbit" / "symbol=KRW-BTC" / "date=2026-05-14"
+        / "node=NODE_A"
+    )
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "part-realprod.parquet").write_bytes(b"x")
+
+    found = _discover_partitions_in_range(
+        tmp_path,
+        channel="orderbooksnapshot",
+        start_date=date(2026, 5, 14),
+        end_date=date(2026, 5, 14),
+    )
+    assert found == [("upbit", "KRW-BTC", date(2026, 5, 14))]
+
+
 def test_discovery_skips_empty_l1_directory(tmp_path: Path) -> None:
     """date partition directory exists but contains no part-*.parquet → not returned."""
     empty = (

@@ -427,7 +427,10 @@ def _discover_partitions_in_range(
             continue
         if not (start_date <= d <= end_date):
             continue
-        if not any(date_dir.glob("part-*.parquet")):
+        # Production L1 path: date=<d>/node=<node_id>/part-<run_id>.parquet
+        # → recursive rglob required (non-recursive glob misses every prod file
+        # and silently returns 0 partitions on real data).
+        if not any(date_dir.rglob("part-*.parquet")):
             continue
         out.append((ex, sym, d))
     return sorted(out)
