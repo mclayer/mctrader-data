@@ -20,7 +20,7 @@ L2/L3 compactor 의 input 파일 정렬 키는 **content-derived ts_utc** 이다
 ## 영향
 
 - `src/mctrader_data/compactor/l2.py:70` (compact_hour local) + `l2.py:163` (_compact_hour_nas)
-- `src/mctrader_data/compactor/l3.py:74` (compact_day local) + `_compact_day_nas` (defensive)
+- `src/mctrader_data/compactor/l3.py:68` (compact_day local) + `_compact_day_nas` (defensive)
 - 신규 helper `_extract_min_ts(path_or_metadata)` 단일 SSOT
 
 ## 호환성

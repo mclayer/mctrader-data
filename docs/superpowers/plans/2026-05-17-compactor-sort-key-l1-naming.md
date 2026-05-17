@@ -60,7 +60,7 @@ L2/L3 compactor 의 input 파일 정렬 키는 **content-derived ts_utc** 이다
 ## 영향
 
 - `src/mctrader_data/compactor/l2.py:70` (compact_hour local) + `l2.py:163` (_compact_hour_nas)
-- `src/mctrader_data/compactor/l3.py:74` (compact_day local) + `_compact_day_nas` (defensive)
+- `src/mctrader_data/compactor/l3.py:68` (compact_day local) + `_compact_day_nas` (defensive)
 - 신규 helper `_extract_min_ts(path_or_metadata)` 단일 SSOT
 
 ## 호환성
@@ -878,7 +878,7 @@ git commit -m "fix(l2): _compact_hour_nas content-derived sort key (latent forwa
 
 **Files:**
 - Create: `tests/compactor/test_l3_sort_defensive.py`
-- Modify: `src/mctrader_data/compactor/l3.py:74` (sorted call site)
+- Modify: `src/mctrader_data/compactor/l3.py:68` (sorted call site)
 
 - [ ] **Step 1: 실패 회귀 테스트 작성 (hour 당 다중 L2 force fixture)**
 
@@ -963,7 +963,7 @@ Expected: FAIL — quarantine.
 
 - [ ] **Step 3: `compact_day` local fallback sort key 교체**
 
-Edit `src/mctrader_data/compactor/l3.py:74` 영역 — `l2_files = sorted(l2_dir.rglob("part-*.parquet")) if l2_dir.exists() else []` 를:
+Edit `src/mctrader_data/compactor/l3.py:68` 영역 — `l2_files = sorted(l2_dir.rglob("part-*.parquet")) if l2_dir.exists() else []` 를:
 
 ```python
         # ADR-017 Amendment 3: L3 도 content-derived sort key (defensive — uniform API)
