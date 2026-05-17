@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -237,7 +238,11 @@ class DualWriter:
 
         if nas_put_result.status in _COMMITTED_STATUSES:
             # Both sides committed → atomic visible (local rename)
-            tmp_path.rename(local_path)
+            # os.replace() is used instead of Path.rename() for cross-platform
+            # compatibility: on Windows, Path.rename() raises FileExistsError when
+            # the target already exists (e.g. data==local_path idempotent re-write).
+            # os.replace() is atomic and silently replaces on both Linux and Windows.
+            os.replace(str(tmp_path), str(local_path))
             # MCT-189 D-2 A: DualWriter self-delete (caller 0건 재발 차단)
             # source(data as Path) 를 promote_l1() 4중 verify 후 삭제 (Path 입력 한정)
             dwr_status: Literal["committed", "local_only", "hard_floor_blocked"] = "committed"
@@ -246,7 +251,7 @@ class DualWriter:
 
         elif nas_put_result.status == _QUEUED_STATUS:
             # NAS queued (retry_queue persistent) → local visible, caller source safe to delete
-            tmp_path.rename(local_path)
+            os.replace(str(tmp_path), str(local_path))
             dwr_status = "local_only"
 
         elif nas_put_result.status == _HARD_FLOOR_STATUS:

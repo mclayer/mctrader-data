@@ -397,6 +397,186 @@ def scan_and_cleanup_legacy(
     return {"cleaned": cleaned, "preserved": preserved, "errors": errors, "batch_limit": batch_limit}
 
 
+def _discover_partitions_in_range(
+    root: Path,
+    *,
+    channel: str,
+    start_date: date,
+    end_date: date,
+    exchange: str | None = None,
+) -> list[tuple[str, str, date]]:
+    """root/market/<channel>/schema_version=*/tier=L1/exchange=*/symbol=*/date=*/ 파티션 발견.
+
+    Returns sorted list of (exchange, symbol, partition_date) within [start_date, end_date] inclusive.
+    `exchange` 가 주어지면 해당 거래소만, 아니면 발견된 모든 거래소.
+    L1 파일이 1개 이상 있는 파티션만 반환 (빈 디렉터리 무시).
+    """
+    out: list[tuple[str, str, date]] = []
+    channel_root = root / "market" / channel
+    if not channel_root.exists():
+        return out
+    for date_dir in channel_root.glob("schema_version=*/tier=L1/exchange=*/symbol=*/date=*"):
+        try:
+            ex = next(p.split("=", 1)[1] for p in date_dir.parts if p.startswith("exchange="))
+            sym = next(p.split("=", 1)[1] for p in date_dir.parts if p.startswith("symbol="))
+            date_str = next(p.split("=", 1)[1] for p in date_dir.parts if p.startswith("date="))
+            d = date.fromisoformat(date_str)
+        except (StopIteration, ValueError):
+            continue
+        if exchange is not None and ex != exchange:
+            continue
+        if not (start_date <= d <= end_date):
+            continue
+        # Production L1 path: date=<d>/node=<node_id>/part-<run_id>.parquet
+        # → recursive rglob required (non-recursive glob misses every prod file
+        # and silently returns 0 partitions on real data).
+        if not any(date_dir.rglob("part-*.parquet")):
+            continue
+        out.append((ex, sym, d))
+    return sorted(out)
+
+
+def _historical_dual_write(
+    parquet_path: Path, *, root: Path, tier: str, dual_writer: DualWriter
+) -> str:
+    """L2/L3 parquet → DualWriter NAS PUT. CompactorRunner._dispatch_dual_write 동형.
+
+    nas_key 산출 = relative_to(root) 평면 (forward L2/L3 PUT 와 byte-동형, WS-B sweep verify 와도 정합).
+    Returns DualWriteResult.status (committed | local_only | hard_floor_blocked).
+    """
+    import hashlib
+    nas_key = str(parquet_path.relative_to(root)).replace("\\", "/")
+    sha = hashlib.sha256()
+    with parquet_path.open("rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            sha.update(chunk)
+    sha256 = sha.hexdigest()
+    result = dual_writer.write(
+        local_path=parquet_path, nas_key=nas_key, data=parquet_path, sha256=sha256,
+    )
+    # Status-aware logging (mirror _dispatch_dual_write level dispatch).
+    if result.status == "committed":
+        log.info("[historical] dual-write OK tier=%s key=%s", tier, nas_key)
+    elif result.status == "local_only":
+        log.warning(
+            "[historical] dual-write local_only tier=%s key=%s (retry queue enqueued)",
+            tier, nas_key,
+        )
+    elif result.status == "hard_floor_blocked":
+        log.error(
+            "[historical] dual-write HARD_FLOOR_BLOCKED tier=%s key=%s — SOP MANUAL_GATE",
+            tier, nas_key,
+        )
+    else:
+        log.warning(
+            "[historical] dual-write unknown status %r tier=%s key=%s",
+            result.status, tier, nas_key,
+        )
+    return result.status
+
+
+def run_historical_promotion(
+    root: Path,
+    *,
+    start_date: date,
+    end_date: date,
+    dual_writer: DualWriter,
+    exchange: str | None = None,
+    channel: str = "orderbooksnapshot",
+) -> dict[str, int]:
+    """date-bounded one-shot historical tier promotion (WS-A).
+
+    forward _run_l2/_run_l3 가 [today, yesterday] 만 처리 → 그 너머는 영구 미승급.
+    이 함수는 명시 date 범위 [start_date, end_date] 의 L1 → L2 (hour=0..23) → NAS PUT
+    + L3 (day) → NAS PUT 을 일회성으로 수행. forward 윈도우 코드 불변.
+
+    무손실 게이트: dual_writer.write committed 분기 (forward 와 동일). 회수 단계는 별 —
+    WS-B sweep (scan_and_cleanup_legacy in main) 이 다음 6분 cycle 에서 promote_l1
+    4중 HEAD verify 통과 시 local L1 reclaim.
+
+    재실행 안전: deterministic run_id 출력 파일명 + NAS PUT HEAD-then-PUT sha256
+    idempotency. channel 한정 + #48 회피.
+
+    Returns:
+        {
+          "partitions_processed": int,   # number of (exchange, symbol, date) partitions visited
+          "l2_compacted": int,            # L2 hour-buckets with NAS status == "committed"
+          "l3_compacted": int,            # L3 day rollups with NAS status == "committed"
+          "skipped_no_l1": int,           # hour-slots (NOT partitions) where compact_hour
+                                          # returned None (no L1 in that hour)
+          "errors": int,                  # exception raises + non-committed NAS statuses
+                                          # (local_only / hard_floor_blocked / unknown)
+        }
+    """
+    log.info(
+        "[historical] start exchange=%s channel=%s range=[%s..%s]",
+        exchange or "*", channel, start_date, end_date,
+    )
+    partitions = _discover_partitions_in_range(
+        root, channel=channel, start_date=start_date, end_date=end_date, exchange=exchange,
+    )
+    log.info("[historical] discovered %d partitions", len(partitions))
+
+    l2 = L2Compactor(root=root, nas_uploader=None)
+    l3 = L3Compactor(root=root, nas_uploader=None)
+
+    counts = {
+        "partitions_processed": 0, "l2_compacted": 0, "l3_compacted": 0,
+        "skipped_no_l1": 0, "errors": 0,
+    }
+    for ex, sym, d in partitions:
+        counts["partitions_processed"] += 1
+        for hour in range(24):
+            try:
+                out = l2.compact_hour(
+                    exchange=ex, symbol=sym, channel=channel, date_utc=d, hour_utc=hour,
+                )
+            except Exception:
+                log.exception(
+                    "[historical] L2 compact failed ex=%s sym=%s date=%s hour=%d",
+                    ex, sym, d, hour,
+                )
+                counts["errors"] += 1
+                continue
+            if out is None:
+                counts["skipped_no_l1"] += 1
+                continue
+            try:
+                status = _historical_dual_write(out, root=root, tier="L2", dual_writer=dual_writer)
+            except Exception:
+                log.exception("[historical] L2 dual-write failed path=%s", out)
+                counts["errors"] += 1
+                continue
+            if status == "committed":
+                counts["l2_compacted"] += 1
+            else:
+                # local_only / hard_floor_blocked / unknown → not a clean NAS commit
+                counts["errors"] += 1
+        try:
+            out = l3.compact_day(exchange=ex, symbol=sym, channel=channel, date_utc=d)
+        except Exception:
+            log.exception(
+                "[historical] L3 compact failed ex=%s sym=%s date=%s", ex, sym, d,
+            )
+            counts["errors"] += 1
+            continue
+        if out is not None:
+            try:
+                status = _historical_dual_write(out, root=root, tier="L3", dual_writer=dual_writer)
+            except Exception:
+                log.exception("[historical] L3 dual-write failed path=%s", out)
+                counts["errors"] += 1
+                continue
+            if status == "committed":
+                counts["l3_compacted"] += 1
+            else:
+                # local_only / hard_floor_blocked / unknown → not a clean NAS commit
+                counts["errors"] += 1
+
+    log.info("[historical] done counts=%s", counts)
+    return counts
+
+
 def run_backfill(
     root: Path,
     *,
