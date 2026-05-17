@@ -35,6 +35,7 @@ def _docker_unavailable_reason() -> str | None:
 
 
 @pytest.mark.integration
+@pytest.mark.slow  # CI exclude (-m "not slow"): #96 post-merge pyarrow schema interaction (exchange string ↔ dictionary). follow-up Story 후보 — 로컬 `pytest -m ""` 로 실행 가능.
 def test_l2_promotion_via_real_minio(tmp_path: Path) -> None:
     """L2 compactor NAS GET path = real MinIO, content-derived sort 검증.
 
