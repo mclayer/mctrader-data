@@ -896,7 +896,12 @@ def compact_cmd(
 
 
 @main.command("promote-historical")
-@click.option("--root", required=True, help="data root (ex: /var/lib/mctrader/data)")
+@click.option(
+    "--root",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, dir_okay=True),
+    help="data root (ex: /var/lib/mctrader/data)",
+)
 @click.option("--start", "start", required=True, help="start date YYYY-MM-DD (inclusive)")
 @click.option("--end", "end", required=True, help="end date YYYY-MM-DD (inclusive)")
 @click.option("--exchange", default=None, help="target exchange only (default: auto-discover)")
@@ -947,6 +952,13 @@ def promote_historical_cmd(
         click.echo(f"[ERROR] invalid date: {exc}", err=True)
         sys.exit(2)
 
+    if start_date > end_date:
+        click.echo(
+            f"[ERROR] --start {start_date} is after --end {end_date}",
+            err=True,
+        )
+        sys.exit(2)
+
     # NAS dual-write (same env-var contract as compact_cmd)
     dual_writer = None
     if os.environ.get("NAS_MINIO_ENDPOINT"):
@@ -966,14 +978,10 @@ def promote_historical_cmd(
             os.environ["NAS_MINIO_ENDPOINT"],
             os.environ.get("NAS_MINIO_BUCKET", "mctrader-market"),
         )
-    else:
-        log.warning(
-            "[promote-historical] NAS_MINIO_ENDPOINT not set — NAS upload disabled (degraded mode)"
-        )
 
     if dual_writer is None:
         click.echo(
-            "[ERROR] NAS_MINIO_ENDPOINT env not set — cannot promote without DualWriter",
+            "[ERROR] NAS_MINIO_ENDPOINT env not set — promote-historical requires DualWriter",
             err=True,
         )
         sys.exit(1)
