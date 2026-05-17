@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import logging
 import os
 from datetime import date
 from pathlib import Path
@@ -23,7 +24,10 @@ from typing import TYPE_CHECKING
 import pyarrow.parquet as pq
 
 from mctrader_data.compactor.l1 import _schema_version
+from mctrader_data.compactor.sort_key import _extract_min_ts
 from mctrader_data.metrics import compactor_writer_open_count
+
+_log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from mctrader_data.nas_storage.nas_uploader import NASUploader
@@ -65,7 +69,19 @@ class L3Compactor:
 
         # Local fallback (backward compat — nas_uploader=None)
         # Read individual files to avoid Hive auto-discovery conflict
-        l2_files = sorted(l2_dir.rglob("part-*.parquet")) if l2_dir.exists() else []
+        # ADR-017 Amendment 3: L3 도 content-derived sort key (defensive — uniform API)
+        if l2_dir.exists():
+            candidates = list(l2_dir.rglob("part-*.parquet"))
+            keyed = []
+            for p in candidates:
+                ts = _extract_min_ts(p)
+                if ts is None:
+                    _log.warning("[L3Compactor] skip 0-row L2 file: %s", p)
+                    continue
+                keyed.append((p, ts))
+            l2_files = [p for p, _ts in sorted(keyed, key=lambda x: x[1])]
+        else:
+            l2_files = []
         if not l2_files:
             return None
 
