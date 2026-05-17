@@ -5,6 +5,7 @@ Primary: pq.read_metadata(path).row_group(N).column(ts_utc_idx).statistics.min
 Fallback: stats 부재/null 시 iter_batches(batch_size=1) first-row
 Edge: 0-row file → None (skip + warning)
 """
+import io
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -65,3 +66,13 @@ def test_zero_row_file_returns_none(tmp_path: Path) -> None:
     ])
     pq.write_table(pa.table({"ts_utc": [], "value": []}, schema=schema), str(p))
     assert _extract_min_ts(p) is None
+
+
+def test_stats_primary_via_bytesio(tmp_path: Path) -> None:
+    """BytesIO stream input (NAS GET stream 경로) — stats present case."""
+    p = tmp_path / "s.parquet"
+    ts0 = datetime(2026, 5, 13, 12, 0, 0, tzinfo=timezone.utc)
+    ts1 = datetime(2026, 5, 13, 12, 0, 5, tzinfo=timezone.utc)
+    _write_parquet(p, [ts0, ts1])
+    stream = io.BytesIO(p.read_bytes())
+    assert _extract_min_ts(stream) == ts0
