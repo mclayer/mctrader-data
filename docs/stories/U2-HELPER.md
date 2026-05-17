@@ -391,6 +391,59 @@ fix_event:
   phase_3_pl_audit_gap_resolution: "Pre-FIX latent breach (I-4 wording-SSOT + INV-D API contract) genuinely resolved by FIX iteration 1. Phase 3 PL self-check 3 boolean declaration genuinely PASS at post-FIX point."
 ```
 
+### FIX iteration 2 — code-review (2026-05-18)
+
+```yaml
+fix_event:
+  iteration: 2
+  date: 2026-05-18
+  trigger: review-verdict
+  lane: code-review
+  pl_agent: CodeReviewPLAgent (a9758ff8d948a5c7e)
+  source:
+    claude_review:
+      path: .review-outputs/claude-code-review-U2-HELPER.md
+      verdict: FIX
+    codex_review:
+      path: .review-outputs/codex-code-review-U2-HELPER.md
+      verdict: FIX
+    pl_final_integration:
+      verdict: FIX
+      counts: {p0: 0, p1: 2, p2: 3, nit: 0}
+      convergence_resolution: |
+        Both Claude (Opus 4.7 inline review) and Codex (adversarial-review + convergent review) 
+        independently flagged the SAME 2 P1 runtime-bugs at the SAME lines (l2.py:180 + l2.py:203).
+        Highest possible peer-review confidence — cross-track convergence on location + category + mitigation.
+  mechanical_category: runtime-bug (NOT minor-naming; runtime correctness, not doc-only)
+  fast_path_eligible: false (runtime bug, not doc fix)
+  scope_constraint: 구현 80% primary (l2.py) / 설계 20% secondary (§11.2-A + §11.6 wording 강화 — ArchitectPL judgment)
+  findings_summary:
+    p1_2:
+      - "l2.py:180 dual-list union 가 aliased key canonicalize 안 함 — U3 alias-overlap window (copy-before-delete) 동안 동일 parquet 가 market/ + l1/market/ 양쪽 존재 → 둘 다 L2 stream → row duplication or monotonic_violation → quarantine_l2 silent skip. §11.2-A 가 보호하려던 마이그레이션 window가 오히려 깨짐."
+      - "l2.py:203 run_id = sha256(flat_keys)[:16] 가 legacy-only → flat-only transition 미커버. 117GB pre-U2 partitions initial flat_keys=[] → constant run_id 'e3b0c44298fc1c14' → U3 re-key 후 NEW filename → orphan L2 file 같은 hour/node 디렉터리 공존 → L3 day-merge double L2 data."
+    p2_3:
+      - "test_dual_read_window.py:248 missing alias-overlap test + missing 3-step full-transition test (Findings 1+2 land 시 자동 해소)"
+      - "l2.py:179 inline comment '평면 우선, legacy fallback' contradicts actual set union symmetric semantics. Misleading."
+      - "runner.py:308 PEP8 cosmetic (triple blank line gap)"
+  pl_root_cause_diagnosis:
+    primary: "구현 80% — l2.py canonical dedup + canonical run_id (single file, ~30 lines impl + ~80 lines test)"
+    secondary: "설계 20% — Story §11.2-A 'dual-list union' + §11.6 INV-9 'flat_keys ONLY' wording 이 canonical-key identity 를 implicitly assume 했으나 explicit enforcement 부재. ArchitectPL judgment 으로 wording 강화 여부 결정."
+  fix_routing:
+    primary_path: DeveloperPL FIX re-spawn (l2.py canonical dedup + run_id, 2 regression tests)
+    secondary_path: ArchitectPL diagnosis (§11.2-A + §11.6 wording 강화 판단 — optional)
+    parallel_or_sequential: parallel (PL diagnoses lighter weight, doesn't block primary impl)
+  expected_deliverables:
+    - "l2.py:180 dual-list union → canonical dedup (e.g., dedupe by canonical key after stripping 'l1/' prefix)"
+    - "l2.py:203 run_id derivation → canonical key set (not raw flat_keys, includes legacy mapping for transition stability)"
+    - "tests/integration/test_dual_read_window.py 신규: alias-overlap test (4 keys: 2 flat + 2 legacy alias) + 3-step full-transition test (pre-U2 → alias-overlap → flat-only)"
+    - "(optional) Story §11.2-A + §11.6 wording 강화 — ArchitectPL 판정 결과 의존"
+  post_fix_re_verify:
+    obligation: CodeReviewPLAgent re-spawn (lighter — Claude+Codex re-review 생략, PL direct re-verify P1=0)
+    expected_outcome: PASS (P0=0 + P1=0, P2 자동 해소 via regression tests)
+  next_iteration_if_fail: 3 (max FIX 카운터 = 3)
+```
+
+
 ```
 
 

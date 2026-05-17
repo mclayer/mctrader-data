@@ -26,7 +26,6 @@ __all__ = [
     "build_nas_prefix",
     "build_legacy_nas_key",
     "build_legacy_l1_prefix",
-    "legacy_key_to_canonical",
 ]
 
 
@@ -230,7 +229,7 @@ def build_legacy_l1_prefix(
     )
 
 
-def legacy_key_to_canonical(key: str) -> str:
+def _legacy_key_to_canonical(key: str) -> str:
     """alias-overlap canonical key: legacy l1/ prefix → flat canonical.
 
     Dual-read window 동안 flat key 와 legacy key 가 동일 content 를 가리킬 때
