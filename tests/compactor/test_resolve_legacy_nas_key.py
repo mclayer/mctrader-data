@@ -45,3 +45,13 @@ def test_no_tier_component_stays_flat(tmp_path: Path) -> None:
     assert _resolve_legacy_nas_key(p, root) == (
         "market/orderbookdepth/quarantine/2026-05-17/monotonic_violation/part-tmp-1.parquet"
     )
+
+
+def test_tier_in_root_prefix_not_confused(tmp_path: Path) -> None:
+    # data root 자체에 tier= 컴포넌트가 있어도 Hive tier=L1 만 인식 (relative parts 기준)
+    root = tmp_path / "tier=staging" / "data"
+    p = root / "market/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/exchange=upbit/symbol=KRW-BTC/date=2026-05-14/node=N/part-abc.parquet"
+    assert _resolve_legacy_nas_key(p, root) == (
+        "l1/market/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/"
+        "exchange=upbit/symbol=KRW-BTC/date=2026-05-14/node=N/part-abc.parquet"
+    )

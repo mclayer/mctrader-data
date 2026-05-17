@@ -312,9 +312,10 @@ def _resolve_legacy_nas_key(parquet: Path, root: Path) -> str:
     기존 버그: 전 tier 를 평면 rel 로 조회 → tier=L1 객체(NAS=l1/ prefix)는 항상 404
     → PromotionVerifyError → preserved → 117GB L1 영구 미회수.
     """
-    rel = parquet.relative_to(root).as_posix()
+    relative = parquet.relative_to(root)
+    rel = relative.as_posix()
     tier = next(
-        (part.split("=", 1)[1] for part in parquet.parts if part.startswith("tier=")),
+        (part.split("=", 1)[1] for part in relative.parts if part.startswith("tier=")),
         "",
     )
     return f"l1/{rel}" if tier == "L1" else rel
