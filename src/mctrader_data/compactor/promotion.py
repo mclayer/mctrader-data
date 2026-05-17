@@ -113,7 +113,8 @@ def promote_l1(
     Args:
         local_path: L1 Parquet 파일 로컬 경로
         nas_uploader: NASUploader 인스턴스 (head_object 접근용)
-        nas_key: NAS object key (tier prefix 포함, 예: "l1/market/...")
+        nas_key: NAS object key (평면 layout, 예: "market/<channel>/schema_version=*/tier=L{1,2,3}/...").
+                 ADR-034 §결정 1 단일 평면 SSOT. caller = nas_storage/nas_key.py 의 build_nas_key() 산출.
         segment_id: 논리적 segment ID (logging + audit)
 
     Returns:

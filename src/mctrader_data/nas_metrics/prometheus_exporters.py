@@ -82,6 +82,17 @@ compactor_malformed_frame_total = Counter(
     ["channel", "exchange"],
 )
 
+# U2-HELPER: nas_key helper call counter (ADR-034 §결정 6 Monitoring SSOT, AC-EMIT)
+# caller label: 6 caller sites verbatim (active 10 / max 18 cardinality, Amendment 4 박제)
+# caller ∈ {dual_writer_put_l1, runner_dispatch_dual_write, runner_cleanup,
+#            runner_historical_dual_write, l2_compactor_get_source, l3_compactor_get_source}
+# tier ∈ {L1, L2, L3, unknown} (unknown = malformed-path safety sentinel, F-codex-3 박제)
+nas_key_helper_call_total = Counter(
+    "mctrader_nas_key_helper_call_total",
+    "Number of nas_key helper invocations (ADR-034 §Monitoring SSOT compliance, U2-HELPER)",
+    labelnames=("caller", "tier"),
+)
+
 if TYPE_CHECKING:
     pass
 

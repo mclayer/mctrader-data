@@ -127,10 +127,11 @@ def test_l1_nas_put_committed(tmp_path: Path) -> None:
     # put_streaming (or put) 호출 확인 (AC-6: NAS PUT trigger)
     assert mock_uploader.put_streaming.call_count >= 1 or mock_uploader.put.call_count >= 1  # type: ignore[attr-defined]
 
-    # nas_key = "l1/" prefix 확인 (R-3 mitigation)
+    # nas_key = 평면 "market/" prefix 확인 (U2-HELPER ADR-034 §결정 1 forward-fix)
     if mock_uploader.put_streaming.call_count >= 1:  # type: ignore[attr-defined]
         called_key = mock_uploader.put_streaming.call_args[0][1]  # type: ignore[attr-defined]
-        assert called_key.startswith("l1/"), f"tier prefix 위반: {called_key!r}"
+        assert called_key.startswith("market/"), f"U2-HELPER 평면 key 위반: {called_key!r}"
+        assert not called_key.startswith("l1/"), f"l1/ prefix 잔존 위반: {called_key!r}"
 
 
 # ─── test 2: NAS unreachable → retry_queue enqueue (AC-7) ────────────────────
@@ -218,8 +219,11 @@ def test_l1_nas_put_tier_prefix_enforce(tmp_path: Path) -> None:
         compactor.compact_segment(sealed)
 
     assert len(received_keys) == 1, f"put_streaming 호출 횟수 오류: {len(received_keys)}"
-    assert received_keys[0].startswith("l1/"), (
-        f"R-3 mitigation 위반: tier prefix 'l1/' 부재 — nas_key={received_keys[0]!r}"
+    assert received_keys[0].startswith("market/"), (
+        f"U2-HELPER 평면 key 위반: 'market/' prefix 부재 — nas_key={received_keys[0]!r}"
+    )
+    assert not received_keys[0].startswith("l1/"), (
+        f"U2-HELPER 위반: l1/ prefix 잔존 — nas_key={received_keys[0]!r}"
     )
 
 
