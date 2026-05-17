@@ -11,6 +11,7 @@ Marked as integration (runs in CI, not in --skip-integration mode).
 from __future__ import annotations
 
 import json
+import tempfile
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -56,7 +57,7 @@ def _write_sealed_segment(
     add_compacted: bool = False,
 ) -> Path:
     """Write a sealed WAL segment with n_records and optional .compacted marker."""
-    filename = f"segment-{ts_str}-NODE_TEST.ndjson.sealed"
+    filename = f"segment-{ts_str}-N1.ndjson.sealed"  # short node_id — Windows MAX_PATH=260 guard
     seg = date_dir / filename
     lines = [
         _make_ob_snapshot_record(ts=f"2026-05-13T{12 + i:02d}:00:00+00:00", exchange=exchange, symbol=symbol)
@@ -101,8 +102,11 @@ def test_backfill_e2e(tmp_path: Path) -> None:
     - .compacted sentinel created for each processed segment (INV-2)
     - BackfillManifest written (D5=B, INV-4)
     - Idempotency: second run processes 0 segments (INV-2)
+
+    Uses tempfile.mkdtemp for shorter root path — ts-prefix adds ~17 chars to
+    parquet filenames; Windows MAX_PATH=260 requires shorter base than pytest tmp_path.
     """
-    root = tmp_path
+    root = Path(tempfile.mkdtemp())
     exchange = "upbit"
     channel = "orderbooksnapshot"
     n_segments = 4
@@ -174,9 +178,13 @@ def test_backfill_e2e(tmp_path: Path) -> None:
 
 
 @pytest.mark.integration
-def test_verify_partial_loss_pass(tmp_path: Path) -> None:
-    """verify_backfill_partial_loss: all L1 present → PASS, fix_trigger=False."""
-    root = tmp_path
+def test_verify_partial_loss_pass() -> None:
+    """verify_backfill_partial_loss: all L1 present → PASS, fix_trigger=False.
+
+    Uses tempfile.mkdtemp for shorter root path — ts-prefix adds ~17 chars to
+    parquet filenames; Windows MAX_PATH=260 requires shorter base than pytest tmp_path.
+    """
+    root = Path(tempfile.mkdtemp())
 
     # Build and compact a segment
     _build_wal_tree(root=root, n_segments=2, n_records_each=2)

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,7 +23,7 @@ import yaml
 def _make_sealed_segment(
     date_dir: Path,
     ts_str: str = "20260513T120000Z",
-    node_id: str = "NODE_TEST",
+    node_id: str = "N1",  # short node_id — Windows MAX_PATH=260 guard (ts-prefix +17 chars)
     content: str = "",
     add_compacted: bool = False,
 ) -> Path:
@@ -172,12 +173,15 @@ def test_schema_compat_ob_snapshot(tmp_path: Path) -> None:
 
     Verifies that a backfill-sourced sealed segment compacted via L1Compactor
     produces the same Arrow schema as the normal MCT-166 path B output.
+
+    Uses tempfile.mkdtemp for shorter root — ts-prefix adds ~17 chars to parquet
+    filenames; Windows MAX_PATH=260 requires shorter base than pytest tmp_path.
     """
     from mctrader_data.compactor.backfill import iter_frozen_segments
     from mctrader_data.compactor.l1 import L1Compactor
     from mctrader_data.orderbook_snapshot_storage import _OB_SNAPSHOT_SCHEMA
 
-    root = tmp_path
+    root = Path(tempfile.mkdtemp())
     wal_root = root / "wal"
     exchange = "upbit"
     channel = "orderbooksnapshot"

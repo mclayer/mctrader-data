@@ -717,7 +717,9 @@ def test_l1_ordering_invariant_post_write(tmp_data_root: Path) -> None:
     wal_dir.mkdir(parents=True, exist_ok=True)
 
     # Create sample NDJSON WAL segment
-    wal_file = wal_dir / "segment-000.ndjson"
+    # Filename must follow segment-<YYYYMMDDTHHMMSSZ>-<node_id> convention
+    # (parse_ts_from_segment 호환 — Task 3 ts-prefix 의무)
+    wal_file = wal_dir / "segment-20260510T175502Z-N1.ndjson"
 
     now_utc = datetime(2026, 5, 10, 17, 55, 2, tzinfo=timezone.utc)
     records = []

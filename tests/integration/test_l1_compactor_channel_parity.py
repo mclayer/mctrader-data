@@ -62,6 +62,7 @@ Flat transform rule: 1 WAL frame (N levels) → N parquet rows (per-level flatte
 from __future__ import annotations
 
 import json
+import tempfile
 import pytest
 from pathlib import Path
 
@@ -76,9 +77,15 @@ from mctrader_data.compactor.l1 import L1Compactor, _schema_version
 # ============================================================================
 
 @pytest.fixture
-def tmp_wal_root(tmp_path: Path) -> Path:
-    """Temporary WAL root directory for tests."""
-    return tmp_path
+def tmp_wal_root() -> Path:
+    """Temporary WAL root directory for tests.
+
+    Uses tempfile.mkdtemp() (shorter path than pytest tmp_path) to stay under
+    Windows MAX_PATH=260 limit. The ts-prefix adds ~17 chars to each parquet
+    filename, and the deep Hive partition layout consumes most of the budget.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        yield Path(d)
 
 
 @pytest.fixture
@@ -128,12 +135,16 @@ def _write_orderbookdepth_segment(
     ndjson_content: str,
     exchange: str = "bithumb",
     symbol: str = "KRW-NIL",
-    node_id: str = "NODE_A"
+    node_id: str = "N1"
 ) -> Path:
     """Write orderbookdepth NDJSON directly to WAL, seal, and return sealed path.
 
     This helper bypasses WalIngester to write pre-formed NDJSON (since we don't have
     OrderbookDepthRecord dataclass yet during TDD RED phase).
+
+    Filename follows WAL convention: segment-<YYYYMMDDTHHMMSSZ>-<node_id>.ndjson.sealed
+    (parse_ts_from_segment 호환 — Task 3 ts-prefix 의무).
+    node_id default = 'N1' (short) to stay under Windows MAX_PATH=260.
     """
     wal_dir = (
         tmp_wal_root
@@ -145,8 +156,8 @@ def _write_orderbookdepth_segment(
     )
     wal_dir.mkdir(parents=True, exist_ok=True)
 
-    # Write NDJSON segment (not sealed yet)
-    segment_path = wal_dir / f"node={node_id}_seq=0.ndjson"
+    # Write NDJSON segment (not sealed yet) — segment-<ts>-<node_id> convention
+    segment_path = wal_dir / f"segment-20260510T175502Z-{node_id}.ndjson"
     segment_path.write_text(ndjson_content, encoding="utf-8")
 
     # Seal it (rename to .sealed)
