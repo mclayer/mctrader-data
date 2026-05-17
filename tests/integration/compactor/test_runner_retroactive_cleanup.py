@@ -2,12 +2,13 @@
 
 MCT-189 Phase 2 PR2: retroactive legacy parquet cleanup (runner.scan_and_cleanup_legacy).
 
-Scenarios (5):
+Scenarios (6):
 - test_legacy_with_nas_match_unlinks:           local + NAS(동일 sha256) → cleaned==1, local 부재 (INV-1 XOR)
 - test_legacy_with_nas_missing_preserved:       local + NAS 부재 → preserved==1, local 존재 (INV-4 안전망)
 - test_legacy_with_nas_sha256_mismatch_preserved: local + NAS sha256 mismatch → preserved==1, local 존재
 - test_legacy_returns_correct_counts:           정상 + fail 혼합 → cleaned==1 + preserved==1 exact counts
 - test_legacy_batch_limit_caps_sweep:           batch_limit=3, 5 files — 1차 sweep cleaned==3, 2차 sweep remaining==2
+- test_legacy_l2_uses_flat_key_unlinks:        tier=L2 flat key → NAS match → cleaned==1 (L2 회귀 가드)
 """
 from __future__ import annotations
 
