@@ -105,7 +105,7 @@ class TestScanAndCleanupLegacy:
         rel = "exchange=upbit/symbol=BTC/tier=L1/date=2024-01-01/part-001.parquet"
         local = _make_legacy_parquet(tmp_path, rel, content)
 
-        nas_key = f"market/{rel}"
+        nas_key = f"l1/market/{rel}"
         _put_object(minio_client, nas_key, content)
 
         result = scan_and_cleanup_legacy(tmp_path, nas_uploader)
@@ -146,7 +146,7 @@ class TestScanAndCleanupLegacy:
         rel = "exchange=upbit/symbol=XRP/tier=L1/date=2024-01-03/part-001.parquet"
         local = _make_legacy_parquet(tmp_path, rel, local_content)
 
-        nas_key = f"market/{rel}"
+        nas_key = f"l1/market/{rel}"
         _put_object(minio_client, nas_key, nas_content)
 
         result = scan_and_cleanup_legacy(tmp_path, nas_uploader)
@@ -167,7 +167,7 @@ class TestScanAndCleanupLegacy:
         content_ok = b"ok parquet content for count test abc"
         rel_ok = "exchange=bithumb/symbol=BTC/tier=L1/date=2024-02-01/part-001.parquet"
         local_ok = _make_legacy_parquet(tmp_path, rel_ok, content_ok)
-        nas_key_ok = f"market/{rel_ok}"
+        nas_key_ok = f"l1/market/{rel_ok}"
         _put_object(minio_client, nas_key_ok, content_ok)
 
         # 파일 2: NAS 부재 (→ preserved)
@@ -202,7 +202,7 @@ class TestScanAndCleanupLegacy:
             content = f"batch cap test content file {i} padding".encode()
             rel = f"exchange=upbit/symbol=BATCH{i}/tier=L1/date=2024-03-01/part-001.parquet"
             local = _make_legacy_parquet(tmp_path, rel, content)
-            nas_key = f"market/{rel}"
+            nas_key = f"l1/market/{rel}"
             _put_object(minio_client, nas_key, content)
             files.append(local)
 
@@ -228,3 +228,27 @@ class TestScanAndCleanupLegacy:
         # 모든 파일 삭제 확인
         remaining = [f for f in files if f.exists()]
         assert remaining == [], f"모든 파일 삭제 의무. remaining={remaining}"
+
+    def test_legacy_l2_uses_flat_key_unlinks(
+        self, tmp_path: Path, minio_client, nas_uploader
+    ) -> None:
+        """tier=L2 는 평면 key (l1/ prefix 미부착) → NAS match 시 cleaned==1 (회귀 가드).
+
+        _dispatch_dual_write 가 L2/L3 를 평면 relative_to(root) 로 PUT 하므로
+        cleanup 도 평면 키로 조회해야 한다 (tier-aware 분기 L2 경로 박제).
+        """
+        from mctrader_data.compactor.runner import scan_and_cleanup_legacy
+
+        content = b"legacy L2 parquet flat-key scheme"
+        rel = "orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L2/exchange=bithumb/symbol=KRW-SOL/date=2026-05-17/hour=22/node=MERGED/part-l2flat.parquet"
+        local = _make_legacy_parquet(tmp_path, rel, content)
+
+        nas_key = f"market/{rel}"  # 평면 — l1/ prefix 없음
+        _put_object(minio_client, nas_key, content)
+
+        result = scan_and_cleanup_legacy(tmp_path, nas_uploader)
+
+        assert result["cleaned"] == 1
+        assert result["preserved"] == 0
+        assert result["errors"] == 0
+        assert not local.exists(), "L2 평면 키 NAS match → local 삭제 (INV-1 XOR)"
