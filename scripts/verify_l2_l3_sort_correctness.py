@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 import sys
 from datetime import datetime, timezone
@@ -52,11 +53,13 @@ def main(argv: list[str] | None = None) -> int:
 
     files = list(l1_root.rglob(f"date={args.date}/**/part-*.parquet"))
 
+    _log = logging.getLogger(__name__)
     legacy = 0
     new = 0
     stats_primary = 0
     fallback = 0
     zero_row = 0
+    error_count = 0
     extracted: list[tuple[Path, object]] = []
 
     for f in files:
@@ -78,7 +81,14 @@ def main(argv: list[str] | None = None) -> int:
             )
         except Exception:
             stats_ok = False
-        ts = _extract_min_ts(f)
+        try:
+            ts = _extract_min_ts(f)
+        except Exception as exc:
+            _log.warning(
+                "[verify_sort] _extract_min_ts failed for %s: %s — skipped", f, exc
+            )
+            error_count += 1
+            continue
         if ts is None:
             zero_row += 1
             continue
@@ -104,6 +114,7 @@ def main(argv: list[str] | None = None) -> int:
         "stats_primary_count": stats_primary,
         "fallback_count": fallback,
         "zero_row_count": zero_row,
+        "error_count": error_count,
         "legacy_sha_count": legacy,
         "new_ts_prefix_count": new,
         "monotonic_pass": monotonic_pass,
@@ -112,7 +123,7 @@ def main(argv: list[str] | None = None) -> int:
         "threshold": args.threshold,
     }
     audit_dir = args.root / "audit"
-    audit_dir.mkdir(exist_ok=True)
+    audit_dir.mkdir(parents=True, exist_ok=True)
     out = audit_dir / (
         f"l2_l3_sort_check-{args.exchange}-{args.channel}-{args.date}.json"
     )

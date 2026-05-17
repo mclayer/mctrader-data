@@ -46,6 +46,7 @@ def test_verify_emits_audit_json(tmp_path: Path) -> None:
     assert "stats_primary_count" in data
     assert "fallback_count" in data
     assert "zero_row_count" in data
+    assert "error_count" in data
     assert "legacy_sha_count" in data
     assert "new_ts_prefix_count" in data
     assert data["total_files"] == 1
