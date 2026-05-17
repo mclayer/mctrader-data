@@ -105,6 +105,7 @@ pre_lookup_evidence:
 - 이슈 A NAS 403 (auth/policy, 별 Story)
 - RC-1 forward window 결함 (`disk-pressure-remediation-design.md` §2, 별 Story)
 - 117GB rewrite (dual-glob 충분, 불필요)
+- **`parse_node_id_from_segment` latent bug** (Task 2 code review 발견, 2026-05-17): sibling helper 가 `.replace(".ndjson.sealed", "").replace(".ndjson", "")` chained sub-string replace 라 `.compacted` 파일 적용 시 `parts[2]` 가 `<node>.sealed.compacted` 로 오염. 현재 `scan_sealed` 필터로 dormant (sealed-only caller). 신규 `parse_ts_from_segment` 의 longest-first `.replace` chain 와 비교 시 발견. DRY refactor + sibling fix = 별 Story (behavior change risk — pre-existing caller 검증 필요).
 
 ## §5 Acceptance Criteria
 
