@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 import pyarrow.parquet as pq
 
 from mctrader_data.compactor.l1 import _schema_version
+from mctrader_data.compactor.sort_key import _extract_min_ts
 from mctrader_data.metrics import compactor_writer_open_count
 
 if TYPE_CHECKING:
@@ -67,7 +68,24 @@ class L2Compactor:
 
         # Local fallback (backward compat — nas_uploader=None)
         # Read individual files (not directory) to avoid Hive auto-discovery conflict
-        l1_files = sorted(l1_dir.rglob("part-*.parquet")) if l1_dir.exists() else []
+        # ADR-017 Amendment 3: content-derived sort key (파일명 untrusted)
+        # Primary = pq.read_metadata stats.min, Fallback = iter_batches[:1]
+        if l1_dir.exists():
+            candidates = list(l1_dir.rglob("part-*.parquet"))
+            with_ts = [(p, _extract_min_ts(p)) for p in candidates]
+            # 0-row file (None) skip + warning
+            for p, ts in with_ts:
+                if ts is None:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "[L2Compactor] skip 0-row L1 file: %s", p
+                    )
+            l1_files = [p for p, ts in sorted(
+                (item for item in with_ts if item[1] is not None),
+                key=lambda x: x[1],
+            )]
+        else:
+            l1_files = []
         if not l1_files:
             return None
 
