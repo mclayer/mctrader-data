@@ -143,17 +143,19 @@ class L3Compactor:
     ) -> Path | None:
         """MCT-169 D3=C INV-3: NAS GET source path (nas_uploader inject 시).
 
-        NAS key prefix: "l2/market/{channel}/schema_version={ver}/tier=L2/
-                         exchange={exchange}/symbol={symbol}/date={date_str}/"
+        NAS key prefix: single SSOT helper (ADR-034 §결정 2, U2-HELPER SSOT-6).
         NASUploader._list_objects(prefix) → NAS key list → get_streaming().
         pq.ParquetFile(BytesIO stream) 로 읽기 (local Path open 0, INV-3).
         """
         from mctrader_data.nas_storage.get_streaming import get_streaming
+        from mctrader_data.nas_storage.nas_key import build_nas_prefix
+        from mctrader_data.nas_metrics.prometheus_exporters import nas_key_helper_call_total
 
-        nas_prefix = (
-            f"l2/market/{channel}/schema_version={schema_ver}/tier=L2/"
-            f"exchange={exchange}/symbol={symbol}/date={date_str}/"
+        nas_prefix = build_nas_prefix(
+            tier="L2", channel=channel, schema_ver=schema_ver,
+            exchange=exchange, symbol=symbol, date_str=date_str,
         )
+        nas_key_helper_call_total.labels(caller="l3_compactor_get_source", tier="L2").inc()
 
         try:
             nas_keys = sorted(

@@ -259,10 +259,15 @@ class CompactorRunner:
             write(*, local_path, nas_key, data, sha256) -> DualWriteResult
         """
         import hashlib
-        from mctrader_data.nas_metrics.prometheus_exporters import dual_write_result_total
+        from mctrader_data.nas_metrics.prometheus_exporters import (
+            dual_write_result_total,
+            nas_key_helper_call_total,
+        )
+        from mctrader_data.nas_storage.nas_key import build_nas_key
 
-        # nas_key = local path relative to root, normalized to S3 prefix
-        nas_key = str(parquet_path.relative_to(self._root)).replace("\\", "/")
+        # nas_key = single SSOT helper (ADR-034 §결정 2, U2-HELPER SSOT-2)
+        nas_key = build_nas_key(parquet_path, self._root, tier=tier)
+        nas_key_helper_call_total.labels(caller="runner_dispatch_dual_write", tier=tier).inc()
 
         # MCT-160 D6: streaming sha256 (8192-byte chunks, no full memory load)
         sha = hashlib.sha256()
@@ -300,25 +305,6 @@ class CompactorRunner:
 
 _LEGACY_BATCH_DEFAULT = 500
 
-
-def _resolve_legacy_nas_key(parquet: Path, root: Path) -> str:
-    """legacy local parquet → 실제 NAS object key (tier-aware, WS-B / MCT-189 #75 post-merge FIX).
-
-    production 실측 확정 스킴 (docker exec boto3 head_object):
-      - tier=L1   → "l1/" + rel   (DualWriter.put_l1: nas_key = "l1/" + rel.as_posix())
-      - tier=L2/3 → rel (평면)     (_dispatch_dual_write: relative_to(root) 평면)
-      - tier 없음 → rel (평면)     (quarantine 등 — NAS 부재 시 HEAD 404 → preserved 안전망)
-
-    기존 버그: 전 tier 를 평면 rel 로 조회 → tier=L1 객체(NAS=l1/ prefix)는 항상 404
-    → PromotionVerifyError → preserved → 117GB L1 영구 미회수.
-    """
-    relative = parquet.relative_to(root)
-    rel = relative.as_posix()
-    tier = next(
-        (part.split("=", 1)[1] for part in relative.parts if part.startswith("tier=")),
-        "",
-    )
-    return f"l1/{rel}" if tier == "L1" else rel
 
 
 def scan_and_cleanup_legacy(
@@ -366,15 +352,28 @@ def scan_and_cleanup_legacy(
     for parquet in root.glob("market/**/*.parquet"):
         if cleaned + preserved + errors >= batch_limit:
             break  # 자체 페이싱 — 다음 6-min sweep 에서 이어서 진행
-        # local → NAS key 변환: root 기준 relative path, POSIX 경로
-        rel = parquet.relative_to(root)
-        nas_key = _resolve_legacy_nas_key(parquet, root)
+        # local → NAS key 변환: single SSOT helper (ADR-034 §결정 2, U2-HELPER SSOT-3)
+        # F-claude-4: helper M-7 surface 보존 (_extract_tier private 유지) — caller-local tier label
+        # tier_label: parquet path parts 에서 tier= 컴포넌트 추출 (INV-1 Pattern C: relative_to 0)
+        # parquet 는 root.glob("market/**/*.parquet") 결과 → parquet.parts 에 root prefix 포함.
+        # tier= 컴포넌트 추출 = parquet.parts 에서 직접 (relative_to 호출 0 — Pattern C 준수).
+        from mctrader_data.nas_storage.nas_key import build_legacy_nas_key
+        from mctrader_data.nas_metrics.prometheus_exporters import nas_key_helper_call_total
+
+        tier_label = next(
+            (p.split("=", 1)[1] for p in parquet.parts if p.startswith("tier=")),
+            "unknown",  # F-codex-3: malformed-path safety sentinel (production fixture 0 hit 박제)
+        )
+        nas_key = build_legacy_nas_key(parquet, root)
+        nas_key_helper_call_total.labels(caller="runner_cleanup", tier=tier_label).inc()
+        # segment_id = nas_key 자체 (상대 경로 표현 — relative_to 호출 0, Pattern C 준수)
+        segment_id = f"legacy-{nas_key}"
         try:
             result = promote_l1(
                 local_path=parquet,
                 nas_uploader=nas_uploader,
                 nas_key=nas_key,
-                segment_id=f"legacy-{rel}",
+                segment_id=segment_id,
             )
             # INV-6: already_promoted = local 부재로 진입 불가 (glob 결과는 local 존재 보장).
             # 방어 처리: already_promoted도 cleaned 카운트 (NAS only 상태 = 정상).
@@ -382,10 +381,10 @@ def scan_and_cleanup_legacy(
                 cleaned += 1
         except PromotionVerifyError:
             preserved += 1
-            log.info("[runner] legacy preserved (HEAD verify fail) path=%s", rel)
+            log.info("[runner] legacy preserved (HEAD verify fail) nas_key=%s", nas_key)
         except (OSError, RuntimeError):
             errors += 1
-            log.exception("[runner] legacy cleanup error path=%s", rel)
+            log.exception("[runner] legacy cleanup error nas_key=%s", nas_key)
 
     log.info(
         "[runner] legacy cleanup batch: cleaned=%d preserved=%d errors=%d limit=%d",
@@ -441,11 +440,15 @@ def _historical_dual_write(
 ) -> str:
     """L2/L3 parquet → DualWriter NAS PUT. CompactorRunner._dispatch_dual_write 동형.
 
-    nas_key 산출 = relative_to(root) 평면 (forward L2/L3 PUT 와 byte-동형, WS-B sweep verify 와도 정합).
+    nas_key 산출 = single SSOT helper (ADR-034 §결정 2, U2-HELPER SSOT-5).
     Returns DualWriteResult.status (committed | local_only | hard_floor_blocked).
     """
     import hashlib
-    nas_key = str(parquet_path.relative_to(root)).replace("\\", "/")
+    from mctrader_data.nas_storage.nas_key import build_nas_key
+    from mctrader_data.nas_metrics.prometheus_exporters import nas_key_helper_call_total
+
+    nas_key = build_nas_key(parquet_path, root, tier=tier)
+    nas_key_helper_call_total.labels(caller="runner_historical_dual_write", tier=tier).inc()
     sha = hashlib.sha256()
     with parquet_path.open("rb") as f:
         for chunk in iter(lambda: f.read(8192), b""):

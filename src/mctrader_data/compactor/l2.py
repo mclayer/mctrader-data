@@ -147,28 +147,43 @@ class L2Compactor:
     ) -> Path | None:
         """MCT-169 D3=C INV-3: NAS GET source path (nas_uploader inject 시).
 
-        NAS key prefix: "l1/market/{channel}/schema_version={ver}/tier=L1/
-                         exchange={exchange}/symbol={symbol}/date={date_str}/"
+        NAS key prefix: single SSOT helper (ADR-034 §결정 2, U2-HELPER SSOT-4).
+        §11.2-A Option A dual-prefix list union — flat (평면) + legacy (l1/) 양쪽 GET.
         NASUploader._list_objects(prefix) → NAS key list → get_streaming() 순서.
         pq.ParquetFile(BytesIO stream) 로 읽기 (local Path open 0, INV-3).
+        INV-9: run_id hash input = flat_keys ONLY (legacy_keys 제외) — cutover-stable determinism.
         """
         from mctrader_data.nas_storage.get_streaming import get_streaming
+        from mctrader_data.nas_storage.nas_key import build_l1_prefix, build_legacy_l1_prefix
+        from mctrader_data.nas_metrics.prometheus_exporters import nas_key_helper_call_total
 
-        nas_prefix = (
-            f"l1/market/{channel}/schema_version={schema_ver}/tier=L1/"
-            f"exchange={exchange}/symbol={symbol}/date={date_str}/"
+        flat_prefix = build_l1_prefix(
+            channel=channel, schema_ver=schema_ver, exchange=exchange,
+            symbol=symbol, date_str=date_str,
         )
+        legacy_prefix = build_legacy_l1_prefix(
+            channel=channel, schema_ver=schema_ver, exchange=exchange,
+            symbol=symbol, date_str=date_str,
+        )
+        nas_key_helper_call_total.labels(caller="l2_compactor_get_source", tier="L1").inc()
 
         try:
-            nas_keys = sorted(
-                k for k in self._nas_uploader._list_objects(nas_prefix)  # type: ignore[union-attr]
+            flat_keys = sorted(
+                k for k in self._nas_uploader._list_objects(flat_prefix)  # type: ignore[union-attr]
                 if k.endswith(".parquet")
             )
+            legacy_keys = sorted(
+                k for k in self._nas_uploader._list_objects(legacy_prefix)  # type: ignore[union-attr]
+                if k.endswith(".parquet")
+            )
+            # §11.2-A Option A union — 평면 우선, legacy fallback (dual-read 윈도우)
+            nas_keys = sorted(set(flat_keys) | set(legacy_keys))
         except Exception:
             import logging
             logging.getLogger(__name__).warning(
-                "[L2Compactor] NAS _list_objects failed prefix=%s — skip (INV-3)",
-                nas_prefix,
+                "[L2Compactor] NAS _list_objects failed flat=%s legacy=%s — skip (INV-3)",
+                flat_prefix,
+                legacy_prefix,
             )
             return None
 
@@ -180,7 +195,12 @@ class L2Compactor:
         first_pf = pq.ParquetFile(first_stream)
         schema = first_pf.schema_arrow
 
-        run_id = hashlib.sha256("|".join(nas_keys).encode()).hexdigest()[:16]
+        # INV-9 (FIX iteration 1 Finding 3 = Option (b)) — run_id cutover-stable determinism:
+        # run_id hash input = flat_keys ONLY (legacy_keys 제외).
+        # 동일 partition L1 PUT set 이 고정인 한 U3-MIGRATE delete 진행 (legacy_keys shrink)
+        # 와 무관하게 동일 run_id → output filename drift 0 → re-compaction trigger 차단.
+        # legacy_keys = pure content GET fallback only, run_id input 아님.
+        run_id = hashlib.sha256("|".join(flat_keys).encode()).hexdigest()[:16]
 
         out_dir = (
             self._root / "market" / channel

@@ -145,9 +145,10 @@ def test_put_l1_status_hard_floor_blocked(tmp_path: Path) -> None:
 
 
 def test_put_l1_tier_prefix(tmp_path: Path) -> None:
-    """put_l1() nas_key = "l1/" prefix 확인 (R-3 mitigation).
+    """put_l1() nas_key = 평면 "market/" prefix 확인 (U2-HELPER ADR-034 §결정 1).
 
-    R-3 mitigation: tier prefix enforce (l1/ l2/ l3/) — L1/L2/L3 object key 충돌 차단.
+    U2-HELPER forward-fix: L1 PUT = 평면 market/ prefix (l1/ prefix 제거).
+    tier=L1 Hive 컴포넌트로 구분 — ADR-034 §결정 1 단일 평면 SSOT.
     """
     received_keys: list[str] = []
 
@@ -172,8 +173,11 @@ def test_put_l1_tier_prefix(tmp_path: Path) -> None:
         dw.put_l1(parquet_path)
 
     assert len(received_keys) == 1
-    assert received_keys[0].startswith("l1/"), (
-        f"R-3 mitigation 위반: tier prefix 'l1/' 부재 — nas_key={received_keys[0]!r}"
+    assert received_keys[0].startswith("market/"), (
+        f"U2-HELPER 평면 key 위반: 'market/' prefix 부재 — nas_key={received_keys[0]!r}"
+    )
+    assert not received_keys[0].startswith("l1/"), (
+        f"U2-HELPER 위반: l1/ prefix 잔존 — nas_key={received_keys[0]!r}"
     )
 
 
