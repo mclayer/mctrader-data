@@ -11,7 +11,6 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-import pytest
 
 from mctrader_data.compactor.sort_key import _extract_min_ts
 

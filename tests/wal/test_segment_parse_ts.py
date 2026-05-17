@@ -28,7 +28,10 @@ def test_compacted_segment() -> None:
 
 
 def test_with_full_path() -> None:
-    p = Path("/var/lib/mctrader/data/wal/upbit/orderbooksnapshot/KRW-BTC/2026-05-13/segment-20260513T120000Z-NODE_A.ndjson.sealed")
+    p = Path(
+        "/var/lib/mctrader/data/wal/upbit/orderbooksnapshot/KRW-BTC/2026-05-13"
+        "/segment-20260513T120000Z-NODE_A.ndjson.sealed"
+    )
     assert parse_ts_from_segment(p) == "20260513T120000Z"
 
 

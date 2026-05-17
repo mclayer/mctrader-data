@@ -1,5 +1,5 @@
 """L3 _compact_day_nas defensive content-derived sort key."""
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import MagicMock

@@ -2,7 +2,7 @@
 
 mock NASUploader (이슈 A 와 독립 — 본 Story 는 sort 알고리즘만 검증).
 """
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import MagicMock

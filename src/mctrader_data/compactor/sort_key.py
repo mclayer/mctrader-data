@@ -13,13 +13,13 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import IO, Union
+from typing import IO
 
 import pyarrow.parquet as pq
 
 logger = logging.getLogger(__name__)
 
-PathOrStream = Union[Path, str, IO[bytes]]  # BytesIO acceptable for NAS GET
+PathOrStream = Path | str | IO[bytes]  # BytesIO acceptable for NAS GET
 
 
 def _extract_min_ts(path_or_stream: PathOrStream) -> datetime | None:
