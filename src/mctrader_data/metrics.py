@@ -223,6 +223,17 @@ def record_compactor_unsupported_source(*, tier: str, exchange: str, channel: st
 
 
 # ---------------------------------------------------------------------------
+# MCT-192: realtime_stream publish failure Counter (ADR-031 quad evidence)
+# ---------------------------------------------------------------------------
+
+redis_stream_publish_failures_total = Counter(
+    "mctrader_data_redis_stream_publish_failures_total",
+    "Redis Stream XADD publish failures — all retries exhausted, local-only mode fallback "
+    "(ADR-031 realtime contract producer quad evidence, MCT-192 no-op stub 해소). "
+    "dead-in-data: production publish_tick caller 0 (consumer=engine MCT-186).",
+)
+
+# ---------------------------------------------------------------------------
 # MCT-180: collector metric helpers
 # ---------------------------------------------------------------------------
 
