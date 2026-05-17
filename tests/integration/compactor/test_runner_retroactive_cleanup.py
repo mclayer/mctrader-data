@@ -241,7 +241,10 @@ class TestScanAndCleanupLegacy:
         from mctrader_data.compactor.runner import scan_and_cleanup_legacy
 
         content = b"legacy L2 parquet flat-key scheme"
-        rel = "orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L2/exchange=bithumb/symbol=KRW-SOL/date=2026-05-17/hour=22/node=MERGED/part-l2flat.parquet"
+        rel = (
+            "orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L2/"
+            "exchange=bithumb/symbol=KRW-SOL/date=2026-05-17/hour=22/node=MERGED/part-l2flat.parquet"
+        )
         local = _make_legacy_parquet(tmp_path, rel, content)
 
         nas_key = f"market/{rel}"  # 평면 — l1/ prefix 없음

@@ -13,7 +13,11 @@ from mctrader_data.compactor.runner import _resolve_legacy_nas_key
 
 def test_l1_gets_l1_prefix(tmp_path: Path) -> None:
     root = tmp_path
-    p = root / "market/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/exchange=upbit/symbol=KRW-BTC/date=2026-05-14/node=N/part-abc.parquet"
+    p = (
+        root
+        / "market/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1"
+        / "exchange=upbit/symbol=KRW-BTC/date=2026-05-14/node=N/part-abc.parquet"
+    )
     assert _resolve_legacy_nas_key(p, root) == (
         "l1/market/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/"
         "exchange=upbit/symbol=KRW-BTC/date=2026-05-14/node=N/part-abc.parquet"
@@ -22,7 +26,11 @@ def test_l1_gets_l1_prefix(tmp_path: Path) -> None:
 
 def test_l2_stays_flat(tmp_path: Path) -> None:
     root = tmp_path
-    p = root / "market/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L2/exchange=bithumb/symbol=KRW-SOL/date=2026-05-17/hour=22/node=MERGED/part-xyz.parquet"
+    p = (
+        root
+        / "market/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L2"
+        / "exchange=bithumb/symbol=KRW-SOL/date=2026-05-17/hour=22/node=MERGED/part-xyz.parquet"
+    )
     assert _resolve_legacy_nas_key(p, root) == (
         "market/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L2/"
         "exchange=bithumb/symbol=KRW-SOL/date=2026-05-17/hour=22/node=MERGED/part-xyz.parquet"
@@ -31,7 +39,11 @@ def test_l2_stays_flat(tmp_path: Path) -> None:
 
 def test_l3_stays_flat(tmp_path: Path) -> None:
     root = tmp_path
-    p = root / "market/orderbookdepth/schema_version=orderbook_depth.v1/tier=L3/exchange=bithumb/symbol=KRW-D/date=2026-05-13/node=MERGED/part-9f.parquet"
+    p = (
+        root
+        / "market/orderbookdepth/schema_version=orderbook_depth.v1/tier=L3"
+        / "exchange=bithumb/symbol=KRW-D/date=2026-05-13/node=MERGED/part-9f.parquet"
+    )
     assert _resolve_legacy_nas_key(p, root) == (
         "market/orderbookdepth/schema_version=orderbook_depth.v1/tier=L3/"
         "exchange=bithumb/symbol=KRW-D/date=2026-05-13/node=MERGED/part-9f.parquet"
@@ -50,7 +62,11 @@ def test_no_tier_component_stays_flat(tmp_path: Path) -> None:
 def test_tier_in_root_prefix_not_confused(tmp_path: Path) -> None:
     # data root 자체에 tier= 컴포넌트가 있어도 Hive tier=L1 만 인식 (relative parts 기준)
     root = tmp_path / "tier=staging" / "data"
-    p = root / "market/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/exchange=upbit/symbol=KRW-BTC/date=2026-05-14/node=N/part-abc.parquet"
+    p = (
+        root
+        / "market/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1"
+        / "exchange=upbit/symbol=KRW-BTC/date=2026-05-14/node=N/part-abc.parquet"
+    )
     assert _resolve_legacy_nas_key(p, root) == (
         "l1/market/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/"
         "exchange=upbit/symbol=KRW-BTC/date=2026-05-14/node=N/part-abc.parquet"
