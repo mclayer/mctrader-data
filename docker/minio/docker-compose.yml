@@ -1,0 +1,51 @@
+# mctrader cold tier MinIO — Synology Container Manager deploy
+# Story: MCT-147 (Stage 1 Feasibility Spike, EPIC-cold-tier-nas-minio)
+# Issue: mclayer/mctrader-hub#245
+# D2 amend: HTTP 운영 (LAN 내부망 + Stage 1 한정, ADR-027 본문 MCT-149 박제 의무)
+# Host path: /volume1/docker/minio/data (Synology Container Manager 관례)
+
+services:
+  minio:
+    image: minio/minio:RELEASE.2026-04-15T00-00-00Z   # latest stable pin (사용자가 NAS Container Manager 설치 시점에 actual digest 갱신)
+    container_name: mctrader-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Console UI
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BROWSER_REDIRECT_URL: http://${NAS_HOST}:9001
+    volumes:
+      - /volume1/docker/minio/data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - mctrader-cold-tier
+
+  minio-init:
+    image: minio/mc:RELEASE.2026-04-15T00-00-00Z
+    container_name: mctrader-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD} &&
+      mc mb --ignore-existing local/mctrader-market &&
+      mc anonymous set none local/mctrader-market &&
+      echo '[minio-init] bucket mctrader-market ready (idempotent)'
+      "
+    restart: "no"
+    networks:
+      - mctrader-cold-tier
+
+networks:
+  mctrader-cold-tier:
+    driver: bridge
+    name: mctrader-cold-tier

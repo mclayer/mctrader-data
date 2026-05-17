@@ -1,0 +1,29 @@
+# C2 Calibration — scan latency on 7-day synthetic partition
+# events_per_day=10000, total=70000
+# seeding...
+# seeded in 0.36s, partition=1.30 MB
+
+## scan_ticks (full 7-day window)
+| metric         | value |
+|----------------|-------|
+| input rows     | 70000 |
+| output rows    | 70000 |
+| partition size | 1.30 MB |
+| avg wall-clock | 1299.4 ms |
+| p50            | 1293.3 ms |
+| p95            | 1400.3 ms |
+| p99            | 1400.3 ms |
+| ms/event       | 0.0186 |
+
+## tier_coverage
+| metric         | value |
+|----------------|-------|
+| avg wall-clock | 1326.7 ms |
+| p50            | 1320.5 ms |
+| p95            | 1405.6 ms |
+| p99            | 1405.6 ms |
+
+## Verdict
+- scan_ticks 7-day window: 1299.4 ms (informational)
+- tier_coverage: 1326.7 ms (informational)
+- **C2: PASS** (no fixed regression target — informational reference)

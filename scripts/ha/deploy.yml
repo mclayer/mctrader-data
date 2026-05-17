@@ -1,0 +1,128 @@
+---
+# mctrader-data collector active-active rolling deploy.
+#
+# Codex F-2 PUSH-BACK fix: shared-storage `.deploy_lock` mkdir + `any_errors_fatal: true`
+# prevents two concurrent deploy invocations from violating active-active coverage
+# (single operator assumption is too weak for shared-storage active-active).
+#
+# Usage:
+#   ansible-playbook -i inventory.ini scripts/ha/deploy.yml --check --diff   # dry-run
+#   ansible-playbook -i inventory.ini scripts/ha/deploy.yml                  # production
+#
+# Inventory expectation:
+#   [collectors]
+#   node-a.example.com node_id=NODE_A
+#   node-b.example.com node_id=NODE_B
+#
+# Refs (mctrader-hub governance — relocated here 2026-05-17):
+#   https://github.com/mclayer/mctrader-hub/blob/main/docs/stories/MCT-89.md §6.2 (Phase 5 ops scope)
+#   https://github.com/mclayer/mctrader-hub/blob/main/docs/superpowers/specs/2026-05-05-collector-ha-active-active-design.md §4.2
+
+- name: mctrader-data collector rolling deploy
+  hosts: collectors
+  serial: 1
+  any_errors_fatal: true
+  become: true
+  vars:
+    deploy_lock: /mnt/shared/mctrader/.deploy_lock
+    data_root: /mnt/shared/mctrader/data
+    install_dir: /opt/mctrader
+    service_name: mctrader-data-collector
+    mctrader_bin: /opt/mctrader/.venv/bin/mctrader-data
+    mctrader_user: mctrader
+    env_file: /etc/mctrader/collector.env
+
+  pre_tasks:
+    # Codex F-5 fix — preflight check that inventory `node_id` matches the host's
+    # /etc/mctrader/collector.env NODE_ID. Drift here means the systemd unit boots
+    # with the wrong NODE_ID and writes to the wrong heartbeat / partition.
+    - name: Preflight — read NODE_ID from collector.env
+      ansible.builtin.shell:
+        cmd: "grep -E '^NODE_ID=' {{ env_file }} | cut -d= -f2"
+      register: env_node_id
+      changed_when: false
+
+    - name: Preflight — fail if inventory node_id != collector.env NODE_ID
+      ansible.builtin.fail:
+        msg: "node_id mismatch: inventory={{ node_id | default('UNSET') }} but {{ env_file }} NODE_ID={{ env_node_id.stdout }}"
+      when: (node_id | default('')) != env_node_id.stdout
+
+    # Acquire shared-storage lock (run_once: lock taken once for the entire batch).
+    # POSIX mkdir is atomic on shared storage with same-directory atomic rename
+    # guarantee (NFSv3 close-to-open / NFSv4 / Ceph same-pool / SMB v3).
+    - name: Acquire shared deploy lock
+      ansible.builtin.command:
+        cmd: "mkdir {{ deploy_lock }}"
+      register: lock_result
+      failed_when: lock_result.rc != 0
+      changed_when: lock_result.rc == 0
+      run_once: true
+
+    - name: Record lock owner (for stale-lock recovery)
+      ansible.builtin.copy:
+        dest: "{{ deploy_lock }}/owner"
+        content: |
+          host: {{ inventory_hostname }}
+          time_iso: {{ ansible_date_time.iso8601 }}
+          ansible_pid: {{ ansible_play_pid | default('unknown') }}
+        mode: "0644"
+      run_once: true
+
+  tasks:
+    # Codex F-2 fix — health gates run as `mctrader` user (matches systemd unit
+    # User=mctrader semantics) and use absolute binary path. The CLI inspects
+    # ALL nodes' heartbeats so a single global call covers both peer-stays-green
+    # (pre-stop) and self-becomes-green (post-start) — exit code 0 means worst
+    # node is green, which is exactly the rolling-deploy invariant.
+    - name: Pre-stop health gate — entire cluster (peer + self) must be green
+      ansible.builtin.command:
+        cmd: "{{ mctrader_bin }} status --root {{ data_root }} --format json --no-color"
+      register: pre_status
+      become_user: "{{ mctrader_user }}"
+      changed_when: false
+      failed_when: pre_status.rc != 0
+
+    - name: Stop collector
+      ansible.builtin.systemd:
+        name: "{{ service_name }}"
+        state: stopped
+
+    - name: Pull mctrader-data git working tree
+      ansible.builtin.git:
+        repo: "git@github.com:mclayer/mctrader-data.git"
+        dest: "{{ install_dir }}/mctrader-data"
+        version: main
+      become_user: "{{ mctrader_user }}"
+
+    - name: uv pip sync (deps + mctrader-data wheel)
+      ansible.builtin.command:
+        cmd: "{{ install_dir }}/.venv/bin/uv pip install -e {{ install_dir }}/mctrader-data"
+      become_user: "{{ mctrader_user }}"
+
+    - name: Start collector
+      ansible.builtin.systemd:
+        name: "{{ service_name }}"
+        state: started
+
+    # Post-start health gate — wait for self heartbeat green within 30s.
+    # Exit 0 means cluster-wide green (this node + peer both fresh).
+    - name: Post-start health gate — wait for cluster green within 30s
+      ansible.builtin.command:
+        cmd: "{{ mctrader_bin }} status --root {{ data_root }} --format json --no-color --fresh-red-seconds 30"
+      register: post_status
+      become_user: "{{ mctrader_user }}"
+      changed_when: false
+      retries: 6
+      delay: 5
+      until: post_status.rc == 0
+      failed_when: post_status.rc != 0
+
+  post_tasks:
+    # Lock release runs only if the play succeeded — `any_errors_fatal: true` aborts
+    # before reaching post_tasks on failure, intentionally leaving the lock for
+    # operator inspection (see README §"Stale lock recovery" for manual cleanup).
+    - name: Release shared deploy lock
+      ansible.builtin.file:
+        path: "{{ deploy_lock }}"
+        state: absent
+      run_once: true

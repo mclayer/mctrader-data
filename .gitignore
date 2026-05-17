@@ -26,6 +26,11 @@ data/parquet/
 
 # local env files (credentials)
 .env
+# relocated from mctrader-hub (ops artifact move): NAS cold-tier MinIO deploy
+# secrets. The bare `.env` rule above already matches this at any depth — the
+# explicit entry below is defense-in-depth so a future .gitignore refactor
+# cannot accidentally expose relocated credentials. NEVER commit this file.
+docker/minio/.env
 
 # spike evidence packs / scratch (MCT-148)
 .tmp/

@@ -1,0 +1,29 @@
+# C1 Calibration — read-side dedup throughput overhead
+# tick_count=10000 (× 2 nodes = 20000 input rows)
+# ob_count=5000 (× 2 nodes = 10000 input rows)
+# runs=3
+
+## T2 Tick dedup
+|              | input rows | avg seconds | min      | max      | ms/event |
+|--------------|------------|-------------|----------|----------|----------|
+| single-node  |      10000 |     0.0007 |   0.0006 |   0.0009 |   0.0001 |
+| multi-node   |      20000 |     0.0177 |   0.0067 |   0.0277 |   0.0009 |
+| **overhead** | — | +2389.0% | — | — | — |
+
+## T3 Orderbook dedup
+|              | input rows | avg seconds | min      | max      | ms/event |
+|--------------|------------|-------------|----------|----------|----------|
+| single-node  |       5000 |     0.0005 |   0.0003 |   0.0007 |   0.0001 |
+| multi-node   |      10000 |     0.0069 |   0.0036 |   0.0135 |   0.0007 |
+| **overhead** | — | +1365.6% | — | — | — |
+
+## Verdict
+Comparing single-node fast path (sort only) vs multi-node full dedup
+is apples-to-oranges. Primary metric: **absolute ms/event under multi_node=True**.
+
+Target: < 1.0 ms/event (generous vs Bithumb peak ~100 events/sec).
+
+- T2 tick multi-node: 0.0009 ms/event < 1.0: PASS
+- T3 orderbook multi-node: 0.0007 ms/event < 1.0: PASS
+- Reference overhead vs single-node fast path: T2 +2389.0%, T3 +1365.6% (informational only)
+- **C1 overall: PASS**

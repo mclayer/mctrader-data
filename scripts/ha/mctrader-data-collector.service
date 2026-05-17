@@ -1,0 +1,45 @@
+[Unit]
+Description=mctrader-data collector daemon (active-active HA)
+Documentation=https://github.com/mclayer/mctrader-hub/blob/main/docs/stories/MCT-89.md
+After=network-online.target remote-fs.target
+Wants=network-online.target remote-fs.target
+RequiresMountsFor=/mnt/shared/mctrader/data
+
+# Allow up to 20 restarts in 5 minutes before systemd gives up — collector
+# has WS reconnect logic, so fast restarts are normal under network instability.
+# Per systemd.unit(5), StartLimit* belong to [Unit], not [Service].
+StartLimitBurst=20
+StartLimitIntervalSec=300
+
+[Service]
+Type=simple
+User=mctrader
+Group=mctrader
+WorkingDirectory=/opt/mctrader
+EnvironmentFile=/etc/mctrader/collector.env
+ExecStart=/opt/mctrader/.venv/bin/mctrader-data collect --top-n 50 --node-id ${NODE_ID} --root ${MCTRADER_DATA_ROOT}
+
+# SIGTERM graceful drain — collector daemon flushes buffered events + closes WS connections
+KillSignal=SIGTERM
+TimeoutStopSec=60s
+SendSIGKILL=yes
+KillMode=mixed
+
+# Restart on any exit (crash, OOM, manual stop). MCT-89 Epic decision #3.
+Restart=always
+RestartSec=10s
+
+# Resource hardening (optional — host can override per environment)
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/mnt/shared/mctrader/data
+ReadWritePaths=/var/log/mctrader
+
+# stdout/stderr → journal (operator inspect via `journalctl -u mctrader-data-collector`)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mctrader-data-collector
+
+[Install]
+WantedBy=multi-user.target
