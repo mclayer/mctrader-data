@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import logging
 import os
 from datetime import date
 from pathlib import Path
@@ -28,6 +29,8 @@ from mctrader_data.metrics import compactor_writer_open_count
 
 if TYPE_CHECKING:
     from mctrader_data.nas_storage.nas_uploader import NASUploader
+
+_log = logging.getLogger(__name__)
 
 
 class L2Compactor:
@@ -76,14 +79,9 @@ class L2Compactor:
             # 0-row file (None) skip + warning
             for p, ts in with_ts:
                 if ts is None:
-                    import logging
-                    logging.getLogger(__name__).warning(
-                        "[L2Compactor] skip 0-row L1 file: %s", p
-                    )
-            l1_files = [p for p, ts in sorted(
-                (item for item in with_ts if item[1] is not None),
-                key=lambda x: x[1],
-            )]
+                    _log.warning("[L2Compactor] skip 0-row L1 file: %s", p)
+            filtered = [(p, ts) for p, ts in with_ts if ts is not None]
+            l1_files = [p for p, _ in sorted(filtered, key=lambda x: x[1])]
         else:
             l1_files = []
         if not l1_files:
@@ -183,8 +181,7 @@ class L2Compactor:
                 if k.endswith(".parquet")
             )
         except Exception:
-            import logging
-            logging.getLogger(__name__).warning(
+            _log.warning(
                 "[L2Compactor] NAS _list_objects failed prefix=%s — skip (INV-3)",
                 nas_prefix,
             )
