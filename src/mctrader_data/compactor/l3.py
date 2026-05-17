@@ -17,7 +17,7 @@ import contextlib
 import hashlib
 import logging
 import os
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -188,7 +188,7 @@ class L3Compactor:
         # content-derived sort: get_streaming → _extract_min_ts stats.min
         from mctrader_data.nas_storage.get_streaming import get_streaming
 
-        keyed: list[tuple[str, object]] = []
+        keyed: list[tuple[str, datetime]] = []
         for k in candidate_keys:
             stream = get_streaming(nas_uploader=self._nas_uploader, nas_key=k)  # type: ignore[arg-type]
             ts = _extract_min_ts(stream)
