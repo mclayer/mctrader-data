@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import contextlib
 import shutil
+import sys
 import tempfile
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -60,7 +61,24 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from testcontainers.minio import MinioContainer
+def _docker_unavailable_reason() -> str | None:
+    """Docker daemon / 플랫폼 미가용 사유 return (가용 시 None).
+
+    FIX-MCT-180 data#67 P1: pytest.importorskip("testcontainers") 는 패키지
+    설치만 검사 — Docker daemon / 플랫폼(Linux socket mount) 미검사로 CI
+    windows-latest 에서 `-m "not slow"` 가 integration 마커를 deselect 하지
+    않아 Docker socket mount 불가 FAIL. testcontainers Docker boundary 는
+    Linux runner 전용.
+    """
+    if sys.platform == "win32":
+        return "testcontainers Docker boundary requires Linux runner (win32 skip)"
+    try:
+        import docker  # type: ignore[import-untyped]
+
+        docker.from_env().ping()
+    except Exception as exc:  # noqa: BLE001 — Docker 미가용 사유 무관 일괄 skip
+        return f"Docker daemon unavailable: {exc!r}"
+    return None
 
 # ─── real L1 schema for orderbooksnapshot (from orderbook_snapshot_storage._OB_SNAPSHOT_SCHEMA)
 _OB_SNAPSHOT_SCHEMA = pa.schema([
@@ -101,6 +119,11 @@ _BUCKET = "test-historical"
 @pytest.fixture(scope="module")
 def minio_container():
     """Module-scope MinIO testcontainer."""
+    _docker_skip = _docker_unavailable_reason()
+    if _docker_skip is not None:
+        pytest.skip(_docker_skip)
+    from testcontainers.minio import MinioContainer  # type: ignore[import-untyped]
+
     with MinioContainer() as minio:
         yield minio
 
