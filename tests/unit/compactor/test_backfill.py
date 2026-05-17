@@ -168,55 +168,56 @@ def test_write_manifest_frontmatter(tmp_path: Path) -> None:
 # ─── test 4: schema compat — orderbooksnapshot (INV-3) ───────────────────────
 
 
-def test_schema_compat_ob_snapshot(tmp_path: Path) -> None:
+def test_schema_compat_ob_snapshot() -> None:
     """backfill iter output processed through L1Compactor yields OB snapshot schema (INV-3).
 
     Verifies that a backfill-sourced sealed segment compacted via L1Compactor
     produces the same Arrow schema as the normal MCT-166 path B output.
 
-    Uses tempfile.mkdtemp for shorter root — ts-prefix adds ~17 chars to parquet
+    Uses tempfile.TemporaryDirectory for shorter root — ts-prefix adds ~17 chars to parquet
     filenames; Windows MAX_PATH=260 requires shorter base than pytest tmp_path.
     """
     from mctrader_data.compactor.backfill import iter_frozen_segments
     from mctrader_data.compactor.l1 import L1Compactor
     from mctrader_data.orderbook_snapshot_storage import _OB_SNAPSHOT_SCHEMA
 
-    root = Path(tempfile.mkdtemp())
-    wal_root = root / "wal"
-    exchange = "upbit"
-    channel = "orderbooksnapshot"
-    date_dir = wal_root / exchange / channel / "KRW-BTC" / "2026-05-13"
-    date_dir.mkdir(parents=True)
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        wal_root = root / "wal"
+        exchange = "upbit"
+        channel = "orderbooksnapshot"
+        date_dir = wal_root / exchange / channel / "KRW-BTC" / "2026-05-13"
+        date_dir.mkdir(parents=True)
 
-    # Write a valid orderbooksnapshot sealed segment
-    line = _ob_snapshot_line(
-        ts="2026-05-13T12:00:00+00:00",
-        exchange=exchange,
-        symbol="KRW-BTC",
-    )
-    seg = _make_sealed_segment(date_dir, ts_str="20260513T120000Z", content=line + "\n")
+        # Write a valid orderbooksnapshot sealed segment
+        line = _ob_snapshot_line(
+            ts="2026-05-13T12:00:00+00:00",
+            exchange=exchange,
+            symbol="KRW-BTC",
+        )
+        seg = _make_sealed_segment(date_dir, ts_str="20260513T120000Z", content=line + "\n")
 
-    # Verify iter_frozen_segments picks it up
-    segments = list(iter_frozen_segments(wal_root, exchange, channel))
-    assert len(segments) == 1
-    assert segments[0] == seg
+        # Verify iter_frozen_segments picks it up
+        segments = list(iter_frozen_segments(wal_root, exchange, channel))
+        assert len(segments) == 1
+        assert segments[0] == seg
 
-    # Compact via L1Compactor — must succeed and produce correct schema
-    compactor = L1Compactor(root=root)
-    parquet_path = compactor.compact_segment(seg)
+        # Compact via L1Compactor — must succeed and produce correct schema
+        compactor = L1Compactor(root=root)
+        parquet_path = compactor.compact_segment(seg)
 
-    assert parquet_path.exists(), "L1 parquet must be created"
+        assert parquet_path.exists(), "L1 parquet must be created"
 
-    import pyarrow.parquet as pq
-    # Use ParquetFile (not read_table) to avoid Hive auto-discovery conflicts (ADR-009 §D2)
-    table = pq.ParquetFile(str(parquet_path)).read()
-    # Schema compatibility check: all required field names must match
-    expected_names = set(_OB_SNAPSHOT_SCHEMA.names)
-    actual_names = set(table.schema.names)
-    assert expected_names == actual_names, (
-        f"Schema mismatch (INV-3). Expected={expected_names}, Got={actual_names}"
-    )
+        import pyarrow.parquet as pq
+        # Use ParquetFile (not read_table) to avoid Hive auto-discovery conflicts (ADR-009 §D2)
+        table = pq.ParquetFile(str(parquet_path)).read()
+        # Schema compatibility check: all required field names must match
+        expected_names = set(_OB_SNAPSHOT_SCHEMA.names)
+        actual_names = set(table.schema.names)
+        assert expected_names == actual_names, (
+            f"Schema mismatch (INV-3). Expected={expected_names}, Got={actual_names}"
+        )
 
-    # INV-2: .compacted marker must exist after compaction
-    from mctrader_data.wal.segment import compacted_path
-    assert compacted_path(seg).exists(), ".compacted sentinel must be created (INV-2)"
+        # INV-2: .compacted marker must exist after compaction
+        from mctrader_data.wal.segment import compacted_path
+        assert compacted_path(seg).exists(), ".compacted sentinel must be created (INV-2)"
