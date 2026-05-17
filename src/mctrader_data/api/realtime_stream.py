@@ -22,6 +22,8 @@ import contextlib
 from contextlib import asynccontextmanager
 from typing import Any
 
+from mctrader_data.metrics import redis_stream_publish_failures_total as _publish_failures_total
+
 logger = logging.getLogger(__name__)
 
 # ADR-030 §D15 — market: prefix namespace
@@ -147,11 +149,12 @@ class RealtimeStreamPublisher:
     def _emit_failure_counter(self) -> None:
         """mctrader_data_redis_stream_publish_failures_total Counter emit (best-effort).
 
-        Production wiring = MCT-186 owner (Prometheus Counter registration).
-        dead-in-data: no-op stub (import 시도는 MCT-186 이후).
+        ADR-031 realtime contract producer quad evidence (MCT-192, no-op stub 해소).
+        dead-in-data: publish_tick production caller 0 (consumer=engine MCT-186).
+        telemetry best-effort — Exception 발생 시 publish path 절대 차단 금지.
         """
-        # best-effort no-op (MCT-186 production wiring — production caller 0)
-        pass
+        with contextlib.suppress(Exception):  # telemetry best-effort, never break publish path
+            _publish_failures_total.inc()
 
     @property
     def publish_failures(self) -> int:
