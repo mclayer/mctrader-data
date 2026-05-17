@@ -451,10 +451,24 @@ def _historical_dual_write(
     result = dual_writer.write(
         local_path=parquet_path, nas_key=nas_key, data=parquet_path, sha256=sha256,
     )
-    log.info(
-        "[historical] dual-write tier=%s status=%s key=%s",
-        tier, result.status, nas_key,
-    )
+    # Status-aware logging (mirror _dispatch_dual_write level dispatch).
+    if result.status == "committed":
+        log.info("[historical] dual-write OK tier=%s key=%s", tier, nas_key)
+    elif result.status == "local_only":
+        log.warning(
+            "[historical] dual-write local_only tier=%s key=%s (retry queue enqueued)",
+            tier, nas_key,
+        )
+    elif result.status == "hard_floor_blocked":
+        log.error(
+            "[historical] dual-write HARD_FLOOR_BLOCKED tier=%s key=%s — SOP MANUAL_GATE",
+            tier, nas_key,
+        )
+    else:
+        log.warning(
+            "[historical] dual-write unknown status %r tier=%s key=%s",
+            result.status, tier, nas_key,
+        )
     return result.status
 
 
@@ -479,6 +493,17 @@ def run_historical_promotion(
 
     재실행 안전: deterministic run_id 출력 파일명 + NAS PUT HEAD-then-PUT sha256
     idempotency. channel 한정 + #48 회피.
+
+    Returns:
+        {
+          "partitions_processed": int,   # number of (exchange, symbol, date) partitions visited
+          "l2_compacted": int,            # L2 hour-buckets with NAS status == "committed"
+          "l3_compacted": int,            # L3 day rollups with NAS status == "committed"
+          "skipped_no_l1": int,           # hour-slots (NOT partitions) where compact_hour
+                                          # returned None (no L1 in that hour)
+          "errors": int,                  # exception raises + non-committed NAS statuses
+                                          # (local_only / hard_floor_blocked / unknown)
+        }
     """
     log.info(
         "[historical] start exchange=%s channel=%s range=[%s..%s]",
@@ -514,10 +539,15 @@ def run_historical_promotion(
                 counts["skipped_no_l1"] += 1
                 continue
             try:
-                _historical_dual_write(out, root=root, tier="L2", dual_writer=dual_writer)
-                counts["l2_compacted"] += 1
+                status = _historical_dual_write(out, root=root, tier="L2", dual_writer=dual_writer)
             except Exception:
                 log.exception("[historical] L2 dual-write failed path=%s", out)
+                counts["errors"] += 1
+                continue
+            if status == "committed":
+                counts["l2_compacted"] += 1
+            else:
+                # local_only / hard_floor_blocked / unknown → not a clean NAS commit
                 counts["errors"] += 1
         try:
             out = l3.compact_day(exchange=ex, symbol=sym, channel=channel, date_utc=d)
@@ -529,10 +559,15 @@ def run_historical_promotion(
             continue
         if out is not None:
             try:
-                _historical_dual_write(out, root=root, tier="L3", dual_writer=dual_writer)
-                counts["l3_compacted"] += 1
+                status = _historical_dual_write(out, root=root, tier="L3", dual_writer=dual_writer)
             except Exception:
                 log.exception("[historical] L3 dual-write failed path=%s", out)
+                counts["errors"] += 1
+                continue
+            if status == "committed":
+                counts["l3_compacted"] += 1
+            else:
+                # local_only / hard_floor_blocked / unknown → not a clean NAS commit
                 counts["errors"] += 1
 
     log.info("[historical] done counts=%s", counts)

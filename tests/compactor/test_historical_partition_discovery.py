@@ -77,3 +77,23 @@ def test_discovery_empty_when_no_match(tmp_path: Path) -> None:
         end_date=date(2026, 5, 15),
     )
     assert found == []
+
+
+def test_discovery_skips_empty_l1_directory(tmp_path: Path) -> None:
+    """date partition directory exists but contains no part-*.parquet → not returned."""
+    empty = (
+        tmp_path
+        / "market" / "orderbooksnapshot"
+        / "schema_version=orderbook_snapshot.v1" / "tier=L1"
+        / "exchange=upbit" / "symbol=KRW-BTC" / "date=2026-05-14"
+    )
+    empty.mkdir(parents=True, exist_ok=True)
+    # No part-*.parquet seeded.
+
+    found = _discover_partitions_in_range(
+        tmp_path,
+        channel="orderbooksnapshot",
+        start_date=date(2026, 5, 14),
+        end_date=date(2026, 5, 14),
+    )
+    assert found == []
