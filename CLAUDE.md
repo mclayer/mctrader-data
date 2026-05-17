@@ -75,6 +75,70 @@ _CHANNEL_SCHEMA_VERSION = {
 - exchange 별 분기 없음 — WAL channel 명으로만 처리 경로 결정
 - 미지원 channel → `NotImplementedError` raise (silent skip 금지 — ADR-027 Amendment 1 정합)
 - channel 추가 시 `_CHANNEL_SCHEMA_VERSION` + `_convert_to_arrow` + `_arrow_schema_for_channel` 동시 갱신 의무
+- **NAS object key 평면 cross-ref (ADR-034 §결정 1)**: compactor 출력 NAS key = `market/<channel>/schema_version=*/tier=L{1,2,3}/...` (`l1/` prefix 제거, 전 tier 균질 layout). nas_key 산출 = 단일 helper `src/mctrader_data/nas_storage/nas_key.py::build_nas_key()` 경유 의무 (U2-HELPER LAND 후, U5 grep gate 박제).
+
+## nas_key SSOT 규약 (EPIC-nas-key-unification, U1-ADR LAND 2026-05-17)
+
+**Plan section (U2-HELPER LAND 시 본 section 활성 — U1-ADR PR 가 plan 박제)**.
+
+### Layout (ADR-034 §결정 1)
+
+```
+market/<channel>/schema_version=*/tier=L{1,2,3}/exchange=*/symbol=*/date=*/[hour=*/][node=*/]part-*.parquet
+```
+
+- `l1/` prefix 제거 (전 tier 단일 평면). tier 구분 = Hive partition `tier=L{1,2,3}/` 컴포넌트로 충분 (ADR-009 §D2 + ADR-017 §3 D3 정합).
+- L1 ↔ L2/L3 균질 (사용자 Q2 confirm) — reader / compactor / promotion path 분기 코드 감소.
+
+### Single helper SSOT (ADR-034 §결정 2)
+
+**파일**: `src/mctrader_data/nas_storage/nas_key.py` (U2-HELPER 신규).
+
+**API**:
+```python
+build_nas_key(parquet_path, root, *, tier=None)  # 평면 단일 SSOT
+build_l1_prefix(channel, schema_ver, exchange, symbol, date_str)  # L2 GET source prefix
+build_legacy_nas_key(parquet_path, root)  # [Deprecated U5 회수] dual-read 윈도우 fallback
+```
+
+**Caller 흡수 4 분산점** (모두 helper 1줄 호출):
+- `dual_writer.py::put_l1` (line 371)
+- `runner.py::_dispatch_dual_write` (line 265)
+- `runner.py::scan_and_cleanup_legacy` (line 350-351, Phase 1 WS-B helper 흡수)
+- `l2.py::_l1_nas_source` (line 157-160)
+
+### Dual-read 윈도우 (ADR-034 §결정 3)
+
+- **활성 시점**: U2 land 직후 — reader 가 평면 우선 → 404 시 `l1/` fallback (`build_legacy_nas_key` 경로).
+- **종료 시점**: U5 land — fallback 코드 + `build_legacy_nas_key` helper + 호출처 모두 grep gate 0 박제.
+- **활성 기간**: 약 2-4주 (U3 100% + cross-repo isolation 박제 + 30일 cool-down).
+
+### Forward-only invariant 박제 테스트 (ADR-034 §결정 6, ADR-009 §D12 정합)
+
+**파일**: `tests/integration/test_forward_only_nas_key.py` (U5 신규).
+
+3 grep gate:
+1. `_resolve_legacy_nas_key` 정의/호출 0 (Phase 1 WS-B helper 회수)
+2. `"l1/"` literal 직접 사용 0 (helper 외)
+3. reader 의 `l1/` fallback 코드 0 (`build_legacy_nas_key` 호출 0)
+
+### Cross-repo isolation (ADR-034 §결정 5)
+
+- **engine = candles only** — `historical.py:42,65,87` partition_path = `tier=L1/exchange=*/symbol=*/timeframe=*/date=*/part-00.parquet` (candles namespace). market data L1 namespace (`market/<channel>/schema_version=*/tier=L1/...`) 미참조.
+- **U4-XREPO close** (§7.1 RESOLVED 박제) — cross-repo impact 0.
+
+### Migration safety gate (ADR-034 §결정 4, U3-MIGRATE 책임)
+
+- `.compacted` sentinel 완료 객체만 대상 (MCT-173 INV-1/2 패턴 재사용)
+- copy → 4-HEAD verify (ETag + VersionId + sha256 Metadata + ContentLength) → delete (1-HEAD fail 시 delete 0)
+- per-partition `.rekey-completed` sentinel + BackfillManifest YAML (멱등 박제)
+- bucket versioning=Enabled (MCT-161) = rollback 안전망
+
+### 관련 cross-ref
+
+- ADR carrier: `mctrader-hub/docs/adr/ADR-034-nas-key-unification.md` (도메인 ADR SSOT)
+- Story: U1-ADR `#87` / U2-HELPER `#88` / U3-MIGRATE `#89` / U4-XREPO `#90` (close) / U5-VERIFY `#91` / EPIC `#86`
+- Spec: `docs/superpowers/specs/2026-05-17-nas-key-unification-design.md`
 
 ## WAL freeze 도구 (MCT-164 INV-1)
 
@@ -250,5 +314,8 @@ sha256 idempotency.
 
 - ADR-017 Amendment 2 (compactor source 규약, channel matrix SSOT)
 - ADR-027 Amendment 2 (silent-skip 차단 + allowlist.py fail-fast — MCT-166)
+- ADR-027 §D1 amendment box (U1-ADR / EPIC-nas-key-unification — l1/ sub-namespace 제거 cross-ref, 2026-05-17)
+- ADR-029 §D9 amendment box (U1-ADR / EPIC-nas-key-unification — L1 ↔ L2/L3 key namespace 균질화, 2026-05-17)
+- **ADR-034 (NAS Object Key Unification — 4-way split SSOT → single flat layout collapse, 2026-05-17, mctrader-hub SSOT)**
 - ADR-009 §D12 (forward-only invariant)
 - ADR-009 §D2.7 Amendment (MCT-163 — impl narrower, raw_json only nullable=True)
