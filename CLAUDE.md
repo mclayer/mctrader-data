@@ -138,6 +138,16 @@ build_legacy_l1_prefix(*, channel, ...)  # [Deprecated U5 회수] L2 GET legacy 
 - per-partition `.rekey-completed` sentinel + BackfillManifest YAML (멱등 박제)
 - bucket versioning=Enabled (MCT-161) = rollback 안전망
 
+**구현 SSOT**: `scripts/migration/rekey_l1_migration.py` (U3-MIGRATE #89, 2026-05-18).
+DataMigrationArchitect deputy §11 packet 7 invariant 박제. **P0 박제 — sha256 Metadata
+authoritative**: `promote_l1` precedent 는 NAS-vs-local topology (항상 hash 가능), U3 =
+NAS-vs-NAS (metadata only). legacy `l1/` 객체 `source.sha256 is None` 시 content identity
+불가 → **fail-closed quarantine** (copy/delete 절대 0, ETag = multipart 비신뢰 ADR-027 §D6
+content identity 사용 금지). dry-run = **default** (`--execute` 미지정 시 side-effect 0,
+sha256-None 전수 pre-flight enumerate). delete = `--execute --delete` 동시 + VersionId-pin
+copy + pre-delete source re-HEAD VersionId 불변 gate 통과 후만. 실제 운영 117GB delete =
+cross-repo engine 회귀 green 이후 cutover 단계 (Spec R3, 본 script scope 외).
+
 ### 관련 cross-ref
 
 - ADR carrier: `mctrader-hub/docs/adr/ADR-034-nas-key-unification.md` (도메인 ADR SSOT)
