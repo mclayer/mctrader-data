@@ -97,34 +97,39 @@ market/<channel>/schema_version=*/tier=L{1,2,3}/exchange=*/symbol=*/date=*/[hour
 build_nas_key(parquet_path, root, *, tier=None)  # 평면 단일 SSOT (PUT: SSOT-1/2/5)
 build_l1_prefix(*, channel, schema_ver, exchange, symbol, date_str)  # L2 GET flat prefix (SSOT-4)
 build_nas_prefix(*, tier, channel, schema_ver, exchange, symbol, date_str)  # tier-agnostic GET (SSOT-6)
-build_legacy_nas_key(parquet_path, root)  # [Deprecated U5 회수] cleanup HEAD (SSOT-3)
-build_legacy_l1_prefix(*, channel, ...)  # [Deprecated U5 회수] L2 GET legacy fallback (§11.2-A Option A)
+build_legacy_nas_key(parquet_path, root)  # [Deprecated — U3 도구 sole-caller / Epic close 후 maintenance 회수]
+build_legacy_l1_discovery_prefix(*, channel)  # [Deprecated — U3 도구 sole-caller / Epic close 후 maintenance 회수] (U3-FIX 신설)
+_legacy_key_to_canonical(key)  # [Deprecated — U3 도구 sole-caller / Epic close 후 maintenance 회수] (private)
 ```
 
-**Caller 흡수 6 분산점** (모두 helper 1줄 호출, ADR-034 §결정 2 6-row amendment):
+**Caller 흡수 5 분산점** (U5 cutover step 5 후 5-row state, post-PR #134 LAND):
 - `dual_writer.py::put_l1` — `build_nas_key(path, local_root, tier="L1")` (SSOT-1)
 - `runner.py::_dispatch_dual_write` — `build_nas_key(parquet, root, tier=tier)` (SSOT-2)
-- `runner.py::scan_and_cleanup_legacy` — `build_legacy_nas_key(parquet, root)` (SSOT-3)
-- `l2.py::_l1_nas_source` — `build_l1_prefix(...) + build_legacy_l1_prefix(...)` dual-list (SSOT-4)
+- `runner.py::scan_and_cleanup_legacy` — `build_nas_key(parquet, root)` (U5 R3 swap — flat canonical post-cutover)
+- `l2.py::_l1_nas_source` — `build_l1_prefix(...)` (U5 R2 — single-flat list, dual-list removed)
 - `runner.py::_historical_dual_write` — `build_nas_key(parquet, root, tier=tier)` (SSOT-5)
 - `l3.py::_compact_day_nas` — `build_nas_prefix(tier="L2", ...)` (SSOT-6)
 
-**grep 가드**: `tests/integration/test_nas_key_ssot.py` INV-1 (패턴 A/B/C 0-hits 박제)
+**rekey.py sole-caller (forward-only U3 artifact)**:
+- `nas_migration/rekey.py` — uses `build_legacy_l1_discovery_prefix` + `_legacy_key_to_canonical` (path (a), §9.1 R1 OVERRIDE)
+
+**grep 가드**: `tests/integration/test_nas_key_ssot.py` INV-1 (패턴 A/B/C 0-hits 박제) + `tests/integration/test_forward_only_nas_key.py` 5 grep gates (INV-2 + INV-6 + INV-7 + P2-1 drift prevention + helper-recovery confirmation)
 
 ### Dual-read 윈도우 (ADR-034 §결정 3)
 
 - **활성 시점**: U2 land 직후 — reader 가 평면 우선 → 404 시 `l1/` fallback (`build_legacy_nas_key` 경로).
-- **종료 시점**: U5 land — fallback 코드 + `build_legacy_nas_key` helper + 호출처 모두 grep gate 0 박제.
-- **활성 기간**: 약 2-4주 (U3 100% + cross-repo isolation 박제 + 30일 cool-down).
+- **종료 시점**: U5 LAND 후 (open-pending operator gate + 30일 cool-down 종료). dual-read fallback 코드 제거 (`l2.py::_l1_nas_source` 단일 flat list). path (a) per §9.1 R1 OVERRIDE: 3 helpers preserved as deprecated for U3 rekey.py sole-caller; allowlist-of-1 grep gate enforces forward-only invariant.
 
 ### Forward-only invariant 박제 테스트 (ADR-034 §결정 6, ADR-009 §D12 정합)
 
-**파일**: `tests/integration/test_forward_only_nas_key.py` (U5 신규).
+**파일**: `tests/integration/test_forward_only_nas_key.py` (U5 신규, 5 tests).
 
-3 grep gate:
-1. `_resolve_legacy_nas_key` 정의/호출 0 (Phase 1 WS-B helper 회수)
-2. `"l1/"` literal 직접 사용 0 (helper 외)
-3. reader 의 `l1/` fallback 코드 0 (`build_legacy_nas_key` 호출 0)
+5 grep gates:
+1. `test_inv2_no_resolve_legacy_nas_key` — `_resolve_legacy_nas_key` 정의/호출 0 (Phase 1 WS-B helper 회수)
+2. `test_inv2_no_build_legacy_l1_prefix` — `build_legacy_l1_prefix` def/import/call 0 (U5 R1 def-deletion 확인)
+3. `test_inv2_preserved_helpers_only_in_allowlist` — P2-1 drift prevention: 3 preserved helpers (`build_legacy_nas_key` + `build_legacy_l1_discovery_prefix` + `_legacy_key_to_canonical`) imported/called ONLY in exact-filename allowlist (src/: nas_key.py + rekey.py; tests/: 12 filenames). SEC-NIT-1 tightened — exact-filename set, not basename-prefix.
+4. `test_inv6_no_l1_dual_read_fallback` — L2 compactor `l1/` HEAD fallback / dual-list 0 (U5 R2 단일 flat 확인)
+5. `test_inv7_l1_residue_zero_fixture_scope` — fixture-scope: 평면-only NAS 상태에서 `l1/` key lookup 0. Operator-deferred production assertion (live-NAS CI 의존 금지).
 
 ### Cross-repo isolation (ADR-034 §결정 5)
 
