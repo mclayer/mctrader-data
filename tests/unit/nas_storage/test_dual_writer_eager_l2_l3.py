@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from typing import Literal, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -18,14 +19,18 @@ import pytest
 from mctrader_data.nas_storage.dual_writer import DualWriter
 from mctrader_data.nas_storage.nas_uploader import NASUploader, PutResult
 
+_NasStatus = Literal[
+    "uploaded", "skipped_idempotent", "queued", "hard_floor_blocked", "skipped_etag_overwrite"
+]
+
 
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _make_uploader_committed(content: bytes, *, status: str = "uploaded") -> NASUploader:
+def _make_uploader_committed(content: bytes, *, status: _NasStatus = "uploaded") -> NASUploader:
     """NAS committed path mock (put_streaming + head_object 4-tuple PASS)."""
-    mock = MagicMock(spec=NASUploader)
+    mock: MagicMock = MagicMock(spec=NASUploader)
     sha256_val = _sha256(content)
     mock.put_streaming.return_value = PutResult(
         status=status,
@@ -38,18 +43,18 @@ def _make_uploader_committed(content: bytes, *, status: str = "uploaded") -> NAS
         "sha256": sha256_val,
         "ContentLength": len(content),
     }
-    return mock
+    return mock  # type: ignore[return-value]
 
 
 def _make_uploader_queued(content: bytes) -> NASUploader:
     """NAS queued (retry_queue) path mock."""
-    mock = MagicMock(spec=NASUploader)
+    mock: MagicMock = MagicMock(spec=NASUploader)
     mock.put_streaming.return_value = PutResult(
         status="queued",
         object_etag="",
         latency_ms=1.0,
     )
-    return mock
+    return mock  # type: ignore[return-value]
 
 
 class TestSourceToDeleteNonePreservesMCT189:
@@ -236,11 +241,11 @@ class TestStatusXorSourceExists:
         elif status == "local_only":
             uploader = _make_uploader_queued(content)
         else:  # hard_floor_blocked
-            mock = MagicMock(spec=NASUploader)
+            mock: MagicMock = MagicMock(spec=NASUploader)
             mock.put_streaming.return_value = PutResult(
                 status="hard_floor_blocked", object_etag="", latency_ms=1.0
             )
-            uploader = mock
+            uploader = mock  # type: ignore[assignment]
 
         writer = DualWriter(nas_uploader=uploader, local_root=local_root)
 
@@ -373,7 +378,7 @@ class TestAlreadyPromotedOutcome:
                 source_to_delete=source_absent,
             )
 
-        uploader.enqueue_retry.assert_not_called()
+        cast(MagicMock, uploader).enqueue_retry.assert_not_called()
 
 
 class TestPutL1AlreadyPromotedNormalize:
@@ -393,12 +398,12 @@ class TestPutL1AlreadyPromotedNormalize:
         parquet_path.parent.mkdir(parents=True, exist_ok=True)
         parquet_path.write_bytes(content)
 
-        mock_uploader = MagicMock(spec=NASUploader)
+        mock_uploader: MagicMock = MagicMock(spec=NASUploader)
         mock_uploader.put_streaming.return_value = PutResult(
             status="uploaded", object_etag="etag-ok", latency_ms=1.0
         )
 
-        writer = DualWriter(nas_uploader=mock_uploader, local_root=local_root)
+        writer = DualWriter(nas_uploader=mock_uploader, local_root=local_root)  # type: ignore[arg-type]
 
         with patch(
             "mctrader_data.compactor.promotion.promote_l1",

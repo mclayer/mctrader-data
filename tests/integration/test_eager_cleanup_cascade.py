@@ -24,12 +24,17 @@ import contextlib
 import hashlib
 import sys
 from pathlib import Path
+from typing import Literal, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from mctrader_data.nas_storage.dual_writer import DualWriter
 from mctrader_data.nas_storage.nas_uploader import NASUploader, PutResult
+
+_NasStatus = Literal[
+    "uploaded", "skipped_idempotent", "queued", "hard_floor_blocked", "skipped_etag_overwrite"
+]
 
 
 # ─── Docker / testcontainers availability guard ───────────────────────────────
@@ -58,9 +63,9 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _make_committed_uploader(content: bytes, *, nas_status: str = "uploaded") -> NASUploader:
+def _make_committed_uploader(content: bytes, *, nas_status: _NasStatus = "uploaded") -> NASUploader:
     """NAS committed path mock (put_streaming + head_object 4-tuple PASS)."""
-    mock = MagicMock(spec=NASUploader)
+    mock: MagicMock = MagicMock(spec=NASUploader)
     sha256_val = _sha256(content)
     mock.put_streaming.return_value = PutResult(
         status=nas_status,
@@ -73,18 +78,18 @@ def _make_committed_uploader(content: bytes, *, nas_status: str = "uploaded") ->
         "sha256": sha256_val,
         "ContentLength": len(content),
     }
-    return mock
+    return mock  # type: ignore[return-value]
 
 
 def _make_queued_uploader(content: bytes) -> NASUploader:
     """NAS queued (retry_queue) path mock."""
-    mock = MagicMock(spec=NASUploader)
+    mock: MagicMock = MagicMock(spec=NASUploader)
     mock.put_streaming.return_value = PutResult(
         status="queued",
         object_etag="",
         latency_ms=1.0,
     )
-    return mock
+    return mock  # type: ignore[return-value]
 
 
 # ─── testcontainers MinIO fixtures (module-scope) ────────────────────────────
@@ -129,11 +134,9 @@ def minio_uploader(minio_container):
     cfg = minio_container.get_config()
     endpoint = f"http://{cfg['endpoint']}"
     uploader = NASUploader(
-        bucket="test-cascade",
-        endpoint_url=endpoint,
+        endpoint=endpoint,
         access_key=cfg["access_key"],
         secret_key=cfg["secret_key"],
-        hard_floor_bytes=0,
     )
     return uploader
 
@@ -344,7 +347,7 @@ def test_idempotent_replay_case_1_re_entry_with_local(tmp_path: Path) -> None:
     writer = DualWriter(nas_uploader=uploader, local_root=local_root)
 
     # skipped_idempotent status = NAS HEAD-then-PUT match (NAS object 이미 존재)
-    uploader.put_streaming.return_value = PutResult(
+    cast(MagicMock, uploader).put_streaming.return_value = PutResult(
         status="skipped_idempotent",
         object_etag="etag-mock",
         latency_ms=0.5,
