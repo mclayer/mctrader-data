@@ -145,7 +145,7 @@ class TestCounterLabelNames:
         assert len(mctrader_legacy_cleanup_race_noop_total._labelnames) == 0
 
 
-class TestActualEmitP1(object):
+class TestActualEmitP1:
     """P1-1 (CodeReview FIX): committed_unlink_failed + hard_floor_retained 실 emit 검증.
 
     constructability assertion 에서 실제 emit assertion 으로 업그레이드.

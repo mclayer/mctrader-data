@@ -7,13 +7,13 @@ Change Plan §8.1:
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from mctrader_data.compactor.runner import CompactorRunner
 from mctrader_data.nas_storage.dual_writer import DualWriter, DualWriteResult
-from mctrader_data.nas_storage.nas_uploader import NASUploader, PutResult, NASOperationalAlert
+from mctrader_data.nas_storage.nas_uploader import PutResult, NASOperationalAlert
 
 
 def _make_dummy_parquet(tmp_path: Path, content: bytes = b"parquet dummy") -> Path:
@@ -72,7 +72,10 @@ class TestDispatchDualWriteSourceToDelete:
     def test_dispatch_l3_passes_source_to_delete(self, tmp_path: Path) -> None:
         """L3 tier 에서도 source_to_delete=parquet_path 전달."""
         content = b"L3 dispatch content"
-        parquet_path = tmp_path / "market" / "ch" / "sv=v1" / "tier=L3" / "ex=X" / "sym=S" / "date=D" / "part-l3.parquet"
+        parquet_path = (
+            tmp_path / "market" / "ch" / "sv=v1" / "tier=L3"
+            / "ex=X" / "sym=S" / "date=D" / "part-l3.parquet"
+        )
         parquet_path.parent.mkdir(parents=True, exist_ok=True)
         parquet_path.write_bytes(content)
 

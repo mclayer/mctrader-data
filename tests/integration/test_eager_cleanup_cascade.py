@@ -155,7 +155,10 @@ def test_l1_to_l2_cascade_source_eager_unlink(
     """
     content = b"L1 parquet content for L1->L2 cascade test"
     sha256_val = _sha256(content)
-    l2_nas_key = "market/transaction/schema_version=v1/tier=L2/exchange=bithumb/symbol=KRW-BTC/date=2026-05-18/part-cascade-l1l2.parquet"
+    l2_nas_key = (
+        "market/transaction/schema_version=v1/tier=L2"
+        "/exchange=bithumb/symbol=KRW-BTC/date=2026-05-18/part-cascade-l1l2.parquet"
+    )
 
     # L1 source (simulating local L1 parquet to be deleted)
     l1_source = tmp_path / "l1_source.parquet"
@@ -207,7 +210,10 @@ def test_l2_to_l3_cascade_source_eager_unlink(
     """
     content = b"L2 parquet content for L2->L3 cascade test"
     sha256_val = _sha256(content)
-    l3_nas_key = "market/transaction/schema_version=v1/tier=L3/exchange=bithumb/symbol=KRW-BTC/date=2026-05-18/part-cascade-l2l3.parquet"
+    l3_nas_key = (
+        "market/transaction/schema_version=v1/tier=L3"
+        "/exchange=bithumb/symbol=KRW-BTC/date=2026-05-18/part-cascade-l2l3.parquet"
+    )
 
     # L2 source (simulating local L2 parquet to be deleted)
     l2_source = tmp_path / "l2_source.parquet"

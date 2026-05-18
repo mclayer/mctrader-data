@@ -11,10 +11,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from mctrader_data.compactor import runner as runner_module
 from mctrader_data.compactor.runner import _historical_dual_write
 from mctrader_data.nas_storage.dual_writer import DualWriter, DualWriteResult
-from mctrader_data.nas_storage.nas_uploader import NASUploader, PutResult, NASOperationalAlert
+from mctrader_data.nas_storage.nas_uploader import PutResult, NASOperationalAlert
 
 
 def _make_parquet(tmp_path: Path, content: bytes = b"historical parquet content") -> Path:
@@ -60,7 +59,10 @@ class TestHistoricalDualWriteSourceToDelete:
     def test_historical_l3_passes_source_to_delete(self, tmp_path: Path) -> None:
         """L3 historical 경로도 source_to_delete 전달."""
         content = b"L3 historical content"
-        parquet_path = tmp_path / "market" / "ch" / "sv=v1" / "tier=L3" / "ex=X" / "sym=S" / "date=D" / "part-l3h.parquet"
+        parquet_path = (
+            tmp_path / "market" / "ch" / "sv=v1" / "tier=L3"
+            / "ex=X" / "sym=S" / "date=D" / "part-l3h.parquet"
+        )
         parquet_path.parent.mkdir(parents=True, exist_ok=True)
         parquet_path.write_bytes(content)
 

@@ -77,7 +77,7 @@ def test_l2_source_eager_unlink_on_l3_commit(tmp_path: Path) -> None:
     Note: 본 unit test 는 _dispatch_dual_write 의 source_to_delete 전달을 mock patch 로 검증.
     E2E NAS 연동 박제는 tests/integration/test_eager_cleanup_cascade.py::test_l2_to_l3_cascade_source_eager_unlink.
     """
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import MagicMock
 
     import hashlib
 
