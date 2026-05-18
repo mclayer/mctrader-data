@@ -139,6 +139,19 @@ def generate_temp_key() -> tuple[str, bytes]:
     return key, data
 
 
+def generate_sentinel_key() -> tuple[str, bytes]:
+    """Generate script-owned sentinel key and dummy payload (1KB).
+
+    Sentinel is a script-owned object (NOT production data) used for DENY verification.
+    If broken IAM allows DeleteObject, sentinel deletion is harmless (script-owned, minimal).
+    """
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    uid = str(uuid.uuid4())[:8]
+    key = f"_iam_verify/{ts}-{uid}-sentinel.bin"
+    data = b"y" * 1024  # 1KB dummy payload (distinct from temp_key data)
+    return key, data
+
+
 def action_put(
     client: boto3.client,
     bucket: str,
@@ -298,33 +311,36 @@ def action_delete_deny(
 ) -> ActionResult:
     """Verify DENY: s3:DeleteObject should be forbidden (MCT-200 P2 design).
 
-    DESIGN NOTE (P2 FIX — teardown-after-deny resolution):
+    DESIGN NOTE (P2a FIX Iter 2 — script-owned sentinel):
     -------
-    Previous design (pre-FIX): PUT temp_key → LIST → HEAD → GET → DENY(temp_key) → teardown(temp_key)
-    Problem: If DENY works (403), teardown delete also gets 403 → "Failed to remove temp key" warning.
-    This creates a structural contradiction: DENY success means temp key remains (permanent leak).
+    Previous design (FIX Iter 1): sentinel_key = "l1/_verify_sentinel_read_only" (production object)
+    Problem: If IAM is broken (allows DeleteObject), verify script attempts to delete ACTUAL L1 data.
+    This violates INV-RoundTrip: broken-IAM failure path must never delete production objects.
 
-    SOLUTION (P2a pattern — DENY verification separation):
-    - Teardown uses DIFFERENT key (real L1 object) for DENY check, or
-    - Teardown happens BEFORE DENY check (temp_key is deleted without DENY side-effect).
+    SOLUTION (P2a variant — script-owned sentinel):
+    - sentinel_key is NOT a production object; it's SCRIPT-OWNED: _iam_verify/<ts>-<uuid>-sentinel.bin
+    - Sentinel is PUT by verify script (action 0) → DENY check (action 5) → teardown deletes it
+    - If IAM works (DENY verified): DELETE sentinel returns 403 → protection confirmed
+    - If IAM is broken (allows DeleteObject): sentinel deletion succeeds BUT is harmless (1KB dummy)
+    - Production L1/ objects NEVER touched by verify script (safe, deterministic)
 
-    IMPLEMENTATION (chosen P2a variant):
-    - Generate separate sentinel_key (e.g. existing L1/... object) during run_verify setup
-    - Perform DELETE_DENY check AGAINST sentinel_key (not temp_key)
-    - Sentinel_key is never deleted (it's a read-only marker in L1/)
-    - This way: DENY verification ≠ teardown target (data integrity preserved)
-    - Teardown temp_key deletion happens at line ~407-413 WITHOUT side-effects from DENY check
+    IMPLEMENTATION (script-owned sentinel):
+    - generate_sentinel_key(): returns _iam_verify/<ts>-<uuid>-sentinel.bin (1KB dummy)
+    - run_verify setup: PUT sentinel (action 0)
+    - Action 5: DENY check on sentinel_key
+    - Teardown: delete sentinel (403/404-tolerant), delete temp_key (normal delete)
 
-    INVARIANT (INV-P2):
-    - If s3:DeleteObject deny works: DELETE attempt on sentinel_key returns 403 → DENY verified
-    - Sentinel_key remains undeleted (no side-effects)
-    - Temp_key is deleted successfully in cleanup (separate flow)
-    - No permanent object leaks; DENY is verified correctly
+    INVARIANT (INV-RoundTrip, Story §8.2):
+    - DENY check targets ONLY script-owned object (sentinel)
+    - Broken-IAM failure path: sentinel deletion succeeds (harmless) → production unaffected
+    - DENY signal deterministic: IAM working = 403 / broken = 200·204
+    - Exit code (0/1/2): unchanged (all_pass = pass_count==5 and deny_verified)
+    - Teardown 403/404-tolerant: both sentinel and temp_key safe to cleanup
 
     CURRENT IMPLEMENTATION:
-    - key parameter = sentinel_key (an actual L1/ object, never deleted by verify script)
-    - DELETE attempt returns 403 (DENY verified)
-    - Temp_key cleanup handled separately (line ~407-413)
+    - key parameter = sentinel_key (script-owned _iam_verify/ object, safe to delete)
+    - DELETE attempt returns 403 (DENY verified) or succeeds (broken IAM, harmless)
+    - Temp_key + sentinel_key cleanup handled together (403/404-tolerant)
     """
     try:
         client.delete_object(Bucket=bucket, Key=key)
@@ -391,11 +407,24 @@ def run_verify(
     log.info(f"Generated temp key: {temp_key}")
 
     # Generate sentinel key for DENY verification (MCT-200 P2 design)
-    # Sentinel key is an actual L1/ object that will be attempted for deletion
-    # (and SHOULD fail with 403) but is never actually deleted.
-    # This separates DENY verification from teardown.
-    sentinel_key = "l1/_verify_sentinel_read_only"  # Real L1 object; DELETE should fail 403
-    log.info(f"Using sentinel key for DENY verification: {sentinel_key}")
+    # Sentinel key is SCRIPT-OWNED object (NOT production data), stored in _iam_verify/ prefix.
+    # This ensures DENY check is safe: if broken IAM allows DeleteObject, sentinel deletion
+    # is harmless (script-owned, minimal 1KB dummy).
+    # This separates DENY verification from teardown concerns.
+    sentinel_key, sentinel_data = generate_sentinel_key()
+    log.info(f"Generated script-owned sentinel key: {sentinel_key}")
+
+    # Action 0: PUT sentinel (script-owned object for DENY verification)
+    log.info("Action 0/5: PUT sentinel (script-owned)")
+    sentinel_put_result = action_put(client, bucket, sentinel_key, sentinel_data)
+    report.actions.append(sentinel_put_result)
+    if sentinel_put_result.success:
+        report.pass_count += 1
+        log.info(f"  ✓ Sentinel PUT success (HTTP {sentinel_put_result.http_status})")
+    else:
+        report.fail_count += 1
+        log.error(f"  ✗ Sentinel PUT failed: {sentinel_put_result.error_message}")
+        # Continue anyway; if sentinel PUT failed, DENY check will fail (expected behavior)
 
     # Action 1: PUT
     log.info("Action 1/5: PUT object")
@@ -455,21 +484,39 @@ def run_verify(
     else:
         log.error(f"  ✗ DENY check failed: {deny_result.error_message}")
 
-    # Cleanup: remove temp key (if PUT succeeded)
-    # MCT-200 P2 design: Teardown happens AFTER DENY check, targets temp_key only
-    # Sentinel_key is never deleted (read-only marker, used only for DENY verification)
+    # Cleanup: remove temp key and sentinel key (403/404-tolerant)
+    # MCT-200 P2 design: Teardown is self-contained, happens AFTER DENY check
+    # - temp_key deletion: SHOULD succeed (no IAM restriction, normal cleanup)
+    # - sentinel_key deletion: SHOULD fail 403 if IAM works (denied by policy)
+    #   * If IAM is broken (allows DeleteObject), sentinel deletion succeeds (safe: script-owned)
+    #   * If sentinel doesn't exist (404), ignored (harmless)
+    #   * If DENY is verified: sentinel 403 is expected (not an error, indicates protection works)
+    log.info("Cleanup: removing temp key and sentinel")
+
+    # Delete temp_key (normal cleanup, no IAM restriction expected)
     if put_result.success:
-        log.info("Cleanup: removing temp key")
         try:
             client.delete_object(Bucket=bucket, Key=temp_key)
             log.info(f"  ✓ Temp key removed: {temp_key}")
         except Exception as e:
             log.warning(f"  ⚠ Failed to remove temp key: {e}")
-            # Note: This is a non-fatal warning (temp key was created for verification only)
-            # Sentinel_key remains undeleted (as intended)
+
+    # Delete sentinel_key (403 is expected if IAM works; 404 or 200 are both tolerated)
+    if sentinel_put_result.success:
+        try:
+            client.delete_object(Bucket=bucket, Key=sentinel_key)
+            if report.deny_verified:
+                # If DENY was verified, sentinel deletion 403 is expected (protection works)
+                log.info(f"  ℹ Sentinel 403 expected (DENY verified); skipping cleanup concern")
+            else:
+                # If DENY was NOT verified, sentinel deletion succeeded (broken IAM, but sentinel is safe)
+                log.info(f"  ⚠ Sentinel deletion succeeded (IAM may be broken, but sentinel is script-owned: harmless)")
+        except Exception as e:
+            # 403/404 or other exceptions are tolerated in sentinel cleanup
+            log.info(f"  ℹ Sentinel cleanup exception (tolerated): {e}")
 
     # Summary
-    report.all_pass = (report.pass_count == 4) and report.deny_verified
+    report.all_pass = (report.pass_count == 5) and report.deny_verified
     report.fix_trigger = (report.fail_count > 0) or (not report.deny_verified)
 
     return report

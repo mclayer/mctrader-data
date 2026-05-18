@@ -234,6 +234,10 @@ def verify_backfill(
         elif symbol_ratio < threshold and l1_count > 0:
             logger.error(f"Symbol {symbol}: ratio {symbol_ratio:.2%} < {threshold:.2%} — FAIL")
             fail_count += 1
+        elif l1_count == 0 and l2_count > 0:
+            # L2-orphan anomaly: L2 파티션 존재 but L1 source 부재 (spurious promotion / discovery-glob mismatch)
+            logger.error(f"Symbol {symbol}: L2-orphan anomaly (L1={l1_count}, L2={l2_count}) — FAIL")
+            fail_count += 1
         else:
             pass_count += 1
 
@@ -309,7 +313,17 @@ def write_audit_markdown(
         l1 = data["l1"]
         l2 = data["l2"]
         ratio = data["ratio"]
-        status_str = "PASS" if ratio >= result.threshold else ("SKIP" if l1 > 0 and l2 == 0 else "FAIL")
+        # Per-symbol status: PASS / SKIP (partial boundary) / FAIL (ratio < threshold or L2-orphan)
+        if ratio >= result.threshold:
+            status_str = "PASS"
+        elif l1 > 0 and l2 == 0:
+            # KRW-MATIC partial boundary (MCT-173 Phase 2.4 Skip 1 허용)
+            status_str = "SKIP"
+        elif l1 == 0 and l2 > 0:
+            # L2-orphan anomaly (spurious promotion / discovery-glob mismatch)
+            status_str = "FAIL"
+        else:
+            status_str = "FAIL"
         lines.append(f"| {symbol} | {l1:,} | {l2:,} | {ratio:.2%} | {status_str} |")
 
     lines.extend([
