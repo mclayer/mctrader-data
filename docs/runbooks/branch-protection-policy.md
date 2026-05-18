@@ -44,6 +44,29 @@ gh api repos/mclayer/mctrader-data/branches/main/protection/required_pull_reques
 
 **복원**: multi-user 도입 시 (ADR-011 D11 bot account trigger), 정책 재평가 후 `gh api PATCH ... -F require_last_push_approval=true` 로 복원.
 
+### 2026-05-18 — 6-repo rollout 완료 (ADR-011 D1 amendment 정합 적용)
+
+ADR-011 D1 amendment (mctrader-hub PR #401 `f220931`) 가 `require_last_push_approval=false` 를 **6-repo 공통 solo-dev default** 로 박제 → sibling repo 전수 정합 적용:
+
+| repo | rollout 전 | rollout 후 | 방법 |
+|---|---|---|---|
+| mctrader-data | false (#174) | false | 본 Story carrier |
+| mctrader-hub | false | false | 기적용 (no-op) |
+| mctrader-engine | true | **false** | `gh api PATCH` 2026-05-18 |
+| mctrader-market | true | **false** | `gh api PATCH` 2026-05-18 |
+| mctrader-market-bithumb | true | **false** | `gh api PATCH` 2026-05-18 |
+| mctrader-market-upbit | N/A (branch protection 없음 — PRIVATE solo) | N/A | 무관 |
+
+일괄 적용 명령:
+```bash
+for repo in mctrader-engine mctrader-market mctrader-market-bithumb; do
+  gh api repos/mclayer/$repo/branches/main/protection/required_pull_request_reviews \
+    -X PATCH -F require_last_push_approval=false
+done
+```
+
+**검증**: 6-repo 전수 `require_last_push_approval=false` 재확인 완료 (2026-05-18). ADR-011 D1 amendment 와 실제 운영 상태 정합 (drift 0).
+
 ### 이전 정책 변경 (참조)
 
 - **2026-05-18 (이전)** — MCT-201 PR #129 LAND (`b9499a4`): branch protection contexts 무변경, `.github/workflows/ci.yml` 의 `ci` job 을 aggregate job 으로 재구성하여 SSOT 매칭 복원. shared infra mutation 0 (workflow-only fix). 7 PR 연속 admin override (Pattern K) 종결 carrier.
