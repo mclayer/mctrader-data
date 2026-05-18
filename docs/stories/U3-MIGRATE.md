@@ -455,6 +455,34 @@ fix_event:
     obligation: "SecurityTestPLAgent + CodeReviewPLAgent re-spawn (lighter — peer re-review 생략, PL direct re-verify P0=0 P1=0)"
     expected_outcome: PASS (P0=0 + P1=0)
   next_iteration_if_fail: 3 (max FIX 카운터 = 3, LAST iteration)
+  status: RESOLVED
+  re_verify_result:
+    security_test: PASS (2026-05-18, SecurityTestPLAgent lighter re-verify, P0=0 P1=0, SEC-P1-1 RESOLVED sha256 hard gate)
+    code_review: PASS (2026-05-18, CodeReviewPLAgent lighter re-verify, P0=0 P1=0, FIX loop 종료 2/3, 49 passed/2 skipped/0 failed)
+  re_verify_packet:
+    combined_verdict: PASS
+    counts: {p0: 0, p1: 0, p2: 4 advisory non-blocking, nit: 0}
+    p0_1_resolved: "both_head_404 guard — Change Plan §11.6:986-1003 decision matrix verbatim. source_404+target_404 → failed+reason=both_head_404+sentinel write 금지. test_both_head_404_yields_failed_not_done"
+    sec_p1_1_resolved: "_verify_4head sha256 hard gate — ONE-SIDE absent → all_pass=False (soft-pass 제거). HEAD-1 ETag soft-pass 보존 (§11.4:927 design-sanctioned). SecurityArch §7.6 M-2 / §7.2 T-T2 contract 회복"
+    p1_1_resolved: "iter_resumable() (pending + 5 mid-flight) + Gauge dec() durable sentinel+done write 후 이동 (INV-F P0 alert 보존)"
+    p1_2_resolved: "test_invg_midstate_copied_partition_resumes — status=copied 주입, copy_object call_count=0 + final done (P1-1 regression guard)"
+    p2_doc_resolved: "CopyResult 4-state docstring 정정 (4-state ACCEPT 유지, design-faithful)"
+    residual_p2_4_carried: "SEC-P2-1 (NASUploader copy/delete key-masking T-I2) → PMO retro hardening backlog. P2-1/2/3/4 (ETag counter semantics / --resume-from-manifest no-op U5 carry / threshold range / broad except) — inline-acceptable, verdict 영향 0"
+    4_boolean_self_check:
+      mechanical: true
+      boundary_completeness: true
+      dimensional_empirical: true
+      marketplace_sync_declared: false
+  scope_preservation: "Change Plan §11.4/§11.6 design SSOT 불변 (git diff docs/change-plans/ empty, impl conformed to design). Story §1/§2/§5/§6 + ADR-034 §결정 1-6 + Amendment 1-5 + MCT-159 disjoint 보존. §13.C PROVISIONAL perf gate 영향 0"
+  merge_conflict_resolution:
+    detected: "PR #102 base 103fda9 → main eaff4866 (PR #96 WS-A sort key + #98 testcontainers skip + #99 MCT-200 + #100 INCIDENT 4xx + #103 retro 5 PR 누적)"
+    rebase: "fix/u3-migrate-rekey rebased onto origin/main, CLAUDE.md disjoint 신규 섹션 (L1 naming #96 ↔ NAS re-key U3) 양쪽 보존 resolution, force-with-lease push (68698bf impl + 09e0e98 FIX iter 2)"
+  routing_handoff:
+    gate_labels: [gate:security-test-pass, gate:code-review-pass] (mctrader-data#89)
+    phase_transition: phase:구현 → phase:완료
+    pr_merge: mctrader-data#102 admin-merge (rebased, conflict resolved)
+    pmo_retro_backlog: SEC-P2-1 NASUploader key-masking T-I2 consistency (non-blocking hardening)
+    next_story: U5-VERIFY #91 design lane (Phase 1 helper 회수 + grep gate + forward-only invariant + 30일 cool-down)
 ```
 
 
