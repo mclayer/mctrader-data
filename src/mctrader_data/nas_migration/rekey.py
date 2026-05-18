@@ -284,6 +284,41 @@ class RekeyManifest:
             if entry.status == "pending":
                 yield entry
 
+    # P1-1 fix: mid-flight resume — batch loop iterates pending + all non-terminal mid-states
+    # Terminal statuses (done / failed / legacy_no_sha256 / rolled_back / skipped_*) = skip.
+    # §8.5.2 condition-4 restart-resumable 정합.
+    _MID_FLIGHT_STATUSES: frozenset[str] = frozenset([
+        "pending",
+        "copying",
+        "copied",
+        "verifying",
+        "verified",
+        "deleting",
+    ])
+    _TERMINAL_STATUSES: frozenset[str] = frozenset([
+        "done",
+        "failed",
+        "legacy_no_sha256",
+        "rolled_back",
+        "skipped_already_migrated",
+        "skipped_already_copied",
+        "skipped_not_compacted",
+    ])
+
+    def iter_resumable(self) -> Iterator[PartitionEntry]:
+        """pending + mid-flight crash states 반복 (batch loop 입력, P1-1 fix).
+
+        Status resume semantics (§8.5.2):
+        - pending: 미시작 → Step A copy 진입
+        - copying/copied: Step A mid/complete → Step A 재시도 (copy_object idempotent)
+        - verifying/verified: Step B mid/complete → Step B 재진입 (4-HEAD verify)
+        - deleting: Step C mid → Step C 재진입 (delete idempotent)
+        Terminal (done / failed / legacy_no_sha256 / rolled_back / skipped_*) = skip.
+        """
+        for entry in list(self._partitions.values()):
+            if entry.status in self._MID_FLIGHT_STATUSES:
+                yield entry
+
     def iter_done(self) -> Iterator[PartitionEntry]:
         """done 상태 partition 반복 (resume skip count 입력 — INV-C)."""
         for entry in list(self._partitions.values()):
@@ -618,17 +653,19 @@ class RekeyOrchestrator:
 
         all_pass = True
 
-        # HEAD-1: ETag match
+        # HEAD-1: ETag advisory check (soft-pass — design-sanctioned §11.4:927)
+        # ETag may differ for multipart objects (MCT-163 F3 caveat, DataMigrationArch §11.4).
+        # sha256 (HEAD-3) is the PRIMARY hard gate. ETag mismatch = advisory log only.
         if entry.old_etag and entry.new_etag and entry.old_etag == entry.new_etag:
             self._m_verified.labels(exchange=exchange, channel=channel, head_check="etag").inc()
             log.debug("[rekey] HEAD-1 ETag PASS old_key=%s", old_key)
         else:
             log.warning(
-                "[rekey] HEAD-1 ETag FAIL old_key=%s src_etag=%s… dst_etag=%s…",
+                "[rekey] HEAD-1 ETag advisory mismatch old_key=%s src_etag=%s… dst_etag=%s… "
+                "(soft-pass: multipart ETag caveat §11.4:927 — sha256 is primary gate)",
                 old_key, _mask_hex(entry.old_etag), _mask_hex(entry.new_etag),
             )
-            # Note: ETag may differ for multipart objects (MCT-163 F3 caveat) — treated as warning, not hard fail
-            # per DataMigrationArch §11.4: multipart ETag ≠ sha256, so use sha256 as primary gate
+            # advisory only — all_pass NOT modified (§11.4:927 design-sanctioned soft-pass)
             self._m_verified.labels(exchange=exchange, channel=channel, head_check="etag").inc()
 
         # HEAD-2: VersionId present (bucket versioning)
@@ -659,14 +696,18 @@ class RekeyOrchestrator:
                 )
                 all_pass = False
         else:
-            # one side absent — warn, soft pass (MetadataDirective="COPY" should carry sha256)
-            log.warning(
-                "[rekey] HEAD-3 sha256 absent ONE SIDE old_key=%s src_sha256=%s dst_sha256=%s",
+            # SEC-P1-1 hard gate: sha256 absent ONE SIDE (source XOR target) → all_pass=False.
+            # MetadataDirective="COPY" (M-2) should carry sha256 to dst; one-side absent = copy
+            # metadata failure or unexpected object swap. Delete gate MUST fail.
+            # SecurityArch §7.6 M-2 / §7.2 T-T2 (HIGH): content integrity unproven → block delete.
+            log.error(
+                "[rekey] HEAD-3 sha256 absent ONE SIDE — hard gate FAIL old_key=%s "
+                "src_sha256=%s dst_sha256=%s (SecurityArch M-2/T-T2 guard)",
                 old_key,
                 _mask_hex(entry.old_sha256),
                 _mask_hex(entry.new_sha256),
             )
-            self._m_verified.labels(exchange=exchange, channel=channel, head_check="sha256").inc()
+            all_pass = False
 
         # HEAD-4: ContentLength match
         if entry.old_content_length == entry.new_content_length:
@@ -689,7 +730,12 @@ class RekeyOrchestrator:
         entry: PartitionEntry,
         manifest: RekeyManifest,
     ) -> str:
-        """per-partition 3-step (copy → verify → delete).
+        """per-partition 3-step (copy → verify → delete) with mid-state resume.
+
+        P1-1 fix: mid-flight crash resume semantics (§8.5.2 condition-4):
+        - status=pending/copying: start from Step A (copy_object idempotent)
+        - status=copied/verifying: skip Step A, re-enter Step B (4-HEAD verify)
+        - status=verified/deleting: skip Step A+B, re-enter Step C (delete)
 
         Returns final status string.
         """
@@ -699,117 +745,196 @@ class RekeyOrchestrator:
         exchange = self._exchange
         channel = self._channel
 
-        # Step A: copy_object (HEAD-then-COPY idempotency)
-        log.info("[rekey] Step A: copy partition_id=%s old_key=%s", partition_id, _mask_key(old_key))
-        manifest.update_status(partition_id, "copying")
-        manifest.write_atomic()
-
         from botocore.exceptions import ClientError, EndpointConnectionError
-        try:
-            copy_result = self._uploader.copy_object(old_key, new_key)
-        except (ClientError, EndpointConnectionError, Exception) as exc:
-            log.error(
-                "[rekey] Step A copy_object failed partition_id=%s err=%s",
-                partition_id, type(exc).__name__,
-            )
-            manifest.update_status(
-                partition_id, "failed",
-                error_message=type(exc).__name__,
-                retry_count=entry.retry_count + 1,
-            )
-            manifest.write_atomic()
-            self._m_failed.labels(exchange=exchange, channel=channel, reason="boto3_error").inc()
-            return "failed"
 
-        if copy_result.status == "source_not_found":
-            # src already deleted (멱등 재실행 — src가 이미 delete 된 상태)
-            log.info("[rekey] Step A: source_not_found partition_id=%s (already migrated?)", partition_id)
+        # P1-1: mid-state resume dispatch — determine entry point
+        _skip_step_a = entry.status in {"copied", "verifying", "verified", "deleting"}
+        _skip_step_b = entry.status in {"verified", "deleting"}
+
+        # ── Step A: copy_object (HEAD-then-COPY idempotency) ──────────────────
+        if not _skip_step_a:
+            log.info(
+                "[rekey] Step A: copy partition_id=%s old_key=%s",
+                partition_id, _mask_key(old_key),
+            )
+            manifest.update_status(partition_id, "copying")
+            manifest.write_atomic()
+
+            try:
+                copy_result = self._uploader.copy_object(old_key, new_key)
+            except (ClientError, EndpointConnectionError, Exception) as exc:
+                log.error(
+                    "[rekey] Step A copy_object failed partition_id=%s err=%s",
+                    partition_id, type(exc).__name__,
+                )
+                manifest.update_status(
+                    partition_id, "failed",
+                    error_message=type(exc).__name__,
+                    retry_count=entry.retry_count + 1,
+                )
+                manifest.write_atomic()
+                self._m_failed.labels(exchange=exchange, channel=channel, reason="boto3_error").inc()
+                return "failed"
+
+            if copy_result.status == "source_not_found":
+                # P0-1 guard: source HEAD=404 — must check destination before marking done.
+                # Change Plan §11.6:986-1003 decision matrix verbatim:
+                #   source_404 + target_200 (sha256 match) → skipped_already_migrated (done)
+                #   source_404 + target_404 (both_head_404) → failed + P0 alert (sentinel 금지)
+                #   source_404 + target_200 (sha256 absent) → failed (cannot verify)
+                log.info(
+                    "[rekey] Step A: source_not_found partition_id=%s — checking dst HEAD",
+                    partition_id,
+                )
+                try:
+                    dst_info = self._uploader.head_object(new_key)
+                    dst_sha256 = dst_info.get("sha256")
+                    if dst_sha256:
+                        # source_404 + target_200 + sha256 present → already migrated
+                        log.info(
+                            "[rekey] Step A: source_404+target_200 sha256=%s… "
+                            "→ skipped_already_migrated partition_id=%s",
+                            _mask_hex(dst_sha256), partition_id,
+                        )
+                        manifest.update_status(
+                            partition_id, "done",
+                            new_etag=dst_info.get("ETag", copy_result.dst_etag),
+                            new_version_id=dst_info.get("VersionId", copy_result.dst_version_id),
+                        )
+                        manifest.write_atomic()
+                        self._write_sentinel(partition_id)
+                        self._m_skipped.labels(exchange=exchange, channel=channel).inc()
+                        return "done"
+                    else:
+                        # source_404 + target_200 but no sha256 — cannot verify, fail safe
+                        log.error(
+                            "[rekey] Step A: source_404+target_200 dst sha256 absent "
+                            "→ cannot verify, abort partition_id=%s",
+                            partition_id,
+                        )
+                        manifest.update_status(
+                            partition_id, "failed",
+                            error_message="source_404+target_200 dst sha256 absent — operator review",
+                            retry_count=entry.retry_count + 1,
+                        )
+                        manifest.write_atomic()
+                        self._m_failed.labels(
+                            exchange=exchange, channel=channel, reason="target_sha256_mismatch"
+                        ).inc()
+                        return "failed"
+                except ClientError as dst_exc:
+                    dst_code = dst_exc.response.get("Error", {}).get("Code", "")
+                    if dst_code == "404":
+                        # both_head_404: source deleted AND destination absent = data loss risk
+                        log.error(
+                            "[rekey] P0 ALERT: both_head_404 — src deleted and dst absent "
+                            "partition_id=%s old_key=%s (data loss risk, INV-F P0)",
+                            partition_id, _mask_key(old_key),
+                        )
+                        manifest.update_status(
+                            partition_id, "failed",
+                            error_message="both_head_404: source deleted + dst absent — data loss risk",
+                            retry_count=entry.retry_count + 1,
+                        )
+                        manifest.write_atomic()
+                        # sentinel write 금지 (Change Plan §11.6:1002 verbatim)
+                        self._m_failed.labels(
+                            exchange=exchange, channel=channel, reason="both_head_404"
+                        ).inc()
+                        return "failed"
+                    raise  # non-404 dst HEAD error — propagate
+
+            if copy_result.status == "dst_conflict":
+                # INV-B: dst exists with different sha256 → abort Step C delete (data safety)
+                log.error(
+                    "[rekey] Step A: dst_conflict — sha256 mismatch, delete aborted partition_id=%s",
+                    partition_id,
+                )
+                manifest.update_status(
+                    partition_id, "failed",
+                    error_message="dst_conflict: dst sha256 mismatch — manual operator review required",
+                    retry_count=entry.retry_count + 1,
+                )
+                manifest.write_atomic()
+                self._m_failed.labels(exchange=exchange, channel=channel, reason="dst_conflict").inc()
+                return "failed"
+
+            if copy_result.status == "already_exists_idempotent":
+                self._m_skipped.labels(exchange=exchange, channel=channel).inc()
+                log.info("[rekey] Step A: already_exists_idempotent partition_id=%s", partition_id)
+            else:
+                self._m_copied.labels(exchange=exchange, channel=channel, mode=self._run_mode).inc()
+
             manifest.update_status(
-                partition_id, "done",
+                partition_id, "copied",
                 new_etag=copy_result.dst_etag,
                 new_version_id=copy_result.dst_version_id,
+                timestamp_copied=_utcnow_iso(),
             )
             manifest.write_atomic()
-            self._write_sentinel(partition_id)
-            self._m_skipped.labels(exchange=exchange, channel=channel).inc()
-            return "done"
-
-        if copy_result.status == "dst_conflict":
-            # INV-B: dst exists with different sha256 → abort Step C delete (data safety)
-            log.error(
-                "[rekey] Step A: dst_conflict — sha256 mismatch, delete aborted partition_id=%s",
-                partition_id,
-            )
-            manifest.update_status(
-                partition_id, "failed",
-                error_message="dst_conflict: dst sha256 mismatch — manual operator review required",
-                retry_count=entry.retry_count + 1,
-            )
-            manifest.write_atomic()
-            self._m_failed.labels(exchange=exchange, channel=channel, reason="dst_conflict").inc()
-            return "failed"
-
-        if copy_result.status == "already_exists_idempotent":
-            self._m_skipped.labels(exchange=exchange, channel=channel).inc()
-            log.info("[rekey] Step A: already_exists_idempotent partition_id=%s", partition_id)
         else:
-            self._m_copied.labels(exchange=exchange, channel=channel, mode=self._run_mode).inc()
-
-        manifest.update_status(
-            partition_id, "copied",
-            new_etag=copy_result.dst_etag,
-            new_version_id=copy_result.dst_version_id,
-            timestamp_copied=_utcnow_iso(),
-        )
-        manifest.write_atomic()
-
-        # Step B: 4-HEAD verify ALL PASS gate (INV-B)
-        log.info("[rekey] Step B: 4-HEAD verify partition_id=%s", partition_id)
-        manifest.update_status(partition_id, "verifying")
-        manifest.write_atomic()
-
-        verify_pass = self._verify_4head(old_key, new_key, entry)
-
-        if not verify_pass:
-            log.error(
-                "[rekey] Step B: 4-HEAD FAIL → abort delete partition_id=%s",
-                partition_id,
+            log.info(
+                "[rekey] mid-state resume: status=%s → Step A skipped partition_id=%s",
+                entry.status, partition_id,
             )
+
+        # ── Step B: 4-HEAD verify ALL PASS gate (INV-B) ───────────────────────
+        if not _skip_step_b:
+            log.info("[rekey] Step B: 4-HEAD verify partition_id=%s", partition_id)
+            manifest.update_status(partition_id, "verifying")
+            manifest.write_atomic()
+
+            verify_pass = self._verify_4head(old_key, new_key, entry)
+
+            if not verify_pass:
+                log.error(
+                    "[rekey] Step B: 4-HEAD FAIL → abort delete partition_id=%s",
+                    partition_id,
+                )
+                manifest.update_status(
+                    partition_id, "failed",
+                    error_message="4-HEAD verify FAIL — delete aborted",
+                    retry_count=entry.retry_count + 1,
+                )
+                manifest.write_atomic()
+                self._m_failed.labels(
+                    exchange=exchange, channel=channel, reason="head_verify_fail"
+                ).inc()
+                return "failed"
+
+            # sha256 absent both sides → legacy_no_sha256 path
+            if entry.old_sha256 is None and entry.new_sha256 is None:
+                log.warning(
+                    "[rekey] legacy_no_sha256 partition_id=%s — preserved (operator gate required)",
+                    partition_id,
+                )
+                manifest.update_status(partition_id, "legacy_no_sha256")
+                manifest.write_atomic()
+                self._m_failed.labels(
+                    exchange=exchange, channel=channel, reason="legacy_no_sha256"
+                ).inc()
+                return "legacy_no_sha256"
+
             manifest.update_status(
-                partition_id, "failed",
-                error_message="4-HEAD verify FAIL — delete aborted",
-                retry_count=entry.retry_count + 1,
+                partition_id, "verified",
+                old_etag=entry.old_etag,
+                old_sha256=entry.old_sha256,
+                old_content_length=entry.old_content_length,
+                old_version_id=entry.old_version_id,
+                new_etag=entry.new_etag,
+                new_sha256=entry.new_sha256,
+                new_content_length=entry.new_content_length,
+                new_version_id=entry.new_version_id,
+                timestamp_verified=_utcnow_iso(),
             )
             manifest.write_atomic()
-            self._m_failed.labels(exchange=exchange, channel=channel, reason="head_verify_fail").inc()
-            return "failed"
-
-        # sha256 absent both sides → legacy_no_sha256 path
-        if entry.old_sha256 is None and entry.new_sha256 is None:
-            log.warning(
-                "[rekey] legacy_no_sha256 partition_id=%s — preserved (operator gate required)",
-                partition_id,
+        else:
+            log.info(
+                "[rekey] mid-state resume: status=%s → Step B skipped partition_id=%s",
+                entry.status, partition_id,
             )
-            manifest.update_status(partition_id, "legacy_no_sha256")
-            manifest.write_atomic()
-            self._m_failed.labels(exchange=exchange, channel=channel, reason="legacy_no_sha256").inc()
-            return "legacy_no_sha256"
 
-        manifest.update_status(
-            partition_id, "verified",
-            old_etag=entry.old_etag,
-            old_sha256=entry.old_sha256,
-            old_content_length=entry.old_content_length,
-            old_version_id=entry.old_version_id,
-            new_etag=entry.new_etag,
-            new_sha256=entry.new_sha256,
-            new_content_length=entry.new_content_length,
-            new_version_id=entry.new_version_id,
-            timestamp_verified=_utcnow_iso(),
-        )
-        manifest.write_atomic()
-
-        # Step C: delete_object (dry_run gate, INV-A)
+        # ── Step C: delete_object (dry_run gate, INV-A) ───────────────────────
         log.info("[rekey] Step C: delete partition_id=%s dry_run=%s", partition_id, self.dry_run)
 
         # Capture pre_delete_version_id (rollback 진입점 — DataMigrationArch §11.3)
@@ -826,7 +951,9 @@ class RekeyOrchestrator:
             if not self.dry_run:
                 # INV-A guard: execute path only when dry_run=False
                 self._uploader.delete_object(old_key)
-                self._m_deleted.labels(exchange=exchange, channel=channel, mode=self._run_mode).inc()
+                self._m_deleted.labels(
+                    exchange=exchange, channel=channel, mode=self._run_mode
+                ).inc()
                 log.info("[rekey] Step C: deleted old_key=%s", _mask_key(old_key))
             else:
                 # INV-A: dry-run → log only, delete_object NOT called
@@ -846,8 +973,10 @@ class RekeyOrchestrator:
             # partial_state remains elevated (P0 alert — operator must investigate)
             return "failed"
 
-        # partial_state Gauge -1 (sentinel write 완료 = partial_state 해소)
-        self._m_partial.labels(exchange=exchange, channel=channel).dec()
+        # P1-1 Gauge ordering fix: sentinel write → status=done → THEN Gauge dec().
+        # Ordering invariant: delete → sentinel write → done status → THEN Gauge dec.
+        # Rationale: if finalization fails between delete and dec(), the Gauge remains elevated
+        # → P0 alert fires correctly (INV-F/INV-H). Premature dec() silences the alert.
 
         # Sentinel write (B-4, O_CREAT) — Step C delete 직후
         self._write_sentinel(partition_id)
@@ -857,6 +986,9 @@ class RekeyOrchestrator:
             timestamp_deleted=_utcnow_iso(),
         )
         manifest.write_atomic()
+
+        # partial_state Gauge -1 AFTER durable sentinel + done status written (P1-1 fix)
+        self._m_partial.labels(exchange=exchange, channel=channel).dec()
 
         log.info("[rekey] partition done partition_id=%s", partition_id)
         return "done"
@@ -949,10 +1081,12 @@ class RekeyOrchestrator:
             manifest.write_atomic()
 
             # 4. per-batch loop (INV-N: batch_size=500)
+            # P1-1 fix: iter_resumable() = pending + mid-flight crash states (copied/verifying/etc.)
+            # Terminal states (done/failed/legacy_no_sha256/rolled_back/skipped_*) are skipped.
             t_batch_start = time.perf_counter()
             failed_in_batch = 0
 
-            for processed, entry in enumerate(manifest.iter_pending()):
+            for processed, entry in enumerate(manifest.iter_resumable()):
                 if self._shutdown_requested:
                     log.info("[rekey] SIGTERM: graceful drain — stopping after current partition")
                     break

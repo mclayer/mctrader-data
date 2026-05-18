@@ -279,6 +279,15 @@ moto mock_s3 primary 채택 (bucket versioning + Metadata + 4-tuple 지원 + CI 
 | `tests/scripts/test_rekey_l1_migration_unit.py` | 추가 | QADeveloperAgent | §8 CLI args + INV-L/N + sentinel | +301 | 8 CLI args + cardinality + sentinel traversal |
 | `tests/integration/test_nas_key_ssot.py` | 수정 | QADeveloperAgent | §8 INV-1 SSOT exemption | +8 -2 | rekey.py migration tool exemption 추가 |
 
+**FIX iteration 2 추가 변경 (security-test P1 + code-review P0+P1 통합)**:
+
+| 파일 경로 | 변경 유형 | 담당 Agent | FIX 매핑 | 라인 수(±) | 비고 |
+|-----------|-----------|------------|----------|------------|------|
+| `src/mctrader_data/nas_migration/rekey.py` | 수정 | DeveloperAgent | P0-1 + SEC-P1-1 + P1-1a+b | +234 -110 | source_not_found both_head_404 guard + sha256 hard gate + mid-state resume + Gauge ordering |
+| `src/mctrader_data/nas_storage/nas_uploader.py` | 수정 | DeveloperAgent | P2-doc | +7 -4 | CopyResult 4-state docstring 정정 |
+| `tests/integration/test_rekey_restart_resume.py` | 수정 | DeveloperAgent | P1-2 INV-G mid-state | +107 | status=copied mid-state injection test 추가 |
+| `tests/integration/test_rekey_both_head_404.py` | 추가 | DeveloperAgent | P0-1 | +170 | both_head_404 P0 scenario + source_404+target_200 skipped |
+
 ## §9 Impl Manifest (Change Plan §9.4 verbatim 미러 — DeveloperAgent 인계용)
 
 세부 본문 = [`docs/change-plans/U3-MIGRATE.md`](../change-plans/U3-MIGRATE.md) §9.4 참조 (SSOT).
@@ -381,6 +390,71 @@ fix_event:
     phase_transition: phase:설계-리뷰 → phase:구현
     sibling_pr_merge: mctrader-hub#396 admin-merge (ADR-034 Amendment 5, cutover order 우선 land)
     next_lane: implementation (DeveloperPL spawn) + SecurityTest + CodeReview (impl PR 후속)
+```
+
+### FIX iteration 2 — security-test + code-review 통합 (2026-05-18)
+
+```yaml
+fix_event:
+  iteration: 2
+  date: 2026-05-18
+  trigger: review-verdict (dual-lane 통합)
+  lane: [security-test, code-review]
+  pr: mctrader-data#102
+  pl_agents:
+    security_test: SecurityTestPLAgent (a1dfb8ef5067e7dee)
+    code_review: CodeReviewPLAgent (ae70563f586ab550f)
+  source:
+    security_test_verdict:
+      verdict: FIX
+      counts: {p0: 0, p1: 1, p2: 3 advisory}
+      github_native: "6 tools all clean (Secret/Push/Dependabot/CodeQL/trivy/hadolint, NAS_MINIO_REKEY_* 노출 0)"
+    code_review_verdict:
+      verdict: FIX
+      counts: {p0: 1, p1: 2, p2: 6}
+      build_evidence: "pytest 46 passed / 2 skipped (fcntl/Windows), ruff clean"
+  combined_blocking:
+    P0_1:
+      severity: P0
+      category: impl-manifest-mismatch (data-loss)
+      location: rekey.py:724-735 vs Change Plan §11.6:984-1003
+      issue: "source_not_found branch가 destination HEAD-check 없이 done+sentinel 기록. both_head_404 guard 부재 (grep=0). source_404+target_404 → silent data loss. Change Plan §11.6 decision matrix 위반"
+      severity_override: "Codex P1 → CodeReviewPL P0 elevate (데이터 손실)"
+    SEC_P1_1:
+      severity: P1
+      category: trust-boundary
+      location: rekey.py:621-685 _verify_4head (HEAD-3 :661-669 + HEAD-1 :625-632)
+      issue: "HEAD-3 sha256-absent-ONE-SIDE + HEAD-1 ETag-mismatch 둘 다 soft-pass without all_pass=False. 동시 발생 시 irreversible delete 전 ContentLength equality만 생존 → content integrity 미증명. SecurityArch §7.6 M-2 / §7.2 T-T2 HIGH 위반. Both Claude+Codex 독립 동일 P1 (high confidence)"
+      severity_note: "P1 (not P0): bucket versioning rollback + pre_delete_version_id + legacy_no_sha256 non-deletion = layered recovery"
+    P1_1:
+      severity: P1
+      category: runtime-bug
+      location: rekey.py:281-285, 849-859
+      issue: "batch loop status=='pending' only — mid-flight crash states (copying/copied/verifying/verified/deleting) 매 sweep 방치 (not pending, not sentinel-skipped). partial_state Gauge dec() durable sentinel+done write 선행 → post-delete finalization fail 시 deleting stall + INV-F/INV-H P0 alert silence. §8.5.2 condition-4 (restart-aware 117GB×72h) 위반"
+    P1_2:
+      severity: P1
+      category: test-quality
+      location: tests/integration/test_rekey_restart_resume.py:76-146
+      issue: "INV-G test docstring 은 §8.5.2 mid-state 주장하나 sentinel-skip path만 검증 (INV-C 동일). status=copied mid-state 미주입 → restart recovery 미검증 → P1-1 masked"
+  reconciliation:
+    head1_etag_soft_pass: "Codex P1 → CodeReviewPL P2 downgrade (§11.4:927 ETag-advisory design-sanctioned, MCT-163 multipart caveat, sha256 primary gate). correctness intact, metric-semantics nit"
+    copyresult_4state: "ACCEPT (design-faithful — Change Plan §11.6:1007 sha256 mismatch overwrite 차단 mandate. dst_conflict = 정확 realization. ArchitectPL escalation 불필요, residual = stale docstring P2-doc inline)"
+  mechanical_category: none (logic/data-safety, no fast-path)
+  pl_root_cause_diagnosis:
+    primary: "全 blocking findings = 구현 원인 (Change Plan §11.4/§11.6 design SSOT correct+complete, impl falls below documented design intent)"
+    design_escalation: not_required (Change Plan design 불변)
+    fix_path: "DeveloperPL 재구현 (Phase 2 PR #102 commit append) → 구현 리뷰·보안 테스트 재실행"
+  resolution: DeveloperPL FIX re-spawn (재구현, 4 blocking findings)
+  expected_deliverables:
+    - "P0-1: source_not_found branch에 both_head_404 guard 추가 — dst HEAD-check, source_404+target_200 → skip(already migrated), source_404+target_404 → failed + P0 alert (Change Plan §11.6:986-1003 decision matrix verbatim)"
+    - "SEC-P1-1: _verify_4head HEAD-3 sha256 hard gate — sha256 absent ONE-SIDE 시 all_pass=False (또는 legacy_no_sha256 non-deletion path 강제). HEAD-1 ETag soft-pass = §11.4:927 design-sanctioned 유지 (P2 metric-semantics nit only)"
+    - "P1-1: batch loop mid-flight crash states (copying/copied/verifying/verified/deleting) 처리 추가 (resume). Gauge dec() durable sentinel+done write 후로 이동"
+    - "P1-2: INV-G test에 status=copied mid-state partition 주입 (restart recovery 실검증)"
+    - "P2-doc: CopyResult dst_conflict stale docstring 정정 (inline)"
+  post_fix_re_verify:
+    obligation: "SecurityTestPLAgent + CodeReviewPLAgent re-spawn (lighter — peer re-review 생략, PL direct re-verify P0=0 P1=0)"
+    expected_outcome: PASS (P0=0 + P1=0)
+  next_iteration_if_fail: 3 (max FIX 카운터 = 3, LAST iteration)
 ```
 
 

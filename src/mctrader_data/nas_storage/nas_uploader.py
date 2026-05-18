@@ -58,11 +58,13 @@ log = logging.getLogger(__name__)
 class CopyResult:
     """copy_object 반환값 (4-state enum, U3-MIGRATE PL 결정 #2 / Refactor §c-1 verbatim).
 
-    status 4종:
+    status 4종 (P2-doc: 4-state 명시 — Change Plan §11.6:1007 sha256 mismatch overwrite 차단):
     - "copied": S3 server-side copy 성공 (신규 dst object)
-    - "already_exists_idempotent": dst HEAD 200 + sha256 Metadata source match → skip
-    - "source_not_found": src HEAD 404 (멱등 재실행 시 src 이미 delete = 정상 분기)
-    - "dst_conflict": dst HEAD 200 + sha256 Metadata mismatch → abort copy (INV-B 안전 gate)
+    - "already_exists_idempotent": dst HEAD 200 + sha256 Metadata source match → skip (idempotent)
+    - "source_not_found": src HEAD 404 (멱등 재실행 시 src 이미 delete = 정상 분기.
+      caller 의무: dst HEAD check → both_head_404 guard 필수 — P0-1 fix 정합)
+    - "dst_conflict": dst HEAD 200 + sha256 Metadata mismatch → abort copy (INV-B 안전 gate,
+      overwrite 차단 — Change Plan §11.6:1007 mandate)
 
     ADR-034 §결정 4 Step A carrier.
     """

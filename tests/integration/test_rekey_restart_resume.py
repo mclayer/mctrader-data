@@ -2,11 +2,13 @@
 
 Test Contract §8.5.2 (restart-resumable):
 - INV-G: SIGTERM mid-execution → resume → partition 4 = re-copy 0, partitions 1-3 skip (sentinel)
+- INV-G mid-state: status=copied partition injected → 2nd run resumes from copied state (P1-2 fix guard)
 
 ADR-034 §결정 4 + §8.5_active=true 조건 4 (restart-aware 117 GB × 72h) carrier.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 from unittest.mock import patch
 
@@ -55,7 +57,6 @@ def _make_uploader(client):
 
 def _seed_objects(client, count=10, exchange="bithumb", channel="orderbooksnapshot"):
     """Seed N l1/ objects with .compacted sentinels."""
-    import hashlib
     keys = []
     for i in range(count):
         body = f"parquet-data-{i}".encode()
@@ -144,3 +145,107 @@ class TestInvG:
         # Overall: all 5 partitions eventually done or skipped
         total = result1.copied + result1.skipped_already_migrated + result2.copied + result2.skipped_already_migrated
         assert total >= 3, f"INV-G: expected ≥ 3 total partitions handled, got {total}"
+
+    def test_invg_midstate_copied_partition_resumes(self, s3_bucket_versioned, tmp_path):
+        """INV-G mid-state: status=copied partition in manifest → 2nd run resumes from copied.
+
+        P1-2 fix regression guard (§8.5.2 mid-state injection):
+        1. Seed 2 objects: partition 0 completes in run 1, partition 1 left at status=copied
+        2. Inject partition 1 manifest entry with status=copied (crash-at-verify simulation)
+           and pre-seed destination object so verify can succeed
+        3. Run 2: batch loop must pick up status=copied (not just pending)
+           → verifying → verified → deleting → done (copy_object NOT called for partition 1)
+        """
+        client = s3_bucket_versioned
+        uploader = _make_uploader(client)
+        exchange = "bithumb"
+        channel = "orderbooksnapshot"
+
+        old_keys = _seed_objects(client, count=2, exchange=exchange, channel=channel)
+
+        audit_dir = tmp_path / "audit"
+        audit_dir.mkdir(parents=True, exist_ok=True)
+
+        from mctrader_data.nas_migration.rekey import (
+            RekeyManifest,
+            RekeyOrchestrator,
+        )
+
+        # Run 1: complete partition 0 only (batch_size=1)
+        orch1 = RekeyOrchestrator(
+            nas_uploader=uploader,
+            root=tmp_path,
+            exchange=exchange,
+            channel=channel,
+            batch_size=1,
+            dry_run=False,
+            i_understand_irreversible=True,
+            audit_dir=audit_dir,
+        )
+        result1 = orch1.run()
+        assert result1.copied >= 1, "Run 1 should have processed partition 0"
+
+        # Build manifest path (same as orchestrator uses)
+        manifest_path = audit_dir / f"rekey-l1-manifest-{exchange}-{channel}.yaml"
+        assert manifest_path.exists(), "Manifest must exist after run 1"
+
+        # Determine partition_id for old_keys[1]
+        orch_probe = RekeyOrchestrator(
+            nas_uploader=uploader,
+            root=tmp_path,
+            exchange=exchange,
+            channel=channel,
+            dry_run=True,
+            audit_dir=audit_dir,
+        )
+        pid1 = orch_probe._build_partition_id(old_keys[1])
+        new_key1 = orch_probe._build_new_key(old_keys[1])
+
+        # Pre-seed the destination object for partition 1 (simulates Step A copy completed)
+        body1 = b"parquet-data-1"
+        sha256_1 = hashlib.sha256(body1).hexdigest()
+        client.put_object(
+            Bucket="mctrader-market", Key=new_key1, Body=body1, Metadata={"sha256": sha256_1}
+        )
+
+        # Inject partition 1 into manifest as status=copied (crash-at-verify simulation)
+        manifest = RekeyManifest(manifest_path, exchange=exchange, channel=channel, run_mode="live")
+        manifest.upsert_pending(pid1, old_keys[1], new_key1)
+        manifest.update_status(pid1, "copied")
+        manifest.write_atomic()
+
+        # Track copy_object calls in run 2
+        copy_calls_run2 = []
+        original_copy = uploader.copy_object
+
+        def tracking_copy(src, dst, **kw):
+            copy_calls_run2.append(src)
+            return original_copy(src, dst, **kw)
+
+        # Run 2: should resume partition 1 from copied state
+        orch2 = RekeyOrchestrator(
+            nas_uploader=uploader,
+            root=tmp_path,
+            exchange=exchange,
+            channel=channel,
+            batch_size=10,
+            dry_run=False,
+            i_understand_irreversible=True,
+            resume_from_manifest=True,
+            audit_dir=audit_dir,
+        )
+
+        with patch.object(uploader, "copy_object", side_effect=tracking_copy):
+            orch2.run()
+
+        # copy_object must NOT be called for the mid-state partition (it was already copied)
+        assert old_keys[1] not in copy_calls_run2, (
+            f"INV-G mid-state FAIL: copy_object called for status=copied partition {old_keys[1]}"
+        )
+
+        # Partition 1 must be done after run 2 (resume recovered it)
+        manifest_final = RekeyManifest(manifest_path, exchange=exchange, channel=channel)
+        final_status = manifest_final.get_status(pid1)
+        assert final_status == "done", (
+            f"INV-G mid-state FAIL: partition 1 expected status=done after resume, got {final_status!r}"
+        )

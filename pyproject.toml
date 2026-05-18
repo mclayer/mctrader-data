@@ -22,6 +22,7 @@ dependencies = [
     "pyyaml>=6",
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",
+    "moto>=5.2.1",
 ]
 
 [project.optional-dependencies]
@@ -83,8 +84,10 @@ markers = [
 
 [dependency-groups]
 dev = [
+    "mypy>=2.1.0",
     "psutil>=7.2.2",
     "pyright>=1.1.409",
     "pytest-benchmark>=4.0",
+    "ruff>=0.15.12",
     "testcontainers[minio]>=4.14.2",
 ]
