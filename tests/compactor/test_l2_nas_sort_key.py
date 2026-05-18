@@ -2,6 +2,7 @@
 
 mock NASUploader (이슈 A 와 독립 — 본 Story 는 sort 알고리즘만 검증).
 """
+import hashlib as _hashlib
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -100,3 +101,56 @@ def test_nas_get_path_sort_key_content_derived(tmp_path: Path) -> None:
 
     assert result is not None, "NAS GET path content-derived sort 미적용 → quarantine"
     assert result.exists()
+
+
+def test_l2_nas_cache_byte_identical_and_run_id_stable(tmp_path, monkeypatch) -> None:
+    """MCT-203 AC-1/AC-2/AC-4: size-gated cache 적용 _compact_hour_nas 가
+    cache warmth 무관 byte-identical L2 output + run_id(filename) 불변 + GET 절감."""
+    import mctrader_data.nas_storage.get_streaming as gs_mod
+
+    def _mk(ts_list):
+        tbl = pa.table({"ts_utc": pa.array(ts_list, type=pa.timestamp("us", tz="UTC")),
+                        "v": pa.array(list(range(len(ts_list))), type=pa.int64())})
+        buf = BytesIO()
+        pq.write_table(tbl, buf)
+        return buf.getvalue()
+
+    early = [datetime(2026, 5, 13, 1, 0, i, tzinfo=timezone.utc) for i in range(3)]
+    late = [datetime(2026, 5, 13, 2, 0, i, tzinfo=timezone.utc) for i in range(3)]
+    _l1_prefix = (
+        "l1/market/orderbooksnapshot/schema_version=v/tier=L1/"
+        "exchange=upbit/symbol=KRW-BTC/date=2026-05-13/node=N"
+    )
+    payloads = {
+        f"{_l1_prefix}/part-zzz.parquet": _mk(early),
+        f"{_l1_prefix}/part-aaa.parquet": _mk(late),
+    }
+    get_calls: list[str] = []
+
+    def fake_gs(*, nas_uploader, nas_key, byte_range=None):  # noqa: ARG001
+        get_calls.append(nas_key)
+        return BytesIO(payloads[nas_key])
+
+    monkeypatch.setattr(gs_mod, "get_streaming", fake_gs)
+    nas = MagicMock()
+    nas._list_objects.side_effect = lambda prefix: [k for k in payloads if k.startswith(prefix)]
+
+    result = L2Compactor(tmp_path, nas_uploader=nas)._compact_hour_nas(
+        exchange="upbit", symbol="KRW-BTC", channel="orderbooksnapshot",
+        date_str="2026-05-13", schema_ver="v", hour_utc=1, out_dir_prefix=None,
+    )
+    assert result is not None and result.exists()
+    sha_run1 = _hashlib.sha256(result.read_bytes()).hexdigest()
+    run_id_1 = result.name
+
+    tmp2 = tmp_path / "run2"
+    tmp2.mkdir()
+    get_calls.clear()
+    result2 = L2Compactor(tmp2, nas_uploader=nas)._compact_hour_nas(
+        exchange="upbit", symbol="KRW-BTC", channel="orderbooksnapshot",
+        date_str="2026-05-13", schema_ver="v", hour_utc=1, out_dir_prefix=None,
+    )
+    assert result2 is not None
+    assert result2.name == run_id_1, "run_id (filename) drift — INV-9 위반"
+    assert _hashlib.sha256(result2.read_bytes()).hexdigest() == sha_run1, "byte-identical 위반"
+    assert len(get_calls) == 2, f"AC-4 GET 절감 위반 — expected N=2 (sort only), got {len(get_calls)}: {get_calls}"

@@ -142,6 +142,7 @@ class DualWriter:
         nas_key: str,
         data: bytes | Path,
         sha256: str,
+        source_to_delete: Path | None = None,   # MCT-202 D-1: caller-side explicit cascade intent
     ) -> DualWriteResult:
         """2-phase commit semantic dual-write.
 
@@ -246,13 +247,27 @@ class DualWriter:
             # MCT-189 D-2 A: DualWriter self-delete (caller 0건 재발 차단)
             # source(data as Path) 를 promote_l1() 4중 verify 후 삭제 (Path 입력 한정)
             dwr_status: Literal["committed", "local_only", "hard_floor_blocked"] = "committed"
-            if isinstance(data, Path) and data != local_path:
-                dwr_status = self._promote_after_nas_put(data, nas_key, sha256)
+            # MCT-202 D-1: caller-side explicit cascade intent (옵션 B)
+            # source_to_delete 우선 처리 → MCT-189 backward compat (data != local_path) 보존
+            if source_to_delete is not None:
+                _promote_status = self._promote_after_nas_put(source_to_delete, nas_key, sha256)
+                # P1-1: already_promoted → committed normalize (DualWriteResult.status 3-enum SSOT 보존)
+                dwr_status = "committed" if _promote_status == "already_promoted" else _promote_status  # type: ignore[assignment]
+            elif isinstance(data, Path) and data != local_path:
+                # MCT-189 D-2 A: backward compat (source_to_delete=None 시 기존 분기 유지)
+                _promote_status = self._promote_after_nas_put(data, nas_key, sha256)
+                dwr_status = "committed" if _promote_status == "already_promoted" else _promote_status  # type: ignore[assignment]
 
         elif nas_put_result.status == _QUEUED_STATUS:
             # NAS queued (retry_queue persistent) → local visible, caller source safe to delete
             os.replace(str(tmp_path), str(local_path))
             dwr_status = "local_only"
+            # MCT-202: source_to_delete 있으면 local_only_retained Counter emit
+            if source_to_delete is not None:
+                from mctrader_data.nas_metrics.prometheus_exporters import compactor_local_self_delete_total  # noqa: PLC0415
+                compactor_local_self_delete_total.labels(
+                    tier=self._tier_label_from_key(nas_key), outcome="local_only_retained"
+                ).inc()
 
         elif nas_put_result.status == _HARD_FLOOR_STATUS:
             # hard_floor_blocked → rollback local tmp, caller MUST retain source
@@ -263,6 +278,12 @@ class DualWriter:
                 "nas_key=%r sha256=%r",
                 nas_key, sha256,
             )
+            # MCT-202: source_to_delete 있으면 hard_floor_retained Counter emit
+            if source_to_delete is not None:
+                from mctrader_data.nas_metrics.prometheus_exporters import compactor_local_self_delete_total  # noqa: PLC0415
+                compactor_local_self_delete_total.labels(
+                    tier=self._tier_label_from_key(nas_key), outcome="hard_floor_retained"
+                ).inc()
 
         else:
             # Unknown NASUploader status → rollback and raise (defensive)
@@ -295,28 +316,63 @@ class DualWriter:
 
         return result
 
+    def _tier_label_from_key(self, nas_key: str) -> str:
+        """NAS key 에서 tier label 추출 (e.g. 'tier=L2' → 'L2').
+
+        ADR-034 flat layout: market/<channel>/schema_version=*/tier=L{1,2,3}/...
+        tier 컴포넌트 parse. 부재 시 'unknown' (defensive sentinel, cardinality 안전).
+        """
+        for part in nas_key.split("/"):
+            if part.startswith("tier="):
+                return part.split("=", 1)[1]
+        return "unknown"
+
     def _promote_after_nas_put(
         self,
         source: Path,
         nas_key: str,
         sha256: str,
-    ) -> Literal["committed", "local_only"]:
-        """NAS PUT commit 후 source self-delete (MCT-189 D-2 A).
+    ) -> Literal["committed", "local_only", "already_promoted"]:
+        """NAS PUT commit 후 source self-delete (MCT-189 D-2 A + MCT-202 3-tier 확장).
 
         promote_l1() 4중 verify 후 local 삭제. 예외 분기:
         - PromotionVerifyError: retry_queue enqueue + "local_only" 반환 (orphan 방지)
-        - FileNotFoundError: concurrent unlink graceful → "committed" 반환 (D-7 A, INV-1 XOR 만족)
+        - FileNotFoundError: concurrent unlink graceful → "already_promoted" 반환 (MCT-202 §3.8 §11.6 Case 2)
+        - OSError (unlink 실패): "committed_unlink_failed" Counter + source retain → "committed" 변환
+
+        Counter 5 outcome emit (compactor_local_self_delete_total{tier,outcome}):
+        - committed_unlinked: NAS commit + 4-HEAD pass + unlink success
+        - committed_unlink_failed: NAS commit + 4-HEAD pass + unlink OSError
+        - local_only_retained: NAS status='queued' (retry_queue enqueue)
+        - hard_floor_retained: NAS status='hard_floor_blocked'
+        - already_promoted: restart recovery / concurrent unlink (source 부재)
+
+        MCT-202 Amendment (2026-05-18):
+        - 반환 enum 확장: Literal["committed","local_only","already_promoted"]
+        - already_promoted semantic = INV-D XOR 만족 (NAS object 존재 + local source 부재)
+        - 2 callsite normalize: already_promoted → committed (P1-1, DualWriteResult.status 3-enum SSOT 보존)
         """
         from mctrader_data.compactor.promotion import (  # noqa: PLC0415
             promote_l1,
             PromotionVerifyError,
         )
+        from mctrader_data.nas_metrics.prometheus_exporters import (  # noqa: PLC0415
+            compactor_local_self_delete_total,
+            mctrader_retry_orphan_total,
+        )
+        tier_label = self._tier_label_from_key(nas_key)
         try:
             promote_l1(
                 local_path=source,
                 nas_uploader=self._uploader,
                 nas_key=nas_key,
                 segment_id=nas_key,
+            )
+            # committed_unlinked: promote_l1 내부에서 unlink 완료
+            compactor_local_self_delete_total.labels(tier=tier_label, outcome="committed_unlinked").inc()
+            log.debug(
+                "[dual_writer] promote_l1 committed_unlinked tier=%s source=%s",
+                tier_label, source.name,
             )
             return "committed"
         except PromotionVerifyError as e:
@@ -325,10 +381,36 @@ class DualWriter:
                 e,
             )
             self._uploader.enqueue_retry(key=nas_key, data=source, sha256=sha256)
+            # MCT-202 D-5: orphan visibility — sweep cycle 자연 회수까지 추적
+            mctrader_retry_orphan_total.labels(tier=tier_label).inc()
+            compactor_local_self_delete_total.labels(tier=tier_label, outcome="local_only_retained").inc()
             return "local_only"
         except FileNotFoundError:
-            # D-7 A: concurrent unlink → INV-1 XOR 만족, idempotent no-op
-            log.debug("[dual_writer] promote_l1 ENOENT — concurrent unlink (D-7 A)")
+            # MCT-202 §3.8 §11.6 Case 2: source 부재 (concurrent unlink / restart recovery)
+            # already_promoted semantic = INV-D XOR 만족 (NAS object 존재 + local source 부재)
+            log.debug(
+                "[dual_writer] promote_l1 ENOENT — already_promoted (concurrent unlink or restart recovery), "
+                "tier=%s source=%s",
+                tier_label, source.name,
+            )
+            compactor_local_self_delete_total.labels(tier=tier_label, outcome="already_promoted").inc()
+            return "already_promoted"
+        except OSError as e:
+            # MCT-202 P0-1 FIX: non-FileNotFoundError OSError (PermissionError / IOError 등)
+            # promotion.py:200 unlink(missing_ok=False) raw-propagates OSError — caller catch 의무
+            # source retain (unlink 실패 = source 보존, sweep fallback 회수 예정)
+            # INV-D: NAS object 존재 + local source 잔존 = committed semantic 유지
+            #   (NAS-SoT 격상: NAS 상태가 SoT, local 잔존은 sweep fallback 이 회수)
+            # INV-G: log.error (P0 alarm trigger — operator 관측 의무)
+            log.error(
+                "[dual_writer] promote_l1 OSError(unlink failed) — source retain, "
+                "committed_unlink_failed, sweep fallback 회수 예정. "
+                "tier=%s source=%s err=%s",
+                tier_label, source.name, e,
+            )
+            compactor_local_self_delete_total.labels(tier=tier_label, outcome="committed_unlink_failed").inc()
+            # DualWriteResult.status 3-enum SSOT: committed_unlink_failed 는 Counter label 전용
+            # NAS-SoT 격상 → committed (source 잔존은 sweep fallback 예정, 기능 상 commit 완료)
             return "committed"
 
     def put_l1(self, path: Path) -> DualWriteResult:
@@ -398,8 +480,10 @@ class DualWriter:
         if nas_put_result.status in _COMMITTED_STATUSES:
             # MCT-189 D-2 A: DualWriter self-delete (caller 0건 재발 차단)
             # put_l1() = path 가 source이자 NAS object → promote_l1() 4중 verify 후 삭제
+            # MCT-202 P1-1: already_promoted → committed normalize (DualWriteResult.status 3-enum SSOT 보존)
+            _l1_promote_status = self._promote_after_nas_put(path, nas_key, sha256)
             dwr_status: Literal["committed", "local_only", "hard_floor_blocked"] = (
-                self._promote_after_nas_put(path, nas_key, sha256)
+                "committed" if _l1_promote_status == "already_promoted" else _l1_promote_status  # type: ignore[assignment]
             )
         elif nas_put_result.status == _QUEUED_STATUS:
             dwr_status = "local_only"
