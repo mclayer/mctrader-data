@@ -2,6 +2,7 @@
 
 mock NASUploader (이슈 A 와 독립 — 본 Story 는 sort 알고리즘만 검증).
 """
+import hashlib as _hashlib
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -102,19 +103,10 @@ def test_nas_get_path_sort_key_content_derived(tmp_path: Path) -> None:
     assert result.exists()
 
 
-import hashlib as _hashlib
-
-
 def test_l2_nas_cache_byte_identical_and_run_id_stable(tmp_path, monkeypatch) -> None:
     """MCT-203 AC-1/AC-2/AC-4: size-gated cache 적용 _compact_hour_nas 가
     cache warmth 무관 byte-identical L2 output + run_id(filename) 불변 + GET 절감."""
-    from io import BytesIO
-    from unittest.mock import MagicMock
-    from datetime import datetime, timezone
     import mctrader_data.nas_storage.get_streaming as gs_mod
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-    from mctrader_data.compactor.l2 import L2Compactor
 
     def _mk(ts_list):
         tbl = pa.table({"ts_utc": pa.array(ts_list, type=pa.timestamp("us", tz="UTC")),
@@ -125,9 +117,13 @@ def test_l2_nas_cache_byte_identical_and_run_id_stable(tmp_path, monkeypatch) ->
 
     early = [datetime(2026, 5, 13, 1, 0, i, tzinfo=timezone.utc) for i in range(3)]
     late = [datetime(2026, 5, 13, 2, 0, i, tzinfo=timezone.utc) for i in range(3)]
+    _l1_prefix = (
+        "l1/market/orderbooksnapshot/schema_version=v/tier=L1/"
+        "exchange=upbit/symbol=KRW-BTC/date=2026-05-13/node=N"
+    )
     payloads = {
-        "l1/market/orderbooksnapshot/schema_version=v/tier=L1/exchange=upbit/symbol=KRW-BTC/date=2026-05-13/node=N/part-zzz.parquet": _mk(early),
-        "l1/market/orderbooksnapshot/schema_version=v/tier=L1/exchange=upbit/symbol=KRW-BTC/date=2026-05-13/node=N/part-aaa.parquet": _mk(late),
+        f"{_l1_prefix}/part-zzz.parquet": _mk(early),
+        f"{_l1_prefix}/part-aaa.parquet": _mk(late),
     }
     get_calls: list[str] = []
 

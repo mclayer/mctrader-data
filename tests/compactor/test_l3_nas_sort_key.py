@@ -1,4 +1,5 @@
 """L3 _compact_day_nas defensive content-derived sort key."""
+import hashlib as _hashlib
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -83,18 +84,9 @@ def test_l3_nas_get_content_derived_sort(tmp_path: Path) -> None:
     assert result is not None, "L3 NAS GET content-sort 미적용 → quarantine"
 
 
-import hashlib as _hashlib
-
-
 def test_l3_nas_cache_byte_identical_and_run_id_stable(tmp_path, monkeypatch) -> None:
     """MCT-203 AC-1/2/4/6: l3 _compact_day_nas size-gated cache parity."""
-    from io import BytesIO
-    from unittest.mock import MagicMock
-    from datetime import datetime, timezone
     import mctrader_data.nas_storage.get_streaming as gs_mod
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-    from mctrader_data.compactor.l3 import L3Compactor
 
     def _mk(ts_list):
         tbl = pa.table({"ts_utc": pa.array(ts_list, type=pa.timestamp("us", tz="UTC")),
@@ -105,9 +97,13 @@ def test_l3_nas_cache_byte_identical_and_run_id_stable(tmp_path, monkeypatch) ->
 
     early = [datetime(2026, 5, 13, 1, 0, i, tzinfo=timezone.utc) for i in range(3)]
     late = [datetime(2026, 5, 13, 5, 0, i, tzinfo=timezone.utc) for i in range(3)]
+    _l2_prefix = (
+        "market/orderbooksnapshot/schema_version=v/tier=L2/"
+        "exchange=upbit/symbol=KRW-BTC/date=2026-05-13"
+    )
     payloads = {
-        "market/orderbooksnapshot/schema_version=v/tier=L2/exchange=upbit/symbol=KRW-BTC/date=2026-05-13/hour=01/node=MERGED/part-zzz.parquet": _mk(early),
-        "market/orderbooksnapshot/schema_version=v/tier=L2/exchange=upbit/symbol=KRW-BTC/date=2026-05-13/hour=05/node=MERGED/part-aaa.parquet": _mk(late),
+        f"{_l2_prefix}/hour=01/node=MERGED/part-zzz.parquet": _mk(early),
+        f"{_l2_prefix}/hour=05/node=MERGED/part-aaa.parquet": _mk(late),
     }
     get_calls: list[str] = []
 
