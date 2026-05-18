@@ -42,7 +42,7 @@ class CompactorRunner:
         self,
         root: Path,
         *,
-        dual_writer: DualWriter | None = None,  # MCT-156: was minio_uploader (legacy MinioUploader removed)
+        dual_writer: DualWriter | None = None,  # MCT-156: renamed from minio_uploader (legacy upload path removed; module deleted U5 R4)
     ) -> None:
         self._root = root
         # MCT-168 (ADR-029 D1=B): dual_writer → L1Compactor pass-through
@@ -235,7 +235,7 @@ class CompactorRunner:
         """MCT-156/MCT-160: L3 compaction 후 DualWriter 로 NAS dual-write.
 
         MCT-160 D1+D2: date_utc caller 명시 전달.
-        legacy MinioUploader.upload() 호출 제거 (ADR-027 D4 amendment 박제).
+        legacy upload path 호출 제거 (ADR-027 D4 amendment, MCT-156; module deleted U5 R4).
         DualWriter inject 0 시 NAS upload 0 (degraded mode — test/local dev 호환).
         """
         out = self._l3.compact_day(
