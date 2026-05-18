@@ -135,7 +135,8 @@ docker exec mctrader-compactor python scripts/verify_ws_a_backfill_mct200.py \
   --exchange upbit \
   --channel orderbooksnapshot \
   --threshold 0.90 \
-  --output-json /tmp/ws-a-verify-mct200.json
+  --output-json /tmp/ws-a-verify-mct200.json \
+  --audit-output docs/audit/MCT-200-ws-a-backfill-verify-2026-05-13-15.md
 
 # 예상 output:
 # {

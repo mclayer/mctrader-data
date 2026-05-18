@@ -183,6 +183,7 @@ def verify_backfill(
     exchange: str,
     channel: str,
     threshold: float = 0.90,
+    audit_output: Optional[Path] = None,
 ) -> BackfillVerifyResult:
     """
     Main verify logic.
@@ -242,10 +243,16 @@ def verify_backfill(
     logger.info(f"Pass={pass_count}, Fail={fail_count}, Skip={skip_count}")
     logger.info(f"Status: {status}")
 
-    # Audit path
-    audit_path = str(
-        root.parent / "docs" / "audit" / f"MCT-200-ws-a-backfill-verify-{start_date}-{end_date}.md"
-    )
+    # Audit path (repo-relative, not production filesystem)
+    # Default: script directory/../docs/audit/ (repo root relative)
+    if audit_output is None:
+        audit_output = (
+            Path(__file__).resolve().parents[1]
+            / "docs"
+            / "audit"
+            / f"MCT-200-ws-a-backfill-verify-{start_date}-{end_date}.md"
+        )
+    audit_path = str(audit_output)
 
     return BackfillVerifyResult(
         total_l1_rows=total_l1_rows,
@@ -369,6 +376,11 @@ def main():
         type=Path,
         help="Output JSON result path (optional, /tmp/ws-a-verify-mct200.json recommended)",
     )
+    parser.add_argument(
+        "--audit-output",
+        type=Path,
+        help="Audit markdown output path (default: docs/audit/MCT-200-ws-a-backfill-verify-{start_date}-{end_date}.md, relative to script directory)",
+    )
 
     args = parser.parse_args()
 
@@ -386,6 +398,7 @@ def main():
             exchange=args.exchange,
             channel=args.channel,
             threshold=args.threshold,
+            audit_output=args.audit_output,
         )
     except Exception as e:
         logger.error(f"Verification failed: {e}")

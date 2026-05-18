@@ -291,7 +291,7 @@ mc admin policy update local write /path/to/write.json.original
 | Policy JSON SID | Service Account (user) | 용도 | Actions |
 |---|---|---|---|
 | `MctraderMarketReadOnly` | `mctrader-reader` | Compactor read (L2/L3 from NAS) | `s3:GetObject` |
-| `MctraderMarketIngestionOnlyWrite` | `mctrader-writer` | Collector write (WAL to NAS) | `s3:PutObject` |
+| `MctraderMarketIngestionOnlyWrite` | `mctrader-ingester` | Collector write (WAL to NAS) | `s3:PutObject` |
 | `MctraderMarketCompactorListOnly` | `mctrader-lister` | Compactor list (L1/L2 enumeration) | `s3:ListBucket` |
 | `MctraderMarketAdminMinPrivilege` | `mctrader-admin` | Operator (all 4 actions) | `s3:PutObject`, `s3:ListBucket`, `s3:HeadObject`, `s3:GetObject` |
 
@@ -308,7 +308,7 @@ mc admin policy info local admin
 
 # 각 사용자의 attached policy 확인
 mc admin user info local mctrader-reader
-mc admin user info local mctrader-writer
+mc admin user info local mctrader-ingester
 mc admin user info local mctrader-lister
 mc admin user info local mctrader-admin
 ```

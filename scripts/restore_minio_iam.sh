@@ -34,16 +34,27 @@
 # - SID (policy) ↔ service account name (user) mapping table 박제 (주석)
 # - silent-skip 차단 (ADR-027 Amendment 2 정합): 모든 error → exit code + stderr 명시
 #
-# P2 FINDING PROCESSING (DesignReview)
+# P1 FINDING PROCESSING (InfraEngineerAgent FIX Iter 1)
 # -----
+# Readonly variable reassignment error (line 57: POLICY_DIR, line 59: MINIO_ALIAS)
+# FIX: Removed readonly keyword from POLICY_DIR + MINIO_ALIAS (parse_args reassignment allowed)
+# Pattern verified: wal_freeze.py §3.2 (readonly미사용, default값은 ${VAR:-default} 보존)
+# Syntax verified: bash -n scripts/restore_minio_iam.sh (PASS)
+#
+# P3 FINDING PROCESSING (DesignReview)
+# -----
+# MCT-200 Phase 2 Group A P3: SA name SSOT unification
 # Bucket policy SID (PascalCamelCase) ↔ Service Account name (kebab-case) mapping:
 #
 #   SID in Policy JSON           | Service Account Name | Usage
 #   -----------------------------|----------------------|------------------
 #   MctraderMarketReadOnly       | mctrader-reader      | Compactor read (L2/L3)
-#   MctraderMarketIngestionOnlyWrite | mctrader-writer  | Collector write (WAL)
-#   MctraderMarketCompactorListOnly | mctrader-lister   | Compactor list ops
+#   MctraderMarketIngestionOnlyWrite | mctrader-ingester | Collector write (WAL) [P3 FIX: renamed from mctrader-writer]
+#   MctraderMarketCompactorListOnly | mctrader-compactor-list | Compactor list ops
 #   MctraderMarketAdminMinPrivilege | mctrader-admin    | Operator access (all 4 actions)
+#
+# SSOT: mctrader-hub/docs/domain-knowledge/domain/data-health/exchange-channel-matrix.md §2
+# verified-via: write.json Sid="MctraderMarketIngestionOnlyWrite" → mctrader-ingester
 #
 # REFERENCE
 # ---------
@@ -54,9 +65,9 @@
 set -euo pipefail
 
 # Configuration
-readonly POLICY_DIR="${POLICY_DIR:-./scripts/minio-policies}"
+POLICY_DIR="${POLICY_DIR:-./scripts/minio-policies}"
 readonly POLICIES=(read write list admin)
-readonly MINIO_ALIAS="${MINIO_ALIAS:-local}"  # mc alias name
+MINIO_ALIAS="${MINIO_ALIAS:-local}"  # mc alias name
 readonly DRY_RUN_DEFAULT=true
 readonly TIMESTAMP="$(date -u +%Y%m%d-%H%M%S)"
 readonly LOG_FILE="${LOG_FILE:-/tmp/minio-iam-restore-${TIMESTAMP}.log}"
