@@ -64,12 +64,27 @@ def scan_sealed(root: Path) -> list[Path]:
     return result
 
 
+def _strip_segment_suffixes(name: str) -> str:
+    """Strip WAL segment 파일 suffix (longest-first — substring 부분소비 차단).
+
+    WAL 3-state closure: .ndjson (active) -> .ndjson.sealed -> .ndjson.sealed.compacted.
+    suffix-strip 단일 책임 — split/validate/error 는 caller 책임 (error contract 비대칭 의도).
+    """
+    for suffix in (".ndjson.sealed.compacted", ".ndjson.sealed", ".ndjson"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
 def parse_node_id_from_segment(sealed: Path) -> str:
-    """Extract node_id from segment filename: segment-{ts}-{node_id}.ndjson.sealed"""
-    stem = sealed.name  # e.g. segment-20260509T000000Z-NODE_A.ndjson.sealed
-    base = stem.replace(".ndjson.sealed", "").replace(".ndjson", "")
-    # base = segment-20260509T000000Z-NODE_A
-    parts = base.split("-", 2)  # ["segment", "20260509T000000Z", "NODE_A"]
+    """Extract node_id from segment filename: segment-{ts}-{node_id}.ndjson[.sealed[.compacted]]
+
+    suffix-strip = _strip_segment_suffixes SSOT (longest-first). split/error 는 본 함수
+    책임 — len(parts)<3 시 "DEFAULT" lenient fallback 보존 (parse_ts_from_segment 의
+    ValueError strict contract 와 의도적 비대칭, zero-regression — spec §3.3 / Researcher U1).
+    """
+    base = _strip_segment_suffixes(sealed.name)
+    parts = base.split("-", 2)
     return parts[2] if len(parts) >= 3 else "DEFAULT"
 
 
@@ -77,17 +92,13 @@ def parse_ts_from_segment(sealed: Path) -> str:
     """Extract epoch ts from segment filename: segment-{YYYYMMDDTHHMMSSZ}-{node_id}.ndjson[.sealed[.compacted]]
 
     Symmetric with parse_node_id_from_segment — ts 위치 = parts[1].
-    Returns 'YYYYMMDDTHHMMSSZ' (사전 정렬 가능 ISO 형식).
+    suffix-strip = _strip_segment_suffixes SSOT (longest-first). split/validate 는 본
+    함수 책임 — malformed 시 ValueError strict contract 보존 (parse_node_id_from_segment
+    의 "DEFAULT" lenient 와 의도적 비대칭, zero-regression — spec §3.3 / Researcher U1).
 
-    ADR-009 §D2 Amendment N — L1 dual filename pattern 의 ts source.
+    ADR-009 §D2.8 — L1 dual filename pattern 의 ts source.
     """
-    stem = sealed.name
-    base = (
-        stem
-        .replace(".ndjson.sealed.compacted", "")
-        .replace(".ndjson.sealed", "")
-        .replace(".ndjson", "")
-    )
+    base = _strip_segment_suffixes(sealed.name)
     parts = base.split("-", 2)
     if len(parts) < 3 or parts[0] != "segment":
         raise ValueError(
