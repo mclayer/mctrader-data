@@ -152,3 +152,25 @@ planned_claude_md_sections: []
 - ADR-017 Amendment 3 + ADR-009 §D2.8 (mctrader-hub#398 `bba73f4`) — longest-first suffix-strip 규약 SSOT (본 refactor 가 준수)
 - ADR-009 §D2.1 node= partition MANDATORY / §D12.2 forward-only invariant
 - PR #96 `adfddf4` (compactor-sort-key — `parse_ts_from_segment` 산출 + 본 결함 발견)
+
+## §13 회고 (PMOAgent 작성 — CFP-138 / ADR-045 D-5 4-field schema 등가 박제)
+
+단일 세션 internal Story (formal Issue 미할당) — Story file/Issue body 부재로 ADR-045 §D-5 4-field schema 를 spec §13 에 등가 박제 (U3-MIGRATE retro Issue-body-대체 방식과 동형).
+
+```yaml
+회고:
+  retro_file: docs/retros/parse-node-id-suffix-strip-retro-2026-05-18.md
+  retro_summary: >
+    compactor-sort-key Story (PR #96 adfddf4) Task 2 가 발견한 parse_node_id_from_segment
+    chained .replace latent landmine (.compacted 파일 node_id 오염, dormant) 을
+    _strip_segment_suffixes longest-first helper + 양쪽 흡수로 closure (error contract
+    비대칭 의도적 보존, Researcher U1). PR #127 d8912ad single commit 617+/-15, 5 TDD
+    task 0 NEEDS_FIXES (compactor-sort-key Pattern G 70% 대조군 = Pattern M). cross-Story
+    Pattern K (branch protection matrix-name → admin merge) N=2 REACHED 이나 mctrader-data
+    infra governance 영역 (plugin-codeforge §D-9 design-guidance absence semantics 미충족)
+    → non-trigger, ADR 후보 0, ESCALATE 0 (4 Story 연속 baseline).
+  learnings_count: 7
+  feedback_back_to_codeforge: []
+```
+
+cross-Story threshold verdict: `cross_story_pattern_adr_trigger = null` (Pattern K N=2 정량 도달 / §D-9 plugin-codeforge design-guidance absence semantics 미충족 → semantics gate non-trigger, U3-MIGRATE retro §2.7 2-stage 판정 원칙 정합). 상세 retro §5 참조.
