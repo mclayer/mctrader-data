@@ -8,12 +8,12 @@ Public API:
     build_nas_key(parquet_path, root, *, tier=None) -> str        # 전 tier 평면 SSOT
     build_l1_prefix(*, channel, schema_ver, exchange, symbol, date_str) -> str   # SSOT-4 흡수
     build_nas_prefix(*, tier, channel, schema_ver, exchange, symbol, date_str) -> str  # SSOT-6 일반화 (l3.py 흡수)
-    build_legacy_nas_key(parquet_path, root) -> str               # [Deprecated U5 회수] dual-read transitional
-    build_legacy_l1_prefix(*, channel, schema_ver, exchange, symbol, date_str) -> str  # [Deprecated U5] §11.2-A
-    build_legacy_l1_discovery_prefix(*, channel) -> str           # [Deprecated U5 회수] U3-MIGRATE discovery SSOT
+    build_legacy_nas_key(parquet_path, root) -> str               # [Deprecated — U3 도구 sole-caller / Epic close 후 maintenance 회수]
+    build_legacy_l1_discovery_prefix(*, channel) -> str           # [Deprecated — U3 도구 sole-caller / Epic close 후 maintenance 회수]
 
 Private:
     _extract_tier(parquet_path, root) -> str | None
+    _legacy_key_to_canonical(key) -> str                          # [Deprecated — U3 도구 sole-caller / Epic close 후 maintenance 회수]
 
 ADR-034 §결정 2 verbatim (chief author amendment box draft — see .adr-amendment-drafts/).
 """
@@ -26,7 +26,6 @@ __all__ = [
     "build_l1_prefix",
     "build_nas_prefix",
     "build_legacy_nas_key",
-    "build_legacy_l1_prefix",
     "build_legacy_l1_discovery_prefix",
 ]
 
@@ -166,14 +165,13 @@ def build_nas_prefix(
 
 
 def build_legacy_nas_key(parquet_path: Path, root: Path) -> str:
-    """[Deprecated — U5 회수 예정] Phase 1 WS-B tier-aware NAS key 산출 (ADR-034 §결정 2).
+    """[Deprecated — U3 도구 sole-caller / Epic close 후 maintenance 회수] Phase 1 WS-B tier-aware NAS key 산출 (ADR-034 §결정 2).
 
-    dual-read 윈도우 활성 기간 (U2 land ~ U5 complete) 동안만 사용.
-    scan_and_cleanup_legacy() 전용 — 현재 NAS 에 l1/ prefix 로 존재하는
-    L1 객체를 올바르게 HEAD verify 하기 위한 transitional helper.
+    rekey.py (U3-MIGRATE forward-only artifact) 의 sole caller.
+    scan_and_cleanup_legacy() 는 U5 에서 build_nas_key() 로 교체 완료.
 
     U5 완료 후 U3 re-key 가 완료되면 NAS 에 l1/ 객체 잔존 0 → 본 함수 dead code.
-    U5 Story 가 caller 를 build_nas_key() 로 교체 후 본 helper 삭제.
+    Epic close 후 rekey.py + 본 helper 함께 maintenance 회수 예정.
 
     Layout (기존 split 스킴):
       - tier=L1 → "l1/" + rel.as_posix()  (DualWriter.put_l1 legacy 스킴)
@@ -201,45 +199,15 @@ def build_legacy_nas_key(parquet_path: Path, root: Path) -> str:
     return f"l1/{rel_posix}" if tier == "L1" else rel_posix
 
 
-def build_legacy_l1_prefix(
-    *,
-    channel: str,
-    schema_ver: str,
-    exchange: str,
-    symbol: str,
-    date_str: str,
-) -> str:
-    """[Deprecated — U5 회수 예정] §11.2-A Option A — L2 GET L1 source dual-prefix.
-
-    legacy `l1/` prefix scheme — Phase 2 forward-fix 도입 후 ~ U3-MIGRATE 완료 사이
-    윈도우에 117 GB 기존 L1 객체 (l1/market/...) 미참조 silent skip 차단용.
-
-    L2Compactor._l1_nas_source() 가 build_l1_prefix() (평면) + 본 helper (legacy) 양쪽
-    _list_objects 결과 union → schema-compatible 일괄 GET.
-
-    U5 완료 시점 = re-key 완료 + dual-read fallback 제거 + 본 helper grep gate 0.
-
-    keyword-only 의무 (build_l1_prefix 동형). empty segment fail-fast (AC-7).
-    """
-    if not all((channel, schema_ver, exchange, symbol, date_str)):
-        raise ValueError(
-            "build_legacy_l1_prefix: empty segment forbidden. AC-7 silent-skip 차단."
-        )
-    return (
-        f"l1/market/{channel}/schema_version={schema_ver}/tier=L1/"
-        f"exchange={exchange}/symbol={symbol}/date={date_str}/"
-    )
-
-
 def build_legacy_l1_discovery_prefix(*, channel: str) -> str:
-    """[Deprecated — U5 회수 예정] U3-MIGRATE discovery 공통 조상 prefix.
+    """[Deprecated — U3 도구 sole-caller / Epic close 후 maintenance 회수] U3-MIGRATE discovery 공통 조상 prefix.
 
-    build_legacy_l1_prefix() 의 모든 출력의 common ancestor =
-    "l1/market/{channel}/". discovery 는 schema_ver/symbol/date 를
-    a priori 모르므로 full build_legacy_l1_prefix 호출 불가 — 본 helper 가
-    SSOT 단일 정의 지점. keyword-only, empty segment fail-fast (AC-7).
+    rekey.py (U3-MIGRATE forward-only artifact) 의 sole caller.
+    "l1/market/{channel}/" — discovery 는 schema_ver/symbol/date 를
+    a priori 모르므로 full prefix 호출 불가 — 본 helper 가 SSOT 단일 정의 지점.
+    keyword-only, empty segment fail-fast (AC-7).
 
-    U3-MIGRATE rekey.py 전용 (§3.1 FIX scope #1). U5 완료 후 caller 와 함께 회수.
+    Epic close 후 rekey.py + 본 helper 함께 maintenance 회수 예정.
 
     Raises:
         ValueError: channel 이 empty string 인 경우 (AC-7 silent-skip 차단)
@@ -255,16 +223,14 @@ def build_legacy_l1_discovery_prefix(*, channel: str) -> str:
 
 
 def _legacy_key_to_canonical(key: str) -> str:
-    """alias-overlap canonical key: legacy l1/ prefix → flat canonical.
+    """[Deprecated — U3 도구 sole-caller / Epic close 후 maintenance 회수] alias-overlap canonical key: legacy l1/ prefix → flat canonical.
 
-    Dual-read window 동안 flat key 와 legacy key 가 동일 content 를 가리킬 때
-    canonical dedup + canonical run_id hash input 산출용.
-
+    rekey.py (U3-MIGRATE forward-only artifact) 의 sole caller.
     "l1/market/..." → "market/..."  (legacy L1 prefix strip)
     "market/..."    → "market/..."  (flat key, no-op)
 
     l1/ literal 은 본 helper (SSOT) 에서만 — grep gate INV-1 정합 (ADR-034 §결정 2).
 
-    U5 완료(re-key 완료) 후 dual-read fallback 제거 시 build_legacy_* 와 함께 회수.
+    Epic close 후 rekey.py + 본 helper 함께 maintenance 회수 예정.
     """
     return key.removeprefix("l1/")

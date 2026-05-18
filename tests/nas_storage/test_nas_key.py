@@ -18,7 +18,7 @@ from mctrader_data.nas_storage.nas_key import (
     build_l1_prefix,
     build_nas_prefix,
     build_legacy_nas_key,
-    build_legacy_l1_prefix,
+    build_legacy_l1_discovery_prefix,
     _extract_tier,
 )
 
@@ -232,39 +232,31 @@ def test_build_legacy_nas_key_equals_root_raises(tmp_path: Path) -> None:
         build_legacy_nas_key(tmp_path, tmp_path)
 
 
-# ─── build_legacy_l1_prefix ──────────────────────────────────────────────────
+# ─── build_legacy_l1_discovery_prefix (U3 sole-caller preserved) ─────────────
 
 
-def test_build_legacy_l1_prefix_has_l1_prefix() -> None:
-    """build_legacy_l1_prefix → 'l1/market/...' (legacy)."""
-    prefix = build_legacy_l1_prefix(
-        channel="orderbooksnapshot",
-        schema_ver="v2",
-        exchange="upbit",
-        symbol="KRW-BTC",
-        date_str="2026-05-18",
-    )
-    assert prefix.startswith("l1/market/orderbooksnapshot/")
+def test_build_legacy_l1_discovery_prefix_has_l1_prefix() -> None:
+    """build_legacy_l1_discovery_prefix → 'l1/market/<channel>/' (legacy discovery prefix)."""
+    prefix = build_legacy_l1_discovery_prefix(channel="orderbooksnapshot")
+    assert prefix == "l1/market/orderbooksnapshot/"
     assert prefix.endswith("/")
 
 
-def test_build_legacy_l1_prefix_empty_segment_raises() -> None:
-    """build_legacy_l1_prefix: empty date_str → ValueError."""
-    with pytest.raises(ValueError, match="empty segment forbidden"):
-        build_legacy_l1_prefix(
-            channel="transaction",
-            schema_ver="v1",
-            exchange="bithumb",
-            symbol="KRW-BTC",
-            date_str="",
-        )
+def test_build_legacy_l1_discovery_prefix_empty_channel_raises() -> None:
+    """build_legacy_l1_discovery_prefix: empty channel → ValueError."""
+    with pytest.raises(ValueError, match="empty channel forbidden"):
+        build_legacy_l1_discovery_prefix(channel="")
 
 
 # ─── __all__ surface guard (M-7) ─────────────────────────────────────────────
 
 
 def test_public_surface() -> None:
-    """M-7: helper module __all__ = 5 symbols (build_* only, _extract_tier excluded)."""
+    """M-7: helper module __all__ = 5 symbols (build_* + legacy discovery, _extract_tier excluded).
+
+    U5-VERIFY: build_legacy_l1_prefix REMOVED (R1 def-deletion).
+    build_legacy_l1_discovery_prefix retained (U3 rekey.py sole-caller).
+    """
     from mctrader_data.nas_storage import nas_key as mod
 
     assert set(mod.__all__) == {
@@ -272,7 +264,9 @@ def test_public_surface() -> None:
         "build_l1_prefix",
         "build_nas_prefix",
         "build_legacy_nas_key",
-        "build_legacy_l1_prefix",
+        "build_legacy_l1_discovery_prefix",
     }, f"__all__ surface mismatch: {mod.__all__}"
     # _extract_tier is private — not in __all__
     assert "_extract_tier" not in mod.__all__
+    # build_legacy_l1_prefix is def-deleted (U5-VERIFY R1) — must not be in __all__
+    assert "build_legacy_l1_prefix" not in mod.__all__

@@ -164,60 +164,35 @@ class L2Compactor:
         """MCT-169 D3=C INV-3: NAS GET source path (nas_uploader inject 시).
 
         NAS key prefix: single SSOT helper (ADR-034 §결정 2, U2-HELPER SSOT-4).
-        §11.2-A Option A canonical dedup — flat (평면) + legacy (l1/) 양쪽 GET,
-        동일 canonical key 가진 경우 flat 우선 (legacy fallback = flat absent 시만).
-        NASUploader._list_objects(prefix) → NAS key list → get_streaming() 순서.
+        U5-VERIFY: post-cutover flat-only — dual-read fallback (legacy l1/ prefix) removed.
+        NASUploader._list_objects(flat_prefix) → NAS key list → get_streaming() 순서.
         pq.ParquetFile(BytesIO stream) 로 읽기 (local Path open 0, INV-3).
-        INV-9 (FIX iteration 2): run_id hash input = canonical keys
-        (_legacy_key_to_canonical(k) for all nas_keys) — pre-U2/alias-overlap/post-U3
-        3 단계 동일 canonical_keys → 동일 run_id → L2 output filename drift 0.
+        run_id = sha256(sorted flat nas_keys) — post-U3 re-key 완료, l1/ 잔존 0.
 
-        ADR-017 Amendment 3 (PR #96): post-dedup nas_keys 에 대해
-        content-derived sort (get_streaming → _extract_min_ts) 적용 — 파일명 untrusted.
+        ADR-017 Amendment 3 (PR #96): content-derived sort (get_streaming → _extract_min_ts)
+        적용 — 파일명 untrusted.
         """
         from mctrader_data.nas_storage.get_streaming import get_streaming
-        from mctrader_data.nas_storage.nas_key import (
-            build_l1_prefix,
-            build_legacy_l1_prefix,
-            _legacy_key_to_canonical,
-        )
+        from mctrader_data.nas_storage.nas_key import build_l1_prefix
         from mctrader_data.nas_metrics.prometheus_exporters import nas_key_helper_call_total
 
         flat_prefix = build_l1_prefix(
             channel=channel, schema_ver=schema_ver, exchange=exchange,
             symbol=symbol, date_str=date_str,
         )
-        legacy_prefix = build_legacy_l1_prefix(
-            channel=channel, schema_ver=schema_ver, exchange=exchange,
-            symbol=symbol, date_str=date_str,
-        )
         nas_key_helper_call_total.labels(caller="l2_compactor_get_source", tier="L1").inc()
 
         try:
-            flat_keys = sorted(
+            # U5-VERIFY: post-cutover, all NAS keys are flat (l1/ re-key complete).
+            # Dual-read fallback (legacy_prefix union) removed — build_l1_prefix flat-only.
+            candidate_keys = sorted(
                 k for k in self._nas_uploader._list_objects(flat_prefix)  # type: ignore[union-attr]
                 if k.endswith(".parquet")
             )
-            legacy_keys = sorted(
-                k for k in self._nas_uploader._list_objects(legacy_prefix)  # type: ignore[union-attr]
-                if k.endswith(".parquet")
-            )
-            # §11.2-A Option A canonical dedup — flat preferred, legacy fallback (dual-read 윈도우)
-            # canonical dedup: flat ↔ legacy alias-overlap 동안 동일 canonical key 가진
-            # raw key 중 flat 우선 (legacy fallback = flat absent 시만).
-            # set union (raw string identity) 으로는 alias-overlap content 중복 불가.
-            canonical_map: dict[str, str] = {}
-            for raw_key in flat_keys:
-                canonical_map[raw_key] = raw_key  # flat = canonical, preferred
-            for raw_key in legacy_keys:
-                canonical = _legacy_key_to_canonical(raw_key)  # l1/ strip via SSOT (INV-1 정합)
-                canonical_map.setdefault(canonical, raw_key)  # legacy fallback only if flat absent
-            candidate_keys = sorted(canonical_map.values())
         except Exception:
             _log.warning(
-                "[L2Compactor] NAS _list_objects failed flat=%s legacy=%s — skip (INV-3)",
+                "[L2Compactor] NAS _list_objects failed flat=%s — skip (INV-3)",
                 flat_prefix,
-                legacy_prefix,
             )
             return None
 
@@ -244,12 +219,10 @@ class L2Compactor:
         first_pf = pq.ParquetFile(first_stream)
         schema = first_pf.schema_arrow
 
-        # INV-9 (FIX iteration 2 P1 #2) — canonical run_id cutover-stable determinism:
-        # run_id hash input = canonical keys (all raw keys mapped to canonical = strip "l1/" prefix).
-        # pre-U2 (flat_keys=[]) + alias-overlap + post-U3 (legacy_keys=[]) → 동일 canonical_keys
-        # → 동일 run_id → L2 output filename drift 0 → orphan file 차단.
-        # INV-9 wording "flat_keys ONLY" = canonical key 의미 (FIX iteration 2 정합).
-        canonical_keys = sorted(_legacy_key_to_canonical(k) for k in nas_keys)
+        # U5-VERIFY: post-cutover, all nas_keys are already flat canonical keys.
+        # _legacy_key_to_canonical wrapper removed — no l1/ prefix stripping needed.
+        # run_id = sha256(sorted flat nas_keys) — stable post-U3 (legacy 0).
+        canonical_keys = sorted(nas_keys)
         run_id = hashlib.sha256("|".join(canonical_keys).encode()).hexdigest()[:16]
 
         out_dir = (

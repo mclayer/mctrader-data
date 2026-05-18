@@ -103,8 +103,13 @@ def test_runner_dispatch_dual_write_helper_routing(tmp_path: Path) -> None:
 
 
 def test_runner_cleanup_helper_routing(tmp_path: Path) -> None:
-    """runner.scan_and_cleanup_legacy → build_legacy_nas_key(parquet, root) + emit."""
+    """runner.scan_and_cleanup_legacy → build_nas_key(parquet, root) + emit (U5-VERIFY R3).
+
+    Post-cutover: scan_and_cleanup_legacy uses build_nas_key (flat canonical key),
+    not build_legacy_nas_key (l1/ prefix). Re-key complete = NAS has flat keys.
+    """
     from mctrader_data.compactor.runner import scan_and_cleanup_legacy
+    from mctrader_data.nas_storage.nas_key import build_nas_key
 
     parquet = (
         tmp_path / "market" / "orderbooksnapshot" / "schema_version=v2" / "tier=L1"
@@ -113,8 +118,10 @@ def test_runner_cleanup_helper_routing(tmp_path: Path) -> None:
     parquet.parent.mkdir(parents=True, exist_ok=True)
     parquet.write_bytes(b"PAR1" + b"\x00" * 8)
 
-    expected_key = build_legacy_nas_key(parquet, tmp_path)
-    assert expected_key.startswith("l1/"), f"Expected l1/ legacy key, got {expected_key!r}"
+    # U5-VERIFY R3: expect flat canonical key (no l1/ prefix)
+    expected_key = build_nas_key(parquet, tmp_path)
+    assert not expected_key.startswith("l1/"), f"Expected flat key, got {expected_key!r}"
+    assert expected_key.startswith("market/"), f"Expected market/ prefix, got {expected_key!r}"
 
     received_keys: list[str] = []
     mock_uploader = MagicMock()
@@ -172,7 +179,10 @@ def test_runner_historical_dual_write_helper_routing(tmp_path: Path) -> None:
 
 
 def test_l2_compactor_get_source_emit(tmp_path: Path) -> None:
-    """l2._l1_nas_source → build_l1_prefix + build_legacy_l1_prefix + emit l2_compactor_get_source."""
+    """l2._compact_hour_nas → build_l1_prefix (flat-only, post-cutover) + emit l2_compactor_get_source.
+
+    U5-VERIFY: dual-read fallback removed. _list_objects called once (flat prefix only).
+    """
     import prometheus_client
 
     # Use a fresh registry to avoid cross-test pollution
@@ -189,7 +199,7 @@ def test_l2_compactor_get_source_emit(tmp_path: Path) -> None:
     from mctrader_data.compactor.l2 import L2Compactor
 
     mock_uploader = MagicMock()
-    # Return empty list for both flat + legacy prefix → nas_keys = []
+    # Return empty list → nas_keys = [] → None
     mock_uploader._list_objects.return_value = []
 
     compactor = L2Compactor.__new__(L2Compactor)
@@ -208,15 +218,18 @@ def test_l2_compactor_get_source_emit(tmp_path: Path) -> None:
         )
 
     assert result is None  # empty list → None
-    # _list_objects called twice (flat + legacy)
-    assert mock_uploader._list_objects.call_count == 2
+    # U5-VERIFY: _list_objects called exactly once (flat prefix only, no legacy probe)
+    assert mock_uploader._list_objects.call_count == 1, (
+        f"Expected 1 _list_objects call (flat-only post-cutover), "
+        f"got {mock_uploader._list_objects.call_count}"
+    )
 
-    # Verify both prefixes: flat (market/) and legacy (l1/market/)
+    # Verify prefix is flat (market/) not legacy (l1/market/)
     call_args = [str(c.args[0]) for c in mock_uploader._list_objects.call_args_list]
     flat_calls = [a for a in call_args if a.startswith("market/")]
     legacy_calls = [a for a in call_args if a.startswith("l1/market/")]
     assert len(flat_calls) == 1, f"Expected 1 flat prefix call, got {call_args}"
-    assert len(legacy_calls) == 1, f"Expected 1 legacy prefix call, got {call_args}"
+    assert len(legacy_calls) == 0, f"Expected 0 legacy prefix calls post-cutover, got {call_args}"
 
 
 def test_l3_compactor_get_source_emit(tmp_path: Path) -> None:
