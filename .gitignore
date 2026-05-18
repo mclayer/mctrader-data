@@ -34,3 +34,6 @@ docker/minio/.env
 
 # spike evidence packs / scratch (MCT-148)
 .tmp/
+
+# local editor scratch backups (e.g. *.md.local-bak from interrupted edits)
+*.local-bak

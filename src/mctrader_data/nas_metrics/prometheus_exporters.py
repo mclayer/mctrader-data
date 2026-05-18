@@ -103,6 +103,35 @@ nas_put_operational_alert_total = Counter(
     labelnames=("tier", "reason"),
 )
 
+# ─── MCT-202: eager post-compaction cleanup cascade Prometheus metrics ────────
+# ADR-027 §D6 cardinality invariant: ≤ 50 active series
+# 총 19 series 추가 (15 + 3 + 1):
+#   compactor_local_self_delete_total: 3 tier × 5 outcome = 15 series
+#   mctrader_retry_orphan_total: 3 series (tier)
+#   mctrader_legacy_cleanup_race_noop_total: 1 series (label 0)
+# INV-SEC-6: sha256 hex Prometheus label 0 — log only.
+# outcome enum: committed_unlinked / committed_unlink_failed / local_only_retained
+#               / hard_floor_retained / already_promoted
+# tier ∈ {L1, L2, L3}
+
+compactor_local_self_delete_total = Counter(
+    "compactor_local_self_delete_total",
+    "Compactor local source self-delete outcome (MCT-202 eager cascade, ADR-029 §D11)",
+    labelnames=["tier", "outcome"],
+)
+
+mctrader_retry_orphan_total = Counter(
+    "mctrader_retry_orphan_total",
+    "PromotionVerifyError → retry_queue enqueue (source 보존, sweep cycle 자연 회수 — MCT-202 D-5)",
+    labelnames=["tier"],
+)
+
+mctrader_legacy_cleanup_race_noop_total = Counter(
+    "mctrader_legacy_cleanup_race_noop_total",
+    "scan_and_cleanup_legacy sweep race noop (eager cascade 가 이미 unlink, graceful skip — MCT-202 §3.9)",
+    labelnames=[],
+)
+
 if TYPE_CHECKING:
     pass
 

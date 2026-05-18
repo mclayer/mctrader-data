@@ -264,7 +264,11 @@ def test_build_legacy_l1_prefix_empty_segment_raises() -> None:
 
 
 def test_public_surface() -> None:
-    """M-7: helper module __all__ = 5 symbols (build_* only, _extract_tier excluded)."""
+    """M-7: helper module __all__ = 6 symbols (build_* only, _extract_tier excluded).
+
+    U3-MIGRATE Story 가 build_legacy_l1_discovery_prefix 신설 (l1/* + l2/* + l3/*
+    union discovery, rekey migration carrier). 본 test = nas_key.py __all__ SSOT mirror.
+    """
     from mctrader_data.nas_storage import nas_key as mod
 
     assert set(mod.__all__) == {
@@ -273,6 +277,7 @@ def test_public_surface() -> None:
         "build_nas_prefix",
         "build_legacy_nas_key",
         "build_legacy_l1_prefix",
+        "build_legacy_l1_discovery_prefix",
     }, f"__all__ surface mismatch: {mod.__all__}"
     # _extract_tier is private — not in __all__
     assert "_extract_tier" not in mod.__all__
