@@ -28,6 +28,7 @@ _SPEC = importlib.util.spec_from_file_location(
     "rekey_l1_migration",
     Path(__file__).parents[2] / "scripts" / "migration" / "rekey_l1_migration.py",
 )
+assert _SPEC is not None and _SPEC.loader is not None  # pyright narrowing (script path 확정)
 rekey = importlib.util.module_from_spec(_SPEC)
 # sys.modules 등록 — @dataclass decorator 가 cls.__module__ resolve 시 필요
 sys.modules["rekey_l1_migration"] = rekey
