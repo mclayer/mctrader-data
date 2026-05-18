@@ -56,6 +56,8 @@ def _docker_unavailable_reason() -> str | None:
     return None
 
 
+_CASCADE_BUCKET = "test-cascade"
+
 # ─── shared helpers ───────────────────────────────────────────────────────────
 
 
@@ -122,13 +124,17 @@ def minio_client(minio_container):
         region_name="us-east-1",
     )
     with contextlib.suppress(Exception):
-        client.create_bucket(Bucket="test-cascade")
+        client.create_bucket(Bucket=_CASCADE_BUCKET)
     return client
 
 
 @pytest.fixture(scope="module")
-def minio_uploader(minio_container):
-    """NASUploader connected to testcontainer MinIO."""
+def minio_uploader(minio_container, minio_client):  # noqa: ARG001
+    """NASUploader connected to testcontainer MinIO (bucket=test-cascade).
+
+    minio_client dep 의존: create_bucket(test-cascade) 보장 후 NASUploader 생성.
+    MCT-202 CI FIX iter3: bucket_missing(NoSuchBucket) 해소.
+    """
     from mctrader_data.nas_storage.nas_uploader import NASUploader
 
     cfg = minio_container.get_config()
@@ -137,6 +143,7 @@ def minio_uploader(minio_container):
         endpoint=endpoint,
         access_key=cfg["access_key"],
         secret_key=cfg["secret_key"],
+        bucket=_CASCADE_BUCKET,
     )
     return uploader
 

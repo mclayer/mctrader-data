@@ -456,12 +456,21 @@ def _discover_partitions_in_range(
 
 
 def _historical_dual_write(
-    parquet_path: Path, *, root: Path, tier: str, dual_writer: DualWriter
+    parquet_path: Path,
+    *,
+    root: Path,
+    tier: str,
+    dual_writer: DualWriter,
+    source_to_delete: Path | None = None,
 ) -> str:
     """L2/L3 parquet → DualWriter NAS PUT. CompactorRunner._dispatch_dual_write 동형.
 
     nas_key 산출 = single SSOT helper (ADR-034 §결정 2, U2-HELPER SSOT-5).
     Returns DualWriteResult.status (committed | local_only | hard_floor_blocked).
+
+    source_to_delete: caller 명시 optional — run_historical_promotion 은 L2 tier 에서
+    None (L3 compact_day 가 local L2 를 입력으로 읽어야 하므로 조기 unlink 금지).
+    MCT-202 D-3: cascade 의도 보존, sequential local-only flow 충돌 해소.
     """
     import hashlib
     from mctrader_data.nas_storage.nas_key import build_nas_key
@@ -480,7 +489,7 @@ def _historical_dual_write(
             nas_key=nas_key,
             data=parquet_path,
             sha256=sha256,
-            source_to_delete=parquet_path,   # MCT-202 D-3: _historical_dual_write 동형 cascade
+            source_to_delete=source_to_delete,
         )
     except NASOperationalAlert:
         # MCT-202 D-3 + T-5: _historical_dual_write 도 4xx fail-fast re-raise (drift 차단)

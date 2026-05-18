@@ -1,7 +1,9 @@
 """test_runner_historical_dual_write.py — Unit tests for MCT-202 _historical_dual_write.
 
 Change Plan §8.1 D-3 동형:
-- _historical_dual_write: source_to_delete=parquet_path 전달 박제
+- _historical_dual_write: source_to_delete optional (MCT-202 CI FIX iter3 — L2/L3 sequential
+  local-only flow 에서 L2 조기 unlink 차단). caller 명시 시 pass-through 박제.
+- run_historical_promotion: L2 tier source_to_delete=None (L3 compact_day input 보존).
 - NASOperationalAlert 4xx fail-fast re-raise (T-5 drift 차단)
 """
 from __future__ import annotations
@@ -24,10 +26,17 @@ def _make_parquet(tmp_path: Path, content: bytes = b"historical parquet content"
 
 
 class TestHistoricalDualWriteSourceToDelete:
-    """_historical_dual_write: source_to_delete=parquet_path 전달 박제 (D-3)."""
+    """_historical_dual_write: source_to_delete pass-through 박제 (D-3, CI FIX iter3).
 
-    def test_historical_passes_source_to_delete(self, tmp_path: Path) -> None:
-        """_historical_dual_write 가 write() 에 source_to_delete=parquet_path 전달."""
+    _historical_dual_write 에 source_to_delete 파라미터 추가 (default=None).
+    caller 명시 전달 시 write() 에 pass-through 됨을 박제.
+    run_historical_promotion L2 tier 는 None (L3 compact_day local input 보존 — §3.3 fix).
+    """
+
+    def test_historical_passes_source_to_delete_when_explicitly_provided(
+        self, tmp_path: Path
+    ) -> None:
+        """caller 가 source_to_delete=parquet_path 명시 시 write() 에 pass-through."""
         content = b"historical cascade source_to_delete"
         parquet_path = _make_parquet(tmp_path, content)
         root = tmp_path
@@ -47,17 +56,46 @@ class TestHistoricalDualWriteSourceToDelete:
             tier="L2",
             dual_writer=mock_writer,
             root=root,
+            source_to_delete=parquet_path,  # caller explicit
         )
 
         mock_writer.write.assert_called_once()
         call_kwargs = mock_writer.write.call_args.kwargs
         assert "source_to_delete" in call_kwargs, (
-            "D-3: _historical_dual_write 도 source_to_delete 전달 의무"
+            "D-3: _historical_dual_write 이 caller source_to_delete 를 write() 에 pass-through"
         )
         assert call_kwargs["source_to_delete"] == parquet_path
 
-    def test_historical_l3_passes_source_to_delete(self, tmp_path: Path) -> None:
-        """L3 historical 경로도 source_to_delete 전달."""
+    def test_historical_default_source_to_delete_is_none(self, tmp_path: Path) -> None:
+        """source_to_delete 미전달 시 write() 에 None 전달 (L2 조기 unlink 방지)."""
+        content = b"historical default source_to_delete none"
+        parquet_path = _make_parquet(tmp_path, content)
+
+        mock_writer = MagicMock(spec=DualWriter)
+        mock_writer.write.return_value = DualWriteResult(
+            status="committed",
+            nas_key="k",
+            local_path=parquet_path,
+            sha256="abc",
+            nas_put_result=PutResult(status="uploaded", object_etag="etag", latency_ms=1.0),
+            latency_ms=1.0,
+        )
+
+        _historical_dual_write(
+            parquet_path=parquet_path,
+            tier="L2",
+            dual_writer=mock_writer,
+            root=tmp_path,
+            # source_to_delete 생략 → default None
+        )
+
+        call_kwargs = mock_writer.write.call_args.kwargs
+        assert call_kwargs.get("source_to_delete") is None, (
+            "§3.3 fix: L2 default source_to_delete=None (L3 compact_day input 보존)"
+        )
+
+    def test_historical_l3_passes_source_to_delete_when_explicit(self, tmp_path: Path) -> None:
+        """L3 historical 경로도 caller 명시 시 source_to_delete pass-through."""
         content = b"L3 historical content"
         parquet_path = (
             tmp_path / "market" / "ch" / "sv=v1" / "tier=L3"
@@ -81,6 +119,7 @@ class TestHistoricalDualWriteSourceToDelete:
             tier="L3",
             dual_writer=mock_writer,
             root=tmp_path,
+            source_to_delete=parquet_path,
         )
 
         call_kwargs = mock_writer.write.call_args.kwargs
