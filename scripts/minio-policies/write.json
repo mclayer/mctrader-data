@@ -1,0 +1,16 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "MctraderMarketIngestionOnlyWrite",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::mctrader-market",
+        "arn:aws:s3:::mctrader-market/*"
+      ]
+    }
+  ]
+}
