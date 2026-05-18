@@ -9,7 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from mctrader_data.wal.segment import parse_ts_from_segment
+from mctrader_data.wal.segment import (
+    _strip_segment_suffixes,
+    parse_node_id_from_segment,
+    parse_ts_from_segment,
+)
 
 
 def test_active_segment() -> None:
@@ -41,9 +45,6 @@ def test_malformed_segment_raises() -> None:
         parse_ts_from_segment(p)
 
 
-from mctrader_data.wal.segment import _strip_segment_suffixes
-
-
 def test_strip_suffixes_longest_first_compacted() -> None:
     # longest-first: .ndjson.sealed.compacted 가 .ndjson.sealed 보다 먼저 매치
     assert _strip_segment_suffixes(
@@ -66,9 +67,6 @@ def test_strip_suffixes_active_ndjson() -> None:
 def test_strip_suffixes_no_match_passthrough() -> None:
     # suffix 미매치 → 입력 그대로 passthrough
     assert _strip_segment_suffixes("not-a-segment-name") == "not-a-segment-name"
-
-
-from mctrader_data.wal.segment import parse_node_id_from_segment
 
 
 def test_parse_node_id_compacted_correctness() -> None:
