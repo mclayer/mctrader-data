@@ -15,15 +15,19 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import logging
 import os
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pyarrow.parquet as pq
 
 from mctrader_data.compactor.l1 import _schema_version
+from mctrader_data.compactor.sort_key import _extract_min_ts
 from mctrader_data.metrics import compactor_writer_open_count
+
+_log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from mctrader_data.nas_storage.nas_uploader import NASUploader
@@ -65,7 +69,19 @@ class L3Compactor:
 
         # Local fallback (backward compat — nas_uploader=None)
         # Read individual files to avoid Hive auto-discovery conflict
-        l2_files = sorted(l2_dir.rglob("part-*.parquet")) if l2_dir.exists() else []
+        # ADR-017 Amendment 3: L3 도 content-derived sort key (defensive — uniform API)
+        if l2_dir.exists():
+            candidates = list(l2_dir.rglob("part-*.parquet"))
+            keyed = []
+            for p in candidates:
+                ts = _extract_min_ts(p)
+                if ts is None:
+                    _log.warning("[L3Compactor] skip 0-row L2 file: %s", p)
+                    continue
+                keyed.append((p, ts))
+            l2_files = [p for p, _ts in sorted(keyed, key=lambda x: x[1])]
+        else:
+            l2_files = []
         if not l2_files:
             return None
 
@@ -143,31 +159,49 @@ class L3Compactor:
     ) -> Path | None:
         """MCT-169 D3=C INV-3: NAS GET source path (nas_uploader inject 시).
 
-        NAS key prefix: "l2/market/{channel}/schema_version={ver}/tier=L2/
-                         exchange={exchange}/symbol={symbol}/date={date_str}/"
+        NAS key prefix: single SSOT helper (ADR-034 §결정 2, U2-HELPER SSOT-6).
         NASUploader._list_objects(prefix) → NAS key list → get_streaming().
         pq.ParquetFile(BytesIO stream) 로 읽기 (local Path open 0, INV-3).
+
+        ADR-017 Amendment 3 (PR #96): NAS GET path 도 content-derived sort key (L2 동형).
         """
         from mctrader_data.nas_storage.get_streaming import get_streaming
+        from mctrader_data.nas_storage.nas_key import build_nas_prefix
+        from mctrader_data.nas_metrics.prometheus_exporters import nas_key_helper_call_total
 
-        nas_prefix = (
-            f"l2/market/{channel}/schema_version={schema_ver}/tier=L2/"
-            f"exchange={exchange}/symbol={symbol}/date={date_str}/"
+        nas_prefix = build_nas_prefix(
+            tier="L2", channel=channel, schema_ver=schema_ver,
+            exchange=exchange, symbol=symbol, date_str=date_str,
         )
+        nas_key_helper_call_total.labels(caller="l3_compactor_get_source", tier="L2").inc()
 
+        # ADR-017 Amendment 3: NAS GET path 도 content-derived sort key (L2 동형)
         try:
-            nas_keys = sorted(
+            candidate_keys = [
                 k for k in self._nas_uploader._list_objects(nas_prefix)  # type: ignore[union-attr]
                 if k.endswith(".parquet")
-            )
+            ]
         except Exception:
-            import logging
-            logging.getLogger(__name__).warning(
+            _log.warning(
                 "[L3Compactor] NAS _list_objects failed prefix=%s — skip (INV-3)",
                 nas_prefix,
             )
             return None
 
+        if not candidate_keys:
+            return None
+
+        # content-derived sort: get_streaming → _extract_min_ts stats.min
+        keyed: list[tuple[str, datetime]] = []
+        for k in candidate_keys:
+            stream = get_streaming(nas_uploader=self._nas_uploader, nas_key=k)  # type: ignore[arg-type]
+            ts = _extract_min_ts(stream)
+            if ts is None:
+                _log.warning("[L3Compactor] skip 0-row NAS L2 key: %s", k)
+                continue
+            keyed.append((k, ts))
+
+        nas_keys = [k for k, _ts in sorted(keyed, key=lambda x: x[1])]
         if not nas_keys:
             return None
 

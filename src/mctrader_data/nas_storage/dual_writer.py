@@ -24,7 +24,7 @@ Design decisions (§6.2.1 Change Plan 박제, MCT-150 lesson 4 invariants 적용
   → DualWriteResult.status = "hard_floor_blocked" (caller source retain 의무, RPO=0)
 
 MCT-168 put_l1() (ADR-029 D1=B + D2=B):
-- put_l1(path): tier prefix = "l1/" + relative path → write() 위임
+- put_l1(path): 평면 NAS key = build_nas_key(path, local_root, tier="L1") (U2-HELPER ADR-034 §결정 1)
   - sha256 streaming 계산 (8MB chunk, read_bytes 0 — INV-4 정합)
   - Prometheus: dual_write_result_total{tier="L1"} + dual_write_l1_latency_seconds
   - NAS PUT fail → local_only 반환 (compactor 정상 종료, INV-4 L1 local 보존)
@@ -338,7 +338,7 @@ class DualWriter:
         local tmp copy 단계를 생략하고 NASUploader.put_streaming() 직접 호출.
         (write() 는 local_path 신규 생성 용도; L1 PUT 은 기존 parquet 재upload)
 
-        nas_key = "l1/" + path.relative_to(local_root) (tier prefix enforce, R-3 mitigation).
+        nas_key = build_nas_key(path, local_root, tier="L1") (ADR-034 §결정 1, U2-HELPER).
         sha256 = streaming 계산 (8MB chunk, read_bytes 0 — INV-4: L1 local SSOT 보존).
 
         INV-4: NAS PUT fail → local_only 반환 (L1 local file 보존, compactor 정상 종료).
@@ -366,14 +366,19 @@ class DualWriter:
         start_ms = time.monotonic() * 1000
 
         # tier prefix enforce (R-3 mitigation: l1/ 명시, l2/l3/ 와 명시적 분리)
+        # boundary check + nas_key = single SSOT helper (ADR-034 §결정 2, U2-HELPER)
         try:
-            rel = path.relative_to(self._local_root)
+            path.relative_to(self._local_root)  # boundary pre-check (test compat: "not under local_root")
         except ValueError as err:
             raise ValueError(
                 f"put_l1: path {path!r} is not under local_root {self._local_root!r}. "
                 f"L1 NAS PUT requires path within local_root (ADR-029 D1=B)."
             ) from err
-        nas_key = "l1/" + rel.as_posix()
+        from mctrader_data.nas_storage.nas_key import build_nas_key
+        from mctrader_data.nas_metrics.prometheus_exporters import nas_key_helper_call_total
+
+        nas_key = build_nas_key(path, self._local_root, tier="L1")
+        nas_key_helper_call_total.labels(caller="dual_writer_put_l1", tier="L1").inc()
 
         # sha256 streaming 계산 (8MB chunk, read_bytes 0 — MCT-163 INV-4 정합)
         _sha256_obj = hashlib.sha256()

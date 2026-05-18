@@ -15,18 +15,22 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import logging
 import os
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pyarrow.parquet as pq
 
 from mctrader_data.compactor.l1 import _schema_version
+from mctrader_data.compactor.sort_key import _extract_min_ts
 from mctrader_data.metrics import compactor_writer_open_count
 
 if TYPE_CHECKING:
     from mctrader_data.nas_storage.nas_uploader import NASUploader
+
+_log = logging.getLogger(__name__)
 
 
 class L2Compactor:
@@ -67,7 +71,19 @@ class L2Compactor:
 
         # Local fallback (backward compat — nas_uploader=None)
         # Read individual files (not directory) to avoid Hive auto-discovery conflict
-        l1_files = sorted(l1_dir.rglob("part-*.parquet")) if l1_dir.exists() else []
+        # ADR-017 Amendment 3: content-derived sort key (파일명 untrusted)
+        # Primary = pq.read_metadata stats.min, Fallback = iter_batches[:1]
+        if l1_dir.exists():
+            candidates = list(l1_dir.rglob("part-*.parquet"))
+            with_ts = [(p, _extract_min_ts(p)) for p in candidates]
+            # 0-row file (None) skip + warning
+            for p, ts in with_ts:
+                if ts is None:
+                    _log.warning("[L2Compactor] skip 0-row L1 file: %s", p)
+            filtered = [(p, ts) for p, ts in with_ts if ts is not None]
+            l1_files = [p for p, _ in sorted(filtered, key=lambda x: x[1])]
+        else:
+            l1_files = []
         if not l1_files:
             return None
 
@@ -147,31 +163,79 @@ class L2Compactor:
     ) -> Path | None:
         """MCT-169 D3=C INV-3: NAS GET source path (nas_uploader inject 시).
 
-        NAS key prefix: "l1/market/{channel}/schema_version={ver}/tier=L1/
-                         exchange={exchange}/symbol={symbol}/date={date_str}/"
+        NAS key prefix: single SSOT helper (ADR-034 §결정 2, U2-HELPER SSOT-4).
+        §11.2-A Option A canonical dedup — flat (평면) + legacy (l1/) 양쪽 GET,
+        동일 canonical key 가진 경우 flat 우선 (legacy fallback = flat absent 시만).
         NASUploader._list_objects(prefix) → NAS key list → get_streaming() 순서.
         pq.ParquetFile(BytesIO stream) 로 읽기 (local Path open 0, INV-3).
+        INV-9 (FIX iteration 2): run_id hash input = canonical keys
+        (_legacy_key_to_canonical(k) for all nas_keys) — pre-U2/alias-overlap/post-U3
+        3 단계 동일 canonical_keys → 동일 run_id → L2 output filename drift 0.
+
+        ADR-017 Amendment 3 (PR #96): post-dedup nas_keys 에 대해
+        content-derived sort (get_streaming → _extract_min_ts) 적용 — 파일명 untrusted.
         """
         from mctrader_data.nas_storage.get_streaming import get_streaming
-
-        nas_prefix = (
-            f"l1/market/{channel}/schema_version={schema_ver}/tier=L1/"
-            f"exchange={exchange}/symbol={symbol}/date={date_str}/"
+        from mctrader_data.nas_storage.nas_key import (
+            build_l1_prefix,
+            build_legacy_l1_prefix,
+            _legacy_key_to_canonical,
         )
+        from mctrader_data.nas_metrics.prometheus_exporters import nas_key_helper_call_total
+
+        flat_prefix = build_l1_prefix(
+            channel=channel, schema_ver=schema_ver, exchange=exchange,
+            symbol=symbol, date_str=date_str,
+        )
+        legacy_prefix = build_legacy_l1_prefix(
+            channel=channel, schema_ver=schema_ver, exchange=exchange,
+            symbol=symbol, date_str=date_str,
+        )
+        nas_key_helper_call_total.labels(caller="l2_compactor_get_source", tier="L1").inc()
 
         try:
-            nas_keys = sorted(
-                k for k in self._nas_uploader._list_objects(nas_prefix)  # type: ignore[union-attr]
+            flat_keys = sorted(
+                k for k in self._nas_uploader._list_objects(flat_prefix)  # type: ignore[union-attr]
                 if k.endswith(".parquet")
             )
+            legacy_keys = sorted(
+                k for k in self._nas_uploader._list_objects(legacy_prefix)  # type: ignore[union-attr]
+                if k.endswith(".parquet")
+            )
+            # §11.2-A Option A canonical dedup — flat preferred, legacy fallback (dual-read 윈도우)
+            # canonical dedup: flat ↔ legacy alias-overlap 동안 동일 canonical key 가진
+            # raw key 중 flat 우선 (legacy fallback = flat absent 시만).
+            # set union (raw string identity) 으로는 alias-overlap content 중복 불가.
+            canonical_map: dict[str, str] = {}
+            for raw_key in flat_keys:
+                canonical_map[raw_key] = raw_key  # flat = canonical, preferred
+            for raw_key in legacy_keys:
+                canonical = _legacy_key_to_canonical(raw_key)  # l1/ strip via SSOT (INV-1 정합)
+                canonical_map.setdefault(canonical, raw_key)  # legacy fallback only if flat absent
+            candidate_keys = sorted(canonical_map.values())
         except Exception:
-            import logging
-            logging.getLogger(__name__).warning(
-                "[L2Compactor] NAS _list_objects failed prefix=%s — skip (INV-3)",
-                nas_prefix,
+            _log.warning(
+                "[L2Compactor] NAS _list_objects failed flat=%s legacy=%s — skip (INV-3)",
+                flat_prefix,
+                legacy_prefix,
             )
             return None
 
+        if not candidate_keys:
+            return None
+
+        # ADR-017 Amendment 3 (PR #96): content-derived sort on dedup'd keys.
+        # get_streaming → pq.read_metadata stats.min (Primary) / iter_batches[:1] (Fallback).
+        keyed: list[tuple[str, datetime]] = []
+        for k in candidate_keys:
+            stream = get_streaming(nas_uploader=self._nas_uploader, nas_key=k)  # type: ignore[arg-type]
+            ts = _extract_min_ts(stream)
+            if ts is None:
+                _log.warning("[L2Compactor] skip 0-row NAS L1 key: %s", k)
+                continue
+            keyed.append((k, ts))
+
+        nas_keys = [k for k, _ts in sorted(keyed, key=lambda x: x[1])]
         if not nas_keys:
             return None
 
@@ -180,7 +244,13 @@ class L2Compactor:
         first_pf = pq.ParquetFile(first_stream)
         schema = first_pf.schema_arrow
 
-        run_id = hashlib.sha256("|".join(nas_keys).encode()).hexdigest()[:16]
+        # INV-9 (FIX iteration 2 P1 #2) — canonical run_id cutover-stable determinism:
+        # run_id hash input = canonical keys (all raw keys mapped to canonical = strip "l1/" prefix).
+        # pre-U2 (flat_keys=[]) + alias-overlap + post-U3 (legacy_keys=[]) → 동일 canonical_keys
+        # → 동일 run_id → L2 output filename drift 0 → orphan file 차단.
+        # INV-9 wording "flat_keys ONLY" = canonical key 의미 (FIX iteration 2 정합).
+        canonical_keys = sorted(_legacy_key_to_canonical(k) for k in nas_keys)
+        run_id = hashlib.sha256("|".join(canonical_keys).encode()).hexdigest()[:16]
 
         out_dir = (
             self._root / "market" / channel

@@ -25,12 +25,25 @@ Test-5: test_upbit_orderbooksnapshot_row_count
 from __future__ import annotations
 
 import json
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pyarrow.parquet as pq
+import pytest
 
 from mctrader_data.compactor.l1 import L1Compactor
+
+
+@pytest.fixture
+def short_root():
+    """Shorter root dir for tests with deep Hive paths + ts-prefix filenames.
+
+    Windows MAX_PATH=260 limit: ts-prefix adds ~17 chars per parquet filename.
+    tempfile.TemporaryDirectory() gives ~46-char base vs pytest tmp_path ~97 chars.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        yield Path(d)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -43,14 +56,23 @@ def _make_sealed(
     channel: str,
     symbol: str = "KRW-BTC",
     date: str = "2026-05-14",
-    node_id: str = "node-test",
+    node_id: str = "N1",
+    ts: str = "20260514T100000Z",
     records: list[dict] | None = None,
 ) -> Path:
-    """Create a sealed WAL segment with given records."""
+    """Create a sealed WAL segment with given records.
+
+    Filename follows WAL convention: segment-<YYYYMMDDTHHMMSSZ>-<node_id>.ndjson.sealed
+    (parse_ts_from_segment + parse_node_id_from_segment 호환 — Task 3 ts-prefix 의무).
+
+    node_id default = 'N1' (short) to stay under Windows MAX_PATH=260 limit:
+    the ts-prefix adds 17 chars to the parquet filename vs legacy pattern.
+    """
     wal_dir = root / "wal" / exchange / channel / symbol / date
     wal_dir.mkdir(parents=True, exist_ok=True)
-    seg_path = wal_dir / f"{node_id}.ndjson"
-    sealed_path = wal_dir / f"{node_id}.ndjson.sealed"
+    filename = f"segment-{ts}-{node_id}"
+    seg_path = wal_dir / f"{filename}.ndjson"
+    sealed_path = wal_dir / f"{filename}.ndjson.sealed"
 
     lines = [json.dumps(r, ensure_ascii=False) for r in (records or [])]
     seg_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -125,15 +147,15 @@ def _make_transaction_records(n: int = 2) -> list[dict]:
 # Test-1: upbit orderbooksnapshot WAL -> L1 parquet
 # ---------------------------------------------------------------------------
 
-def test_upbit_orderbooksnapshot_wal_compacts_to_l1(tmp_path: Path) -> None:
+def test_upbit_orderbooksnapshot_wal_compacts_to_l1(short_root: Path) -> None:
     records = _make_orderbooksnapshot_records(n=3)
     sealed = _make_sealed(
-        root=tmp_path,
+        root=short_root,
         exchange="upbit",
         channel="orderbooksnapshot",
         records=records,
     )
-    compactor = L1Compactor(root=tmp_path)
+    compactor = L1Compactor(root=short_root)
     parquet_path = compactor.compact_segment(sealed)
 
     assert parquet_path.exists(), f"parquet not created: {parquet_path}"
@@ -147,15 +169,15 @@ def test_upbit_orderbooksnapshot_wal_compacts_to_l1(tmp_path: Path) -> None:
 # Test-2: schema validation
 # ---------------------------------------------------------------------------
 
-def test_upbit_l1_parquet_schema(tmp_path: Path) -> None:
+def test_upbit_l1_parquet_schema(short_root: Path) -> None:
     records = _make_orderbooksnapshot_records(n=1)
     sealed = _make_sealed(
-        root=tmp_path,
+        root=short_root,
         exchange="upbit",
         channel="orderbooksnapshot",
         records=records,
     )
-    compactor = L1Compactor(root=tmp_path)
+    compactor = L1Compactor(root=short_root)
     parquet_path = compactor.compact_segment(sealed)
 
     table = pq.ParquetFile(parquet_path).read()
@@ -173,15 +195,15 @@ def test_upbit_l1_parquet_schema(tmp_path: Path) -> None:
 # Test-3: bithumb orderbookdepth regression (R2)
 # ---------------------------------------------------------------------------
 
-def test_bithumb_orderbookdepth_regression(tmp_path: Path) -> None:
+def test_bithumb_orderbookdepth_regression(short_root: Path) -> None:
     records = _make_orderbookdepth_records(n=2)
     sealed = _make_sealed(
-        root=tmp_path,
+        root=short_root,
         exchange="bithumb",
         channel="orderbookdepth",
         records=records,
     )
-    compactor = L1Compactor(root=tmp_path)
+    compactor = L1Compactor(root=short_root)
     parquet_path = compactor.compact_segment(sealed)
 
     assert parquet_path.exists(), f"bithumb orderbookdepth parquet not created: {parquet_path}"
@@ -213,16 +235,16 @@ def test_bithumb_transaction_regression(tmp_path: Path) -> None:
 # Test-5: row count = sum of (bids + asks) per WAL record (AC-2 flat shape)
 # ---------------------------------------------------------------------------
 
-def test_upbit_orderbooksnapshot_row_count(tmp_path: Path) -> None:
+def test_upbit_orderbooksnapshot_row_count(short_root: Path) -> None:
     # Each record has 2 bids + 2 asks = 4 rows. n=3 records -> 12 rows
     records = _make_orderbooksnapshot_records(n=3)
     sealed = _make_sealed(
-        root=tmp_path,
+        root=short_root,
         exchange="upbit",
         channel="orderbooksnapshot",
         records=records,
     )
-    compactor = L1Compactor(root=tmp_path)
+    compactor = L1Compactor(root=short_root)
     parquet_path = compactor.compact_segment(sealed)
 
     table = pq.ParquetFile(parquet_path).read()
