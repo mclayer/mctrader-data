@@ -9,6 +9,13 @@ Story-6 (MCT-140) forwarded open question:
 - After 7d the sealed segment is deleted anyway (caps unbounded growth) and an
   OperationalRiskArch alert is emitted via the optional callback.
 
+MCT-202 amendment (2026-05-18, ADR-029 §D11 + ADR-027 §D5 정합):
+- cascade gate 가 status='committed' XOR source unlink (INV-D) 보증.
+- 본 gc_daemon 의 'local_only' / 'hard_floor_blocked' 분기는 cascade gate 가
+  source 보존 후 진입 — 의미 변경 0, 자연 propagation 보존.
+- D-4 박제: _archive_failed semantics 변경 0 (status='local_only' / 'hard_floor_blocked' 7d
+  extension 처리 분기 그대로). runbook 별 인계 (PMO retro carry-over, Story §3 OUT-OF-SCOPE).
+
 Sentinel naming:
     <segment>.ndjson.sealed._archive_failed
     (sibling of the existing <segment>.ndjson.sealed.compacted marker)
