@@ -283,6 +283,7 @@ class CompactorRunner:
                 nas_key=nas_key,
                 data=parquet_path,   # MCT-160 D6: Path streaming (DualWriter reads internally)
                 sha256=sha256,
+                source_to_delete=parquet_path,   # MCT-202 D-1: eager cascade (output-local 자연 종결, D-2)
             )
         except NASOperationalAlert:
             # INCIDENT-2026-05-17 amendment (ADR-027 §D5 amend): 4xx fail-fast propagate
@@ -391,6 +392,16 @@ def scan_and_cleanup_legacy(
         except PromotionVerifyError:
             preserved += 1
             log.info("[runner] legacy preserved (HEAD verify fail) nas_key=%s", nas_key)
+        except FileNotFoundError:
+            # MCT-202 §3.9 sweep race window — eager cascade 가 이미 unlink. graceful no-op.
+            # errors 오염 차단 (INV-SEC-5): race_noop = cleaned 도 errors 도 아닌 별도 카운터
+            log.debug(
+                "[runner] sweep race noop (eager cascade already unlinked) nas_key=%s", nas_key
+            )
+            from mctrader_data.nas_metrics.prometheus_exporters import (  # noqa: PLC0415
+                mctrader_legacy_cleanup_race_noop_total,
+            )
+            mctrader_legacy_cleanup_race_noop_total.inc()
         except (OSError, RuntimeError):
             errors += 1
             log.exception("[runner] legacy cleanup error nas_key=%s", nas_key)
@@ -463,9 +474,21 @@ def _historical_dual_write(
         for chunk in iter(lambda: f.read(8192), b""):
             sha.update(chunk)
     sha256 = sha.hexdigest()
-    result = dual_writer.write(
-        local_path=parquet_path, nas_key=nas_key, data=parquet_path, sha256=sha256,
-    )
+    try:
+        result = dual_writer.write(
+            local_path=parquet_path,
+            nas_key=nas_key,
+            data=parquet_path,
+            sha256=sha256,
+            source_to_delete=parquet_path,   # MCT-202 D-3: _historical_dual_write 동형 cascade
+        )
+    except NASOperationalAlert:
+        # MCT-202 D-3 + T-5: _historical_dual_write 도 4xx fail-fast re-raise (drift 차단)
+        log.critical(
+            "[historical] NASOperationalAlert propagate tier=%s key=%s — operator 개입 의무",
+            tier, nas_key,
+        )
+        raise
     # Status-aware logging (mirror _dispatch_dual_write level dispatch).
     if result.status == "committed":
         log.info("[historical] dual-write OK tier=%s key=%s", tier, nas_key)
