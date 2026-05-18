@@ -149,19 +149,45 @@ def test_inv2_preserved_helpers_only_in_allowlist() -> None:
 
     Allowlist (files permitted to import / call these helpers):
       src/: nas_key.py (defines them), nas_migration/rekey.py (sole-caller)
-      tests/: test files starting with "test_rekey" or "test_nas_key"
-              (unit tests of the helpers themselves)
+      tests/: explicit filename set (no basename-prefix patterns — SEC-NIT-1 tightening)
 
     Any new file outside this allowlist that imports or calls a preserved helper
     = drift violation → fails this test.
 
     ADR-034 §결정 6 INV-2 P2-1.
+
+    SEC-NIT-1 (U5-VERIFY SecurityTest): test allowlist switched from basename-prefix
+    (test_rekey*, test_nas_key*) to exact-filename set — closes drift vector where a
+    future test file could be deliberately named to bypass the gate.
     """
     NAS_KEY_PY = SRC_ROOT / "nas_storage" / "nas_key.py"
     REKEY_PY = SRC_ROOT / "nas_migration" / "rekey.py"
 
-    # Allowlist: (src) nas_key.py + rekey.py; (tests) test_rekey_*.py + test_nas_key*.py
+    # Allowlist: (src) nas_key.py + rekey.py; (tests) exact-filename set
     src_allowlist: set[Path] = {NAS_KEY_PY, REKEY_PY}
+
+    # SEC-NIT-1: exact-filename test allowlist (drift-resistant — no prefix patterns).
+    # Adding a new test that legitimately needs these helpers requires explicit
+    # set-membership update + code review (gate is not silently bypassable).
+    test_allowlist_names: set[str] = {
+        # U3 rekey tool unit/integration tests
+        "test_rekey_both_head_404.py",
+        "test_rekey_concurrent_block.py",
+        "test_rekey_keyspace_regression.py",
+        "test_rekey_l1_migration.py",
+        "test_rekey_l1_migration_unit.py",
+        "test_rekey_manifest_atomic.py",
+        "test_rekey_restart_resume.py",
+        # nas_key helper unit tests
+        "test_nas_key.py",
+        "test_nas_key_caller_absorb.py",
+        "test_nas_key_ssot.py",
+        # WS-B Phase 1 helper recovery legacy test (imports build_legacy_nas_key
+        # as local alias _resolve_legacy_nas_key — pre-U5 carrier test)
+        "test_resolve_legacy_nas_key.py",
+        # self (this file mentions helpers in strings/docstrings)
+        "test_forward_only_nas_key.py",
+    }
 
     pattern = re.compile(
         r'\b(build_legacy_nas_key|build_legacy_l1_discovery_prefix|_legacy_key_to_canonical)\b'
@@ -193,14 +219,8 @@ def test_inv2_preserved_helpers_only_in_allowlist() -> None:
 
     test_violations: list[tuple[Path, int, str]] = []
     for py_path in TESTS_ROOT.rglob("*.py"):
-        # Allowlist: test_rekey_*.py and test_nas_key*.py (unit tests of helpers themselves)
-        if py_path.name.startswith("test_rekey") or py_path.name.startswith("test_nas_key"):
-            continue
-        # Also allow: test_resolve_legacy_nas_key.py (imports build_legacy_nas_key as local alias)
-        if py_path.name == "test_resolve_legacy_nas_key.py":
-            continue
-        # Also allow this file itself (mentions helper names in strings/docstrings for documentation)
-        if py_path == Path(__file__).resolve():
+        # SEC-NIT-1: exact-filename allowlist (no basename-prefix patterns).
+        if py_path.name in test_allowlist_names:
             continue
         try:
             lines = py_path.read_text(encoding="utf-8").splitlines()
@@ -226,8 +246,9 @@ def test_inv2_preserved_helpers_only_in_allowlist() -> None:
     assert test_violations == [], (
         f"P2-1 drift violation: preserved deprecated helpers imported/called outside test allowlist "
         f"({len(test_violations)} hit(s) in tests/).\n"
-        f"Allowlist pattern: test_rekey_*.py, test_nas_key*.py.\n"
-        f"If a test file legitimately needs these helpers, update the allowlist in this test.\n"
+        f"Allowlist (exact filenames): {sorted(test_allowlist_names)}.\n"
+        f"If a test file legitimately needs these helpers, add its filename to "
+        f"test_allowlist_names in this test (SEC-NIT-1 — explicit set, no patterns).\n"
         + "\n".join(f"  {p}:{ln}: {ls}" for p, ln, ls in test_violations)
     )
 
