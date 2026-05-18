@@ -39,3 +39,30 @@ def test_malformed_segment_raises() -> None:
     p = Path("not-a-segment-name.ndjson")
     with pytest.raises(ValueError, match="Unexpected segment filename"):
         parse_ts_from_segment(p)
+
+
+from mctrader_data.wal.segment import _strip_segment_suffixes
+
+
+def test_strip_suffixes_longest_first_compacted() -> None:
+    # longest-first: .ndjson.sealed.compacted 가 .ndjson.sealed 보다 먼저 매치
+    assert _strip_segment_suffixes(
+        "segment-20260513T044500Z-NODE_X.ndjson.sealed.compacted"
+    ) == "segment-20260513T044500Z-NODE_X"
+
+
+def test_strip_suffixes_sealed() -> None:
+    assert _strip_segment_suffixes(
+        "segment-20260509T000000Z-NODE_A.ndjson.sealed"
+    ) == "segment-20260509T000000Z-NODE_A"
+
+
+def test_strip_suffixes_active_ndjson() -> None:
+    assert _strip_segment_suffixes(
+        "segment-20260509T000000Z-NODE_A.ndjson"
+    ) == "segment-20260509T000000Z-NODE_A"
+
+
+def test_strip_suffixes_no_match_passthrough() -> None:
+    # suffix 미매치 → 입력 그대로 passthrough
+    assert _strip_segment_suffixes("not-a-segment-name") == "not-a-segment-name"

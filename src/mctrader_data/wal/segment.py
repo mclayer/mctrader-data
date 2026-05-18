@@ -64,6 +64,18 @@ def scan_sealed(root: Path) -> list[Path]:
     return result
 
 
+def _strip_segment_suffixes(name: str) -> str:
+    """Strip WAL segment 파일 suffix (longest-first — substring 부분소비 차단).
+
+    WAL 3-state closure: .ndjson (active) -> .ndjson.sealed -> .ndjson.sealed.compacted.
+    suffix-strip 단일 책임 — split/validate/error 는 caller 책임 (error contract 비대칭 의도).
+    """
+    for suffix in (".ndjson.sealed.compacted", ".ndjson.sealed", ".ndjson"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
 def parse_node_id_from_segment(sealed: Path) -> str:
     """Extract node_id from segment filename: segment-{ts}-{node_id}.ndjson.sealed"""
     stem = sealed.name  # e.g. segment-20260509T000000Z-NODE_A.ndjson.sealed
