@@ -213,7 +213,8 @@ planned_claude_md_sections:
 - `docs/superpowers/specs/2026-05-17-disk-pressure-remediation-design.md` — RC-1 forward window 결함 진단 (본 결함 발견 후속, 본 Story 와 별)
 - `docs/superpowers/specs/2026-05-17-nas-key-unification-design.md` — U2-HELPER nas_key SSOT (본 Story 와 무관, 동시 진행 가능)
 - ADR-009 §D12 forward-only invariant
-- ADR-017 Amendment 2 channel matrix (Amendment 3 = 본 Story 신설)
+- **ADR-017 Amendment 3 + ADR-009 §D2.8** — mctrader-hub 정식 박제 완료 ([mclayer/mctrader-hub#398](https://github.com/mclayer/mctrader-hub/pull/398), merged sha `bba73f4`, 2026-05-18). compactor sort key 규약 (content-derived, 파일명 untrusted) + L1 dual filename pattern. ADR SSOT = mctrader-hub (mctrader-data `docs/adr-drafts/` stub 회수 — superseded)
+- ADR-017 Amendment 2 channel matrix (Amendment 3 sibling)
 - ADR-027 Amendment 2 silent-skip 차단
 - PR #85 WS-A (`f2e2bc9`) — 117GB 회수 unblock 대상
 - PR #83 WS-B (`4dc11dc`) — reclaim 경로 dependency
