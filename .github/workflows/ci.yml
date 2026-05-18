@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  ci:
+  ci-matrix:
     strategy:
       fail-fast: false
       matrix:
@@ -51,3 +51,16 @@ jobs:
           print(f'Coverage: {pct:.1f}%')
           assert pct >= 60.0, f'Coverage {pct:.1f}% < 60% baseline (ADR-011)'
           "
+
+  ci:
+    # Aggregate gate job — branch protection required_status_checks.contexts:["ci"] 가
+    # 본 job 명과 매치 (matrix expansion 안 됨, 단일 check 보고). MCT-201 — Pattern K closure.
+    # Critical: if:always() + contains(...result, 'failure'|'cancelled') exit 1 표준 패턴
+    # (`if: always()` 누락 시 matrix fail → aggregate skip → required check 영구 pending = stuck 재현).
+    needs: [ci-matrix]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all ci-matrix jobs passed
+        if: contains(needs.ci-matrix.result, 'failure') || contains(needs.ci-matrix.result, 'cancelled')
+        run: exit 1
