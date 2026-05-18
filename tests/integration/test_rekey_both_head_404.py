@@ -87,6 +87,8 @@ class TestBothHead404Guard:
 
         Simulation: inject partition directly into manifest as pending, source absent from S3
         (simulates: partition discovered in prior sweep, source concurrently deleted before copy).
+        A real "decoy" object is seeded so discovery returns >0 (M-10 gate bypass) — the
+        partition under test is separately injected as pending with source absent.
         """
         client = s3_bucket_versioned
         uploader = _make_uploader(client)
@@ -94,12 +96,24 @@ class TestBothHead404Guard:
         channel = "orderbooksnapshot"
 
         old_key = (
-            f"l1/{exchange}/{channel}/schema_version=orderbook_snapshot.v1/"
+            f"l1/market/{channel}/schema_version=orderbook_snapshot.v1/"
             f"tier=L1/exchange={exchange}/symbol=KRW-BTC/date=2026-05-13/part-0.parquet"
         )
         new_key = old_key[len("l1/"):]
 
-        # Source is NOT put into S3 — simulates source already deleted
+        # Seed a real decoy object so _discover_l1_objects returns >0 (M-10 gate bypass).
+        # The partition under test (KRW-BTC) is injected below with source absent.
+        decoy_key = (
+            f"l1/market/{channel}/schema_version=orderbook_snapshot.v1/"
+            f"tier=L1/exchange={exchange}/symbol=KRW-ETH/date=2026-05-13/part-0.parquet"
+        )
+        import hashlib as _hashlib
+        decoy_body = b"decoy-parquet"
+        decoy_sha = _hashlib.sha256(decoy_body).hexdigest()
+        client.put_object(Bucket="mctrader-market", Key=decoy_key, Body=decoy_body, Metadata={"sha256": decoy_sha})
+        client.put_object(Bucket="mctrader-market", Key=decoy_key + ".compacted", Body=b"")
+
+        # Source (KRW-BTC) is NOT put into S3 — simulates source already deleted
         # (source_not_found when copy_object tries HEAD or server-side copy)
 
         from mctrader_data.nas_migration.rekey import RekeyManifest
@@ -158,6 +172,7 @@ class TestBothHead404Guard:
           source_404 + target_200 (sha256 match) → skipped_already_migrated, sentinel write OK
 
         Simulation: inject partition into manifest as pending, source absent, dst present in S3.
+        A real "decoy" object is seeded so discovery returns >0 (M-10 gate bypass).
         """
         client = s3_bucket_versioned
         uploader = _make_uploader(client)
@@ -167,12 +182,22 @@ class TestBothHead404Guard:
         body = b"test-parquet-migrated"
         sha256 = hashlib.sha256(body).hexdigest()
         old_key = (
-            f"l1/{exchange}/{channel}/schema_version=orderbook_snapshot.v1/"
+            f"l1/market/{channel}/schema_version=orderbook_snapshot.v1/"
             f"tier=L1/exchange={exchange}/symbol=KRW-ETH/date=2026-05-13/part-0.parquet"
         )
         new_key = old_key[len("l1/"):]
 
-        # Seed ONLY the destination (source is absent — migration already done in prior run)
+        # Seed a real decoy object so _discover_l1_objects returns >0 (M-10 gate bypass).
+        decoy_key = (
+            f"l1/market/{channel}/schema_version=orderbook_snapshot.v1/"
+            f"tier=L1/exchange={exchange}/symbol=KRW-SOL/date=2026-05-13/part-0.parquet"
+        )
+        decoy_body = b"decoy-parquet-2"
+        decoy_sha = hashlib.sha256(decoy_body).hexdigest()
+        client.put_object(Bucket="mctrader-market", Key=decoy_key, Body=decoy_body, Metadata={"sha256": decoy_sha})
+        client.put_object(Bucket="mctrader-market", Key=decoy_key + ".compacted", Body=b"")
+
+        # Seed ONLY the destination for the test partition (source is absent — migrated in prior run)
         client.put_object(
             Bucket="mctrader-market", Key=new_key, Body=body, Metadata={"sha256": sha256}
         )

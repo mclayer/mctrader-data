@@ -53,13 +53,13 @@ def _make_uploader(client):
 
 
 def _seed_objects(client, count=10, exchange="bithumb", channel="orderbooksnapshot"):
-    """Seed N l1/ objects with .compacted sentinels."""
+    """Seed N l1/ objects with .compacted sentinels (real production keyspace shape)."""
     keys = []
     for i in range(count):
         body = f"parquet-data-{i}".encode()
         sha256 = hashlib.sha256(body).hexdigest()
         key = (
-            f"l1/{exchange}/{channel}/schema_version=orderbook_snapshot.v1/"
+            f"l1/market/{channel}/schema_version=orderbook_snapshot.v1/"
             f"tier=L1/exchange={exchange}/symbol=KRW-SYM{i}/date=2026-05-13/part-0.parquet"
         )
         client.put_object(
