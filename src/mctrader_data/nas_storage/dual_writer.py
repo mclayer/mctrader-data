@@ -395,6 +395,23 @@ class DualWriter:
             )
             compactor_local_self_delete_total.labels(tier=tier_label, outcome="already_promoted").inc()
             return "already_promoted"
+        except OSError as e:
+            # MCT-202 P0-1 FIX: non-FileNotFoundError OSError (PermissionError / IOError 등)
+            # promotion.py:200 unlink(missing_ok=False) raw-propagates OSError — caller catch 의무
+            # source retain (unlink 실패 = source 보존, sweep fallback 회수 예정)
+            # INV-D: NAS object 존재 + local source 잔존 = committed semantic 유지
+            #   (NAS-SoT 격상: NAS 상태가 SoT, local 잔존은 sweep fallback 이 회수)
+            # INV-G: log.error (P0 alarm trigger — operator 관측 의무)
+            log.error(
+                "[dual_writer] promote_l1 OSError(unlink failed) — source retain, "
+                "committed_unlink_failed, sweep fallback 회수 예정. "
+                "tier=%s source=%s err=%s",
+                tier_label, source.name, e,
+            )
+            compactor_local_self_delete_total.labels(tier=tier_label, outcome="committed_unlink_failed").inc()
+            # DualWriteResult.status 3-enum SSOT: committed_unlink_failed 는 Counter label 전용
+            # NAS-SoT 격상 → committed (source 잔존은 sweep fallback 예정, 기능 상 commit 완료)
+            return "committed"
 
     def put_l1(self, path: Path) -> DualWriteResult:
         """L1 NAS PUT — L1 ParquetWriter atomic rename 직후 호출 (ADR-029 D1=B, MCT-168).

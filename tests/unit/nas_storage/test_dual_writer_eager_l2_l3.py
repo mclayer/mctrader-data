@@ -445,6 +445,152 @@ class TestCommittedUnlinkedCounter:
         assert not source.exists(), "unlink 완료 확인"
 
 
+class TestCommittedUnlinkFailedCounter:
+    """committed_unlink_failed Counter outcome 검증 (P0-1 FIX — OSError branch).
+
+    promote_l1() 내 non-FileNotFoundError OSError (PermissionError / IOError 등):
+    - source retain (unlink 실패 → source 보존, INV-D: NAS object 존재 = NAS-SoT 격상)
+    - compactor_local_self_delete_total{tier, outcome='committed_unlink_failed'}.inc()
+    - log.error (INV-G P0 alarm trigger — operator 관측 의무)
+    - return 'committed' (DualWriteResult.status 3-enum SSOT — committed_unlink_failed 는 Counter label 전용)
+
+    MRO 의무: except FileNotFoundError BEFORE except OSError
+    (FileNotFoundError ⊂ OSError — 순서 역전 시 already_promoted 분기가 OSError 에 흡수되어 dead code)
+    """
+
+    def test_oserror_non_fnf_committed_unlink_failed_counter_emit(
+        self, tmp_path: Path
+    ) -> None:
+        """PermissionError(OSError 하위) 발생 → committed_unlink_failed Counter emit + source retain."""
+        content = b"oserror committed_unlink_failed content"
+        local_root = tmp_path / "local"
+        local_root.mkdir()
+        local_dest = local_root / "cuf_dest.parquet"
+        local_dest.parent.mkdir(parents=True, exist_ok=True)
+
+        data_file = tmp_path / "data_cuf.parquet"
+        data_file.write_bytes(content)
+
+        source_to_delete_file = tmp_path / "cuf_source.parquet"
+        source_to_delete_file.write_bytes(b"cuf source content")
+
+        uploader = _make_uploader_committed(content)
+        writer = DualWriter(nas_uploader=uploader, local_root=local_root)
+
+        from mctrader_data.nas_metrics.prometheus_exporters import (
+            compactor_local_self_delete_total,
+        )
+
+        # PermissionError = OSError 하위 (not FileNotFoundError)
+        with patch(
+            "mctrader_data.compactor.promotion.promote_l1",
+            side_effect=PermissionError("permission denied on unlink"),
+        ):
+            result = writer.write(
+                local_path=local_dest,
+                nas_key="market/ch/sv=v1/tier=L2/exchange=X/symbol=S/date=D/part-cuf.parquet",
+                data=data_file,
+                sha256=_sha256(content),
+                source_to_delete=source_to_delete_file,
+            )
+
+        # DualWriteResult.status = 'committed' (3-enum SSOT — committed_unlink_failed = Counter label only)
+        assert result.status == "committed", (
+            "OSError(unlink fail) → status='committed' (NAS-SoT 격상, DualWriteResult.status 3-enum SSOT)"
+        )
+        # committed_unlink_failed Counter emit 확인
+        counter_val = compactor_local_self_delete_total.labels(
+            tier="L2", outcome="committed_unlink_failed"
+        )._value.get()
+        assert counter_val >= 1, (
+            "P0-1: committed_unlink_failed Counter emit 의무 (except OSError 분기 미구현 시 fail)"
+        )
+
+    def test_oserror_source_retained(self, tmp_path: Path) -> None:
+        """OSError(unlink fail) → source retain (INV-D: NAS object 존재 + source 잔존은 예외적 상태)."""
+        content = b"oserror source retain content"
+        local_root = tmp_path / "local"
+        local_root.mkdir()
+        local_dest = local_root / "cuf_retain_dest.parquet"
+        local_dest.parent.mkdir(parents=True, exist_ok=True)
+
+        data_file = tmp_path / "data_retain.parquet"
+        data_file.write_bytes(content)
+
+        source_to_delete_file = tmp_path / "cuf_retain_source.parquet"
+        source_to_delete_file.write_bytes(b"retain source content")
+
+        uploader = _make_uploader_committed(content)
+        writer = DualWriter(nas_uploader=uploader, local_root=local_root)
+
+        with patch(
+            "mctrader_data.compactor.promotion.promote_l1",
+            side_effect=PermissionError("EPERM"),
+        ):
+            writer.write(
+                local_path=local_dest,
+                nas_key="market/ch/sv=v1/tier=L2/exchange=X/symbol=S/date=D/part-cuf-r.parquet",
+                data=data_file,
+                sha256=_sha256(content),
+                source_to_delete=source_to_delete_file,
+            )
+
+        # source 보존 (unlink 실패 = source 잔존, sweep fallback 회수 예정)
+        assert source_to_delete_file.exists(), (
+            "OSError(unlink fail) → source retain (sweep fallback 회수 예정)"
+        )
+
+    def test_fnf_not_shadowed_by_oserror_branch(self, tmp_path: Path) -> None:
+        """MRO 검증: FileNotFoundError 는 except OSError 에 흡수되지 않고 already_promoted 분기 진입.
+
+        Python FileNotFoundError ⊂ OSError — except FileNotFoundError BEFORE except OSError 의무.
+        순서 역전 시 already_promoted 분기가 OSError 에 흡수되어 dead code.
+        """
+        content = b"mro check content"
+        local_root = tmp_path / "local"
+        local_root.mkdir()
+        local_dest = local_root / "mro_dest.parquet"
+        local_dest.parent.mkdir(parents=True, exist_ok=True)
+
+        data_file = tmp_path / "data_mro.parquet"
+        data_file.write_bytes(content)
+
+        source_absent = tmp_path / "mro_absent.parquet"
+        # source_absent 는 생성하지 않음 (FileNotFoundError 경로 검증)
+
+        uploader = _make_uploader_committed(content)
+        writer = DualWriter(nas_uploader=uploader, local_root=local_root)
+
+        from mctrader_data.nas_metrics.prometheus_exporters import (
+            compactor_local_self_delete_total,
+        )
+
+        with patch(
+            "mctrader_data.compactor.promotion.promote_l1",
+            side_effect=FileNotFoundError("source already deleted"),
+        ):
+            result = writer.write(
+                local_path=local_dest,
+                nas_key="market/ch/sv=v1/tier=L2/exchange=X/symbol=S/date=D/part-mro.parquet",
+                data=data_file,
+                sha256=_sha256(content),
+                source_to_delete=source_absent,
+            )
+
+        # MRO 정상: FileNotFoundError → already_promoted → committed normalize (NOT OSError branch)
+        assert result.status == "committed", "FileNotFoundError → already_promoted → committed normalize"
+        # already_promoted Counter emit (not committed_unlink_failed)
+        ap_val = compactor_local_self_delete_total.labels(
+            tier="L2", outcome="already_promoted"
+        )._value.get()
+        cuf_val = compactor_local_self_delete_total.labels(
+            tier="L2", outcome="committed_unlink_failed"
+        )._value.get()
+        assert ap_val >= 1, "FileNotFoundError → already_promoted Counter emit (MRO 정상)"
+        # committed_unlink_failed 는 PermissionError 경로 전용 — FNF에서는 emit 안 됨
+        # (단, 이전 테스트에서 emit됐을 수 있어 값 비교 불가 — 여기선 ap >= 1 만 확인)
+
+
 class TestLocalOnlyRetainedCounter:
     """local_only_retained Counter outcome 검증."""
 

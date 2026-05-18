@@ -394,7 +394,7 @@ def scan_and_cleanup_legacy(
             log.info("[runner] legacy preserved (HEAD verify fail) nas_key=%s", nas_key)
         except FileNotFoundError:
             # MCT-202 §3.9 sweep race window — eager cascade 가 이미 unlink. graceful no-op.
-            # errors 오염 차단 (INV-SEC-5): race_noop = cleaned 도 errors 도 아닌 별도 카운터
+            # errors 오염 차단 (§3.9 race_noop): race_noop = cleaned 도 errors 도 아닌 별도 카운터
             log.debug(
                 "[runner] sweep race noop (eager cascade already unlinked) nas_key=%s", nas_key
             )

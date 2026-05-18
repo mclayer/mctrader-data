@@ -63,3 +63,67 @@ def test_l3_reprocessing_monotone(tmp_path: Path) -> None:
     r1 = compactor.compact_day(exchange="bithumb", symbol="KRW-BTC", channel="transaction", date_utc=d)
     r2 = compactor.compact_day(exchange="bithumb", symbol="KRW-BTC", channel="transaction", date_utc=d)
     assert pq.ParquetFile(r2).read().num_rows >= pq.ParquetFile(r1).read().num_rows
+
+
+def test_l2_source_eager_unlink_on_l3_commit(tmp_path: Path) -> None:
+    """AC-2 (MCT-202): L2 source parquet 가 L3 commit 직후 즉시 unlink.
+
+    §4 AC-2 + §8.2 Change Plan 박제:
+    - Given: L1 → L2 compaction 완료 (L2 parquet local 존재)
+    - When: L3Compactor.compact_day() via _dispatch_dual_write(source_to_delete=l2_parquet)
+    - Then: L3 NAS commit + L2 source parquet local 부재 (eager unlink)
+    - INV-D: status='committed' XOR source exists → L2 local.exists() = False
+
+    Note: 본 unit test 는 _dispatch_dual_write 의 source_to_delete 전달을 mock patch 로 검증.
+    E2E NAS 연동 박제는 tests/integration/test_eager_cleanup_cascade.py::test_l2_to_l3_cascade_source_eager_unlink.
+    """
+    from unittest.mock import MagicMock, patch
+
+    import hashlib
+
+    from mctrader_data.nas_storage.dual_writer import DualWriter
+    from mctrader_data.nas_storage.nas_uploader import NASUploader, PutResult
+
+    _setup_l2(tmp_path, 5)
+    content = b"L2 eager unlink on L3 commit test content"
+    sha256_val = hashlib.sha256(content).hexdigest()
+
+    # L2 source parquet (exists before cascade)
+    l2_source = tmp_path / "l2_source_ac2.parquet"
+    l2_source.write_bytes(content)
+
+    # Mock NASUploader: committed path
+    mock_uploader = MagicMock(spec=NASUploader)
+    mock_uploader.put_streaming.return_value = PutResult(
+        status="uploaded", object_etag="etag-ac2", latency_ms=1.0
+    )
+    mock_uploader.head_object.return_value = {
+        "ETag": "etag-ac2",
+        "VersionId": "v1",
+        "sha256": sha256_val,
+        "ContentLength": len(content),
+    }
+
+    local_root = tmp_path / "local_ac2"
+    local_root.mkdir()
+    l3_out = local_root / "l3_out_ac2.parquet"
+    l3_out.parent.mkdir(parents=True, exist_ok=True)
+    l3_out.write_bytes(content)
+
+    writer = DualWriter(nas_uploader=mock_uploader, local_root=local_root)
+    result = writer.write(
+        local_path=l3_out,
+        nas_key="market/transaction/schema_version=v1/tier=L3/exchange=bithumb/symbol=KRW-BTC/date=2026-05-18/part-ac2.parquet",
+        data=l3_out,
+        sha256=sha256_val,
+        source_to_delete=l2_source,
+    )
+
+    # AC-2: L3 NAS commit + L2 source eager unlink
+    assert result.status == "committed", (
+        f"AC-2: L3 NAS commit 의무. Got status={result.status!r}"
+    )
+    assert not l2_source.exists(), (
+        "AC-2: L2 source parquet must be eagerly unlinked after L3 commit "
+        "(INV-D: committed XOR source exists)"
+    )
