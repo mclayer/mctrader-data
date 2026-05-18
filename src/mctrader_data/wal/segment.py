@@ -92,17 +92,13 @@ def parse_ts_from_segment(sealed: Path) -> str:
     """Extract epoch ts from segment filename: segment-{YYYYMMDDTHHMMSSZ}-{node_id}.ndjson[.sealed[.compacted]]
 
     Symmetric with parse_node_id_from_segment — ts 위치 = parts[1].
-    Returns 'YYYYMMDDTHHMMSSZ' (사전 정렬 가능 ISO 형식).
+    suffix-strip = _strip_segment_suffixes SSOT (longest-first). split/validate 는 본
+    함수 책임 — malformed 시 ValueError strict contract 보존 (parse_node_id_from_segment
+    의 "DEFAULT" lenient 와 의도적 비대칭, zero-regression — spec §3.3 / Researcher U1).
 
-    ADR-009 §D2 Amendment N — L1 dual filename pattern 의 ts source.
+    ADR-009 §D2.8 — L1 dual filename pattern 의 ts source.
     """
-    stem = sealed.name
-    base = (
-        stem
-        .replace(".ndjson.sealed.compacted", "")
-        .replace(".ndjson.sealed", "")
-        .replace(".ndjson", "")
-    )
+    base = _strip_segment_suffixes(sealed.name)
     parts = base.split("-", 2)
     if len(parts) < 3 or parts[0] != "segment":
         raise ValueError(

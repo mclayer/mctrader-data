@@ -97,3 +97,11 @@ def test_parse_node_id_regression_zero_sealed() -> None:
 def test_parse_node_id_default_fallback_preserved() -> None:
     # AC-4: malformed (len(parts)<3) → "DEFAULT" (raise 안 함, lenient contract 보존)
     assert parse_node_id_from_segment(Path("bad.ndjson")) == "DEFAULT"
+
+
+def test_parse_ts_value_error_contract_preserved() -> None:
+    # AC-5: len(parts)<3 또는 parts[0]!="segment" → ValueError (strict contract 보존)
+    with pytest.raises(ValueError, match="Unexpected segment filename"):
+        parse_ts_from_segment(Path("bad.ndjson"))
+    with pytest.raises(ValueError, match="Unexpected segment filename"):
+        parse_ts_from_segment(Path("notsegment-20260509T000000Z-NODE_A.ndjson"))
