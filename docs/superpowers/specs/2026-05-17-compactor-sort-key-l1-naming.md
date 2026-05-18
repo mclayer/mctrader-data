@@ -219,3 +219,26 @@ planned_claude_md_sections:
 - PR #83 WS-B (`4dc11dc`) — reclaim 경로 dependency
 - CLAUDE.md `## historical tier promotion (WS-A, 2026-05-17)` — INV-A/B/C/D
 - CLAUDE.md `## verify gate (MCT-173 D8=C)` — verify_l2_l3_sort_correctness.py 패턴 정합
+
+## §13 회고 (PMOAgent 작성, CFP-138 / ADR-045 §D-5 mandate)
+
+본 Story = 외부 세션 발의 internal Story (formal MCT-NNN/codeforge Issue 없음) — `docs/stories/` Story file 부재. 본 spec 이 canonical Story artifact 이므로 ADR-045 §D-5 4-field schema 를 본 §13 에 박제 (Story §11 retro 블록 등가).
+
+```yaml
+retro:
+  retro_file: docs/retros/compactor-sort-key-l1-naming-retro-2026-05-18.md
+  retro_summary: >
+    L2/L3 content-derived sort key (pq.read_metadata stats.min primary + iter_batches[:1]
+    fallback) + L1 ts-prefix filename naming (part-<YYYYMMDDTHHMMSSZ>-<sha[:16]>.parquet)
+    으로 WS-A 117GB 회수 unblock + latent forward path silent loss (ADR-009 §D12 위반)
+    차단. 외부 세션 발의 → codeforge-brainstorm Phase 0 burst → ADR-073 verify-via
+    사실 정정 (sort 키=증상 / l3.py:68 incidentally safe) → Phase 1 1-question →
+    subagent-driven-development 11 TDD task → PR #96 (adfddf4, 3113/-182 LOC, 26 file,
+    192 tests PASS) + sibling chore PR #98 (06926e3, Windows skip 가드). Max FIX 카운터 0,
+    ESCALATE 0. ADR 후보 2건 발의 (proposer only, N=1 deferred). Cross-Story threshold
+    N>=2 미충족 — 6 sub-pattern (G/H/I/J/K/L) all N=1 carrier 박제.
+  learnings_count: 8
+  feedback_back_to_codeforge: []
+```
+
+retro 상세 (§0-§9 + Pattern G-L + ADR 후보 2 + cross-Story threshold check) = `docs/retros/compactor-sort-key-l1-naming-retro-2026-05-18.md` 참조.
