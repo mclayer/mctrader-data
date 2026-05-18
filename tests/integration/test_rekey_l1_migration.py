@@ -131,7 +131,7 @@ class TestInvA:
         uploader = _make_uploader(client)
 
         # Seed: 1 l1/ object with .compacted
-        old_key = "l1/bithumb/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/exchange=bithumb/symbol=KRW-BTC/date=2026-05-13/part-0.parquet"  # noqa: E501
+        old_key = "l1/market/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/exchange=bithumb/symbol=KRW-BTC/date=2026-05-13/part-0.parquet"  # noqa: E501
         _put_object(client, "mctrader-market", old_key)
 
         audit_dir = tmp_path / "audit"
@@ -155,7 +155,7 @@ class TestInvB:
         client = s3_bucket_versioning_enabled
         uploader = _make_uploader(client)
 
-        old_key = "l1/bithumb/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/exchange=bithumb/symbol=KRW-BTC/date=2026-05-13/part-0.parquet"  # noqa: E501
+        old_key = "l1/market/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/exchange=bithumb/symbol=KRW-BTC/date=2026-05-13/part-0.parquet"  # noqa: E501
         new_key = old_key[len("l1/"):]
         sha256 = _put_object(client, "mctrader-market", old_key)
 
@@ -187,7 +187,7 @@ class TestInvB:
         client = s3_bucket_versioning_enabled
         uploader = _make_uploader(client)
 
-        old_key = "l1/bithumb/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/exchange=bithumb/symbol=KRW-ETH/date=2026-05-13/part-0.parquet"  # noqa: E501
+        old_key = "l1/market/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/exchange=bithumb/symbol=KRW-ETH/date=2026-05-13/part-0.parquet"  # noqa: E501
         body = b"parquet-data"
         sha256_src = "aaaa" + "0" * 60  # fake sha256
         sha256_dst = "bbbb" + "0" * 60  # mismatched sha256
@@ -228,7 +228,7 @@ class TestInvC:
         client = s3_bucket_versioning_enabled
         uploader = _make_uploader(client)
 
-        old_key = "l1/bithumb/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/exchange=bithumb/symbol=KRW-XRP/date=2026-05-13/part-0.parquet"  # noqa: E501
+        old_key = "l1/market/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/exchange=bithumb/symbol=KRW-XRP/date=2026-05-13/part-0.parquet"  # noqa: E501
         sha256 = _put_object(client, "mctrader-market", old_key)
         new_key = old_key[len("l1/"):]
         body = b"parquet-data"
@@ -268,7 +268,7 @@ class TestInvD:
         client = s3_bucket_versioning_enabled
         uploader = _make_uploader(client)
 
-        old_key = "l1/bithumb/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/exchange=bithumb/symbol=KRW-SOL/date=2026-05-13/part-0.parquet"  # noqa: E501
+        old_key = "l1/market/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/exchange=bithumb/symbol=KRW-SOL/date=2026-05-13/part-0.parquet"  # noqa: E501
         sha256 = _put_object(client, "mctrader-market", old_key)
         new_key = old_key[len("l1/"):]
         body = b"parquet-data"
@@ -367,7 +367,7 @@ class TestInvF:
         client = s3_bucket_versioning_enabled
         uploader = _make_uploader(client)
 
-        old_key = "l1/bithumb/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/exchange=bithumb/symbol=KRW-ADA/date=2026-05-13/part-0.parquet"  # noqa: E501
+        old_key = "l1/market/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/exchange=bithumb/symbol=KRW-ADA/date=2026-05-13/part-0.parquet"  # noqa: E501
         sha256 = _put_object(client, "mctrader-market", old_key)
         new_key = old_key[len("l1/"):]
         body = b"parquet-data"
@@ -410,7 +410,7 @@ class TestInvJ:
         client = s3_bucket_versioning_enabled
         uploader = _make_uploader(client)
 
-        old_key = "l1/bithumb/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/exchange=bithumb/symbol=KRW-TRX/date=2026-05-13/part-0.parquet"  # noqa: E501
+        old_key = "l1/market/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/exchange=bithumb/symbol=KRW-TRX/date=2026-05-13/part-0.parquet"  # noqa: E501
         sha256 = _put_object(client, "mctrader-market", old_key)
         new_key = old_key[len("l1/"):]
         body = b"parquet-data"
@@ -449,7 +449,7 @@ class TestInvK:
         import hashlib
         sha256 = hashlib.sha256(body).hexdigest()
 
-        old_key = "l1/bithumb/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/exchange=bithumb/symbol=KRW-LINK/date=2026-05-13/part-0.parquet"  # noqa: E501
+        old_key = "l1/market/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/exchange=bithumb/symbol=KRW-LINK/date=2026-05-13/part-0.parquet"  # noqa: E501
         new_key = old_key[len("l1/"):]
 
         # Setup: both src and dst present (mid-state: copy done, delete not done)
@@ -527,14 +527,14 @@ class TestInvM:
         uploader = _make_uploader(client)
 
         # Object WITHOUT .compacted sentinel → must be skipped
-        key_no_compacted = "l1/bithumb/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/exchange=bithumb/symbol=KRW-NEAR/date=2026-05-13/part-0.parquet"  # noqa: E501
+        key_no_compacted = "l1/market/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/exchange=bithumb/symbol=KRW-NEAR/date=2026-05-13/part-0.parquet"  # noqa: E501
         client.put_object(
             Bucket="mctrader-market", Key=key_no_compacted, Body=b"data",
             Metadata={"sha256": "a" * 64},
         )
 
         # Object WITH .compacted sentinel → should be processed
-        key_with_compacted = "l1/bithumb/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/exchange=bithumb/symbol=KRW-ATOM/date=2026-05-13/part-0.parquet"  # noqa: E501
+        key_with_compacted = "l1/market/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/exchange=bithumb/symbol=KRW-ATOM/date=2026-05-13/part-0.parquet"  # noqa: E501
         _put_object(client, "mctrader-market", key_with_compacted)
 
         audit_dir = tmp_path / "audit"
@@ -560,7 +560,7 @@ class TestInvN:
 
         # Seed 10 l1/ objects
         for i in range(10):
-            key = f"l1/bithumb/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/exchange=bithumb/symbol=KRW-SYM{i}/date=2026-05-13/part-0.parquet"  # noqa: E501
+            key = f"l1/market/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/exchange=bithumb/symbol=KRW-SYM{i}/date=2026-05-13/part-0.parquet"  # noqa: E501
             _put_object(client, "mctrader-market", key)
 
         audit_dir = tmp_path / "audit"
@@ -587,7 +587,7 @@ class TestLongRunningBatchLeak:
 
         # Seed a few objects
         for i in range(3):
-            key = f"l1/bithumb/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/exchange=bithumb/symbol=KRW-LEAK{i}/date=2026-05-13/part-0.parquet"  # noqa: E501
+            key = f"l1/market/orderbooksnapshot/schema_version=orderbook_snapshot.v1/tier=L1/exchange=bithumb/symbol=KRW-LEAK{i}/date=2026-05-13/part-0.parquet"  # noqa: E501
             _put_object(client, "mctrader-market", key)
 
         audit_dir = tmp_path / "audit"

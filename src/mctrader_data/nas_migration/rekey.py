@@ -10,7 +10,7 @@ Design decisions (Change Plan §3 / §9.4 verbatim — Module Option C Hybrid, P
 - RekeyManifest: 11-state status enum + status_counts 14 keys + atomic write (INV-H)
 - BackfillCheckpoint SRP 패턴 재사용 (interface shape: upsert/get/update_status)
 - DELETE dry-run gate (PL 결정 #6): if not dry_run → delete, else log.info only (INV-A)
-- nas_key.py helper 경유 의무: build_legacy_nas_key + build_nas_key ("l1/" 리터럴 0 박제)
+- nas_key.py helper 경유 의무: build_legacy_l1_discovery_prefix + _legacy_key_to_canonical (l1/ 리터럴 0 박제)
 
 Invariants (14 INV — §8 Test Contract):
 - INV-A: dry-run delete attempt 0
@@ -55,6 +55,11 @@ if sys.platform != "win32":
     import fcntl
 else:
     fcntl = None  # type: ignore[assignment]
+
+from mctrader_data.nas_storage.nas_key import (
+    _legacy_key_to_canonical,
+    build_legacy_l1_discovery_prefix,
+)
 
 if TYPE_CHECKING:
     from mctrader_data.nas_storage.nas_uploader import NASUploader
@@ -567,42 +572,64 @@ class RekeyOrchestrator:
             log.debug("[rekey] sentinel already exists partition_id=%s", partition_id)
 
     def _discover_l1_objects(self) -> list[str]:
-        """NAS l1/<exchange>/<channel>/ prefix PIT snapshot + .compacted filter (INV-M).
+        """NAS l1/market/<channel>/ prefix PIT snapshot + exchange/tier filter + .compacted filter (INV-M).
 
-        Returns list of l1/ object keys that have .compacted suffix (migration candidates).
+        SSOT prefix from build_legacy_l1_discovery_prefix (U3-FIX-keyspace-rekey §3.1).
+        Real production keyspace: l1/market/<channel>/schema_version=*/tier=L1/exchange=<ex>/...
+
+        Post-list filters (SecurityArch §7.2 P1 mandatory):
+        - /exchange=<exchange>/: cross-exchange corruption guard (belt-and-suspenders)
+        - /tier=L1/: defensive tier guard (belt-and-suspenders, all legacy l1/ = L1 per SSOT)
+
+        Returns list of l1/ object keys that have .compacted suffix and pass all filters.
         """
-        prefix = f"l1/{self._exchange}/{self._channel}/"
+        prefix = build_legacy_l1_discovery_prefix(channel=self._channel)
         all_keys = self._uploader._list_objects(prefix)
 
+        # SecurityArch §7.2 P1: cross-exchange filter (mandatory — broad prefix is exchange-agnostic)
+        # Defensive tier filter (Codex Q1 recommendation, accepted)
+        exchange_substr = f"/exchange={self._exchange}/"
+        tier_substr = "/tier=L1/"
+        filtered_keys = [
+            k for k in all_keys
+            if exchange_substr in k and tier_substr in k
+        ]
+
         # INV-M: .compacted sentinel 완료 객체만 (DataMigrationArch §11.5 MCT-173 INV-2 정합)
-        compacted_base = {k[:-len(".compacted")] for k in all_keys if k.endswith(".compacted")}
-        candidate_keys = [k for k in all_keys if not k.endswith(".compacted") and k in compacted_base]
+        compacted_base = {k[:-len(".compacted")] for k in filtered_keys if k.endswith(".compacted")}
+        candidate_keys = [k for k in filtered_keys if not k.endswith(".compacted") and k in compacted_base]
 
         log.info(
-            "[rekey] discovered l1 objects prefix=%s total=%d compacted_base=%d candidates=%d",
-            prefix, len(all_keys), len(compacted_base), len(candidate_keys),
+            "[rekey] discovered l1 objects prefix=%s exchange_filter=%s tier_filter=%s "
+            "total=%d filtered=%d compacted_base=%d candidates=%d",
+            prefix, exchange_substr, tier_substr,
+            len(all_keys), len(filtered_keys), len(compacted_base), len(candidate_keys),
         )
         return candidate_keys
 
     def _build_partition_id(self, old_key: str) -> str:
-        """old_key → partition_id (URL-safe, deterministic)."""
-        # strip "l1/" prefix → use rest as partition_id
-        stripped = old_key.removeprefix("l1/").removeprefix(f"{self._exchange}/{self._channel}/")
+        """old_key → partition_id (URL-safe, deterministic).
+
+        §3.2 FROZEN semantics: strip l1/ ONLY (via SSOT _legacy_key_to_canonical),
+        then encode / → -. Second removeprefix was a no-op on real keys (GR-P1 path (a)).
+        INV-C/D/G fully preserved — partition_id bit-identical vs old code on real production keys.
+        """
+        # strip l1/ prefix via SSOT helper (GR-P1 path (a) — literal moves to nas_key.py)
+        stripped = _legacy_key_to_canonical(old_key)
         # normalize path separators
         return stripped.replace("/", "-").rstrip("-")
 
     def _build_new_key(self, old_key: str) -> str:
-        """l1/<exchange>/<channel>/... → <exchange>/<channel>/... (l1/ prefix strip).
+        """l1/market/<channel>/... → market/<channel>/... (l1/ prefix strip via SSOT).
 
-        Uses nas_key helpers — "l1/" literal 0 박제 (U5 grep gate).
+        GR-P1 path (a): logic locus moved to nas_key._legacy_key_to_canonical SSOT —
+        l1/ literal 0 박제 (U5 grep gate, §3.4). Behavior-preserving SSOT-routing:
+        _legacy_key_to_canonical == old_key.removeprefix(l1/) — semantic-equivalent.
+        Post-§3.1 discovery guarantees every reachable key starts with "l1/market/",
+        so the else-branch (unreachable) is dropped intentionally (dead-branch removal).
         """
-        # old_key format: l1/market/<channel>/schema_version=*/tier=L1/...
-        # new_key format: market/<channel>/schema_version=*/tier=L1/...
-        # Simple rule: strip "l1/" prefix (server-side key namespace move only)
-        if old_key.startswith("l1/"):
-            return old_key[len("l1/"):]
-        log.warning("[rekey] old_key does not start with 'l1/' key=%s — using as-is", old_key)
-        return old_key
+        # l1/market/<channel>/... → market/<channel>/... (SSOT-routed l1/ strip)
+        return _legacy_key_to_canonical(old_key)
 
     def _verify_4head(self, old_key: str, new_key: str, entry: PartitionEntry) -> bool:
         """4-HEAD verify ALL PASS gate (ADR-034 §결정 4 Step B, INV-B).
@@ -999,8 +1026,18 @@ class RekeyOrchestrator:
         0. pidfile flock (INV-I)
         1. start gate: bucket versioning=Enabled (INV-E)
         2. start gate: disk_usage ≥ 1 GB (O-R2)
-        3. PIT snapshot: list_objects_v2 prefix=l1/<exchange>/<channel>/ + .compacted filter (INV-M)
+        3. PIT snapshot: list_objects_v2 prefix=l1/market/<channel>/ + exchange/tier filter + .compacted filter (INV-M)
+        3a. silent-zero guard (M-10): --execute + 0 candidates + no prior completion
+            → exit 4 (SILENT_ZERO_NO_CANDIDATES). INV-C carve-out: manifest has ≥1
+            done entry → already migrated, exit 0 (idempotent re-run)
         4. per-batch loop (batch_size partition 처리 후 break — INV-N)
+
+        Exit codes:
+            0: success (normal completion or already-migrated idempotent re-run)
+            1: insufficient disk space (O-R2)
+            2: bucket versioning not Enabled (INV-E) or concurrent pidfile lock (INV-I)
+            3: --execute without --i-understand-this-is-irreversible flag
+            4: SILENT_ZERO_NO_CANDIDATES — --execute discovered 0 candidates with no prior completion evidence
 
         Returns RekeyResult.
         """
@@ -1039,6 +1076,36 @@ class RekeyOrchestrator:
             # 3. PIT snapshot + .compacted filter (INV-M)
             candidate_keys = self._discover_l1_objects()
             result.partitions_total = len(candidate_keys)
+
+            # 3a. Silent-zero guard (M-10, §3.3 SZ-P1 — user-Q2 mandatory operator backstop)
+            # --execute + 0 candidates = likely keyspace/credential defect → exit 4.
+            # INV-C carve-out: if a prior completed manifest exists (≥1 done entry),
+            # this is a legitimate idempotent re-run → exit 0 (not 4).
+            if not self.dry_run and result.partitions_total == 0:
+                if self._manifest_path.exists():
+                    # Peek manifest for completion evidence (read-only, no state commit)
+                    probe = RekeyManifest(
+                        self._manifest_path,
+                        exchange=self._exchange,
+                        channel=self._channel,
+                        run_mode=self._run_mode,
+                    )
+                    done_count = sum(1 for _ in probe.iter_done())
+                    if done_count > 0:
+                        log.info(
+                            "[rekey] already-migrated (manifest has %d done entries) — "
+                            "0 candidates is expected for completed migration. exit 0",
+                            done_count,
+                        )
+                        result.skipped_already_migrated += done_count
+                        return result
+                log.error(
+                    "[rekey] ABORT: SILENT_ZERO_NO_CANDIDATES — _discover_l1_objects returned "
+                    "0 candidates under --execute and no prior completion evidence "
+                    "(no manifest 'done' entry). Likely keyspace/credential defect. "
+                    "Run --dry-run first to confirm non-zero candidate count. exit 4"
+                )
+                raise SystemExit(4)
 
             # Load / init Manifest
             manifest = RekeyManifest(

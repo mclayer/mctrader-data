@@ -10,6 +10,7 @@ Public API:
     build_nas_prefix(*, tier, channel, schema_ver, exchange, symbol, date_str) -> str  # SSOT-6 일반화 (l3.py 흡수)
     build_legacy_nas_key(parquet_path, root) -> str               # [Deprecated U5 회수] dual-read transitional
     build_legacy_l1_prefix(*, channel, schema_ver, exchange, symbol, date_str) -> str  # [Deprecated U5] §11.2-A
+    build_legacy_l1_discovery_prefix(*, channel) -> str           # [Deprecated U5 회수] U3-MIGRATE discovery SSOT
 
 Private:
     _extract_tier(parquet_path, root) -> str | None
@@ -26,6 +27,7 @@ __all__ = [
     "build_nas_prefix",
     "build_legacy_nas_key",
     "build_legacy_l1_prefix",
+    "build_legacy_l1_discovery_prefix",
 ]
 
 
@@ -227,6 +229,29 @@ def build_legacy_l1_prefix(
         f"l1/market/{channel}/schema_version={schema_ver}/tier=L1/"
         f"exchange={exchange}/symbol={symbol}/date={date_str}/"
     )
+
+
+def build_legacy_l1_discovery_prefix(*, channel: str) -> str:
+    """[Deprecated — U5 회수 예정] U3-MIGRATE discovery 공통 조상 prefix.
+
+    build_legacy_l1_prefix() 의 모든 출력의 common ancestor =
+    "l1/market/{channel}/". discovery 는 schema_ver/symbol/date 를
+    a priori 모르므로 full build_legacy_l1_prefix 호출 불가 — 본 helper 가
+    SSOT 단일 정의 지점. keyword-only, empty segment fail-fast (AC-7).
+
+    U3-MIGRATE rekey.py 전용 (§3.1 FIX scope #1). U5 완료 후 caller 와 함께 회수.
+
+    Raises:
+        ValueError: channel 이 empty string 인 경우 (AC-7 silent-skip 차단)
+
+    Returns:
+        str: trailing '/' 포함 — NASUploader._list_objects(prefix) 직접 사용 가능
+    """
+    if not channel:
+        raise ValueError(
+            "build_legacy_l1_discovery_prefix: empty channel forbidden. AC-7 silent-skip 차단."
+        )
+    return f"l1/market/{channel}/"
 
 
 def _legacy_key_to_canonical(key: str) -> str:
