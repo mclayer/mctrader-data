@@ -183,6 +183,45 @@ services:
     labels:
       mctrader.role: "backfill-upbit"
 
+  # U3-MIGRATE: l1/ → 평면 1회성 멱등 re-key migration oneshot service
+  # PL 결정 #10 Option B (§7.4.6 Container considerations CRITICAL):
+  #   - profiles: ["migration"] — 일반 `docker compose up` 시 미시작
+  #   - restart: "no" — 1회성 batch + Manifest stateful (§8.5_active=true 조건 4 정합)
+  #   - container_name: 단일 인스턴스 강제 (O-R3 concurrent block — INV-I 보조)
+  #   - healthcheck 미정의: exit code = final signal (Prometheus emit 으로 progress 가시화)
+  # operator 실행: docker compose --profile migration up rekey-migration
+  # INV-Container-1: audit/ = named volume mctrader_data 하위 → 재기동 후 persistent (DR-3 Manifest resume)
+  rekey-migration:
+    image: mctrader-data:pilot
+    container_name: mctrader-rekey-migration
+    profiles:
+      - migration
+    restart: "no"
+    stop_grace_period: 30s
+    command:
+      - "python"
+      - "scripts/rekey_l1_migration.py"
+      - "--root"
+      - "/var/lib/mctrader/data"
+      - "--exchange"
+      - "${REKEY_EXCHANGE:-bithumb}"
+      - "--channel"
+      - "${REKEY_CHANNEL:-orderbooksnapshot}"
+      - "--dry-run"
+    environment:
+      NAS_MINIO_ENDPOINT: ${NAS_MINIO_ENDPOINT:-http://192.168.50.200:9000}
+      NAS_MINIO_REKEY_ACCESS_KEY: ${NAS_MINIO_REKEY_ACCESS_KEY}
+      NAS_MINIO_REKEY_SECRET_KEY: ${NAS_MINIO_REKEY_SECRET_KEY}
+      NAS_MINIO_BUCKET: ${NAS_MINIO_BUCKET:-mctrader-market}
+      MCTRADER_DATA_ROOT: /var/lib/mctrader/data
+      MCTRADER_REKEY_BATCH_LIMIT: "500"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - mctrader_data:/var/lib/mctrader/data
+    networks:
+      - mctrader-net
+      - mctrader_net
+
 volumes:
   mctrader_data:
     name: mctrader_data

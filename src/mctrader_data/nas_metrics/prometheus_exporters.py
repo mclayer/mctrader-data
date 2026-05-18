@@ -106,6 +106,66 @@ nas_put_operational_alert_total = Counter(
 if TYPE_CHECKING:
     pass
 
+
+# ─── U3-MIGRATE: l1/ re-key Prometheus metrics (ADR-034 §결정 4 Monitoring + §9.4.6 SSOT) ──
+# cardinality budget ≤ 50 (active 24: 2 exchange × 3 channel × 4 head_check + sparse others)
+# INV-L carrier: mctrader_l1_rekey_* prefix disjoint from nas_uploader_* / nas_invariant_* / nas_backfill_*
+
+# Counter (5 신설)
+# mode label ∈ {dry_run, live} — R-DM-4 carrier (dry-run Counter false-positive 차단)
+l1_rekey_copied_total = Counter(
+    "mctrader_l1_rekey_copied_total",
+    "Number of l1/ objects copied to flat layout (Step A complete, U3-MIGRATE ADR-034 §결정 4)",
+    labelnames=("exchange", "channel", "mode"),
+)
+
+# head_check ∈ {etag, version_id, sha256, content_length} — 4-HEAD verify per-axis Counter
+# active 24 cardinality: 2 exchange × 3 channel × 4 head_check = 24 (INV-L VERIFIED budget)
+l1_rekey_verified_total = Counter(
+    "mctrader_l1_rekey_verified_total",
+    "Number of 4-HEAD verify passes (ADR-034 §결정 4 Step B, per head_check axis)",
+    labelnames=("exchange", "channel", "head_check"),
+)
+
+l1_rekey_deleted_total = Counter(
+    "mctrader_l1_rekey_deleted_total",
+    "Number of l1/ objects deleted (Step C complete, U3-MIGRATE ADR-034 §결정 4)",
+    labelnames=("exchange", "channel", "mode"),
+)
+
+l1_rekey_skipped_already_migrated_total = Counter(
+    "mctrader_l1_rekey_skipped_already_migrated_total",
+    "Number of partitions skipped due to sentinel hit (idempotent re-run, U3-MIGRATE INV-C)",
+    labelnames=("exchange", "channel"),
+)
+
+# reason enum (9종 — P2-2 advisory: active subset sparse, ADR-046 active vs declared cross-ref 의무):
+# versioning_not_enabled / head1_etag_mismatch / head2_versionid_absent /
+# head3_sha256_mismatch / head4_contentlength_mismatch / legacy_no_sha256 /
+# concurrent_lock / disk_full / boto3_error
+l1_rekey_failed_total = Counter(
+    "mctrader_l1_rekey_failed_total",
+    "Number of partitions failed during re-key (U3-MIGRATE AC-7 silent-skip 0)",
+    labelnames=("exchange", "channel", "reason"),
+)
+
+# Gauge (1 신설 — O-R1 / INV-F carrier)
+# > 0 for > 5 min = P0 alert (Grafana: mctrader_l1_rekey_partial_state_count > 0 for 5m)
+l1_rekey_partial_state_count = Gauge(
+    "mctrader_l1_rekey_partial_state_count",
+    # > 0 for 5min = P0 alert (U3-MIGRATE INV-F / O-R1)
+    "Partitions in partial_state (copy done, delete pending) — P0 if > 5 min",
+    labelnames=("exchange", "channel"),
+)
+
+# Histogram (1 신설 — perf baseline carrier, per-batch p99 < 60s SLO)
+l1_rekey_batch_duration_seconds = Histogram(
+    "mctrader_l1_rekey_batch_duration_seconds",
+    "Per-batch duration in seconds — p99 < 60s SLO (U3-MIGRATE §13.C PROVISIONAL gate carrier)",
+    labelnames=("exchange", "channel"),
+    buckets=(1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0),
+)
+
 # §6.3: reason label 화이트리스트 (cardinality=4, SecurityArch 박제)
 ALLOWED_REASONS = frozenset(
     ["endpoint_unreachable", "auth_failed", "quota_exceeded", "unknown"]
