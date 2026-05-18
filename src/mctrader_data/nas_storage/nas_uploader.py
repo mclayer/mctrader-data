@@ -60,6 +60,53 @@ class ConditionalWriteConflict(Exception):
     """
 
 
+class NASOperationalAlert(Exception):
+    """NAS PUT 4xx (auth/policy/quota 영구 오류) — silent fallback 차단, 운영자 개입 의무.
+
+    ADR-027 INCIDENT-2026-05-17 amendment (§D5 amend) 박제:
+    - 4xx ClientError 발견 시 retry_queue 흡수 금지 + 본 exception raise + Counter +=1.
+    - 운영자 개입 의무 (key rotation / IAM policy / bucket 재생성). retry_queue 흡수 시 자동
+      해소 0 / 무한 backlog 누적만 발생. silent skip pathology 와 동형 (ADR-027 Amendment 1/2 sibling).
+
+    Attributes:
+        code: boto3 ClientError 의 `Error.Code` 원본 (e.g., '403', 'AccessDenied').
+        reason: bounded low cardinality 분류 (auth_failed / policy_denied / quota_exceeded / bucket_missing).
+        tier: NAS object tier label (L1/L2/L3/unknown — caller side 명시 set, default unknown).
+        nas_key: NAS object key (debugging trail).
+    """
+
+    def __init__(self, code: str, reason: str, tier: str, nas_key: str, msg: str = "") -> None:
+        self.code = code
+        self.reason = reason
+        self.tier = tier
+        self.nas_key = nas_key
+        detail = msg or f"code={code} reason={reason} tier={tier} key={nas_key}"
+        super().__init__(f"NAS PUT operational alert: {detail}")
+
+
+# INCIDENT-2026-05-17 amendment: 4xx code → reason matrix (bounded low cardinality)
+# 본 매트릭스 = ADR-027 INCIDENT-2026-05-17 amendment §Decision 1 의 박제 SSOT.
+_FAIL_FAST_CODE_TO_REASON: dict[str, str] = {
+    # auth 영역 (보통 자동 해소 0, key rotation 의무)
+    "401": "auth_failed",
+    "InvalidAccessKeyId": "auth_failed",
+    "SignatureDoesNotMatch": "auth_failed",
+    # policy 영역 (IAM/Bucket policy denial)
+    "403": "policy_denied",
+    "AccessDenied": "policy_denied",
+    # bucket 부재 (운영자 bucket 재생성 의무)
+    "NoSuchBucket": "bucket_missing",
+    # quota / storage class (capacity/plan 변경 의무)
+    "QuotaExceeded": "quota_exceeded",
+    "StorageClassNotSupported": "quota_exceeded",
+}
+
+
+def _classify_4xx(code: str) -> str | None:
+    """4xx fail-fast 분류 lookup. None 반환 = 4xx 비대상 (5xx/일반 → 기존 queued 분기)."""
+    return _FAIL_FAST_CODE_TO_REASON.get(code)
+
+
 @dataclass(frozen=True)
 class PutResult:
     """put() 반환값.
@@ -230,12 +277,35 @@ class NASUploader:
         except ClientError as exc:
             code = exc.response.get("Error", {}).get("Code", "")
             safe_endpoint = _mask_endpoint(self._endpoint)
-            if code in ("401", "403", "InvalidAccessKeyId", "AccessDenied"):
-                reason = "auth_failed"
-            elif code in ("QuotaExceeded", "StorageClassNotSupported"):
-                reason = "quota_exceeded"
-            else:
-                reason = "unknown"
+
+            # INCIDENT-2026-05-17 amendment (ADR-027 §D5 amend): 4xx fail-fast
+            # auth/policy/quota 영구 오류 → retry_queue 흡수 금지 + NASOperationalAlert raise.
+            fail_fast_reason = _classify_4xx(code)
+            if fail_fast_reason is not None:
+                from mctrader_data.nas_metrics.prometheus_exporters import (  # noqa: PLC0415
+                    nas_put_operational_alert_total,
+                )
+                nas_put_operational_alert_total.labels(
+                    tier="unknown", reason=fail_fast_reason
+                ).inc()
+                if self._metrics:
+                    latency_s = time.perf_counter() - t_start
+                    self._metrics.emit_fail(
+                        bucket=self.bucket, reason=fail_fast_reason, latency_s=latency_s
+                    )
+                log.critical(
+                    "[nas_uploader] 4xx fail-fast endpoint=%s key=%s code=%s reason=%s "
+                    "— retry_queue 흡수 금지, operator 개입 의무 (ADR-027 INCIDENT-2026-05-17 amendment)",
+                    safe_endpoint, key, code, fail_fast_reason,
+                )
+                raise NASOperationalAlert(
+                    code=code, reason=fail_fast_reason, tier="unknown", nas_key=key
+                ) from exc
+
+            # 본 분기 도달 = _classify_4xx None (4xx 매트릭스 외 code).
+            # QuotaExceeded/StorageClassNotSupported 는 _FAIL_FAST_CODE_TO_REASON 에 포함되어
+            # 위에서 이미 raise — 잔여 code 는 5xx/일반 → reason="unknown" 단일.
+            reason = "unknown"
             log.warning(
                 "[nas_uploader] client error endpoint=%s key=%s code=%s",
                 safe_endpoint, key, code,
@@ -482,7 +552,27 @@ class NASUploader:
                 )
         except ClientError as exc:
             code = exc.response.get("Error", {}).get("Code", "")
-            if code != "404":
+            if code == "404":
+                pass  # HEAD 404 → object 없음 → upload 진행
+            else:
+                # INCIDENT-2026-05-17 amendment (ADR-027 §D5 amend): 4xx fail-fast (HEAD path)
+                fail_fast_reason = _classify_4xx(code)
+                if fail_fast_reason is not None:
+                    from mctrader_data.nas_metrics.prometheus_exporters import (  # noqa: PLC0415
+                        nas_put_operational_alert_total,
+                    )
+                    nas_put_operational_alert_total.labels(
+                        tier="unknown", reason=fail_fast_reason
+                    ).inc()
+                    safe_endpoint = _mask_endpoint(self._endpoint)
+                    log.critical(
+                        "[nas_uploader] put_streaming HEAD 4xx fail-fast endpoint=%s key=%s "
+                        "code=%s reason=%s — retry_queue 흡수 금지 (ADR-027 INCIDENT-2026-05-17)",
+                        safe_endpoint, nas_key, code, fail_fast_reason,
+                    )
+                    raise NASOperationalAlert(
+                        code=code, reason=fail_fast_reason, tier="unknown", nas_key=nas_key
+                    ) from exc
                 raise
 
         # Streaming upload via upload_fileobj + TransferConfig (D1=B)
@@ -548,6 +638,25 @@ class NASUploader:
         except ClientError as exc:
             code = exc.response.get("Error", {}).get("Code", "")
             safe_endpoint = _mask_endpoint(self._endpoint)
+
+            # INCIDENT-2026-05-17 amendment (ADR-027 §D5 amend): 4xx fail-fast (upload path)
+            fail_fast_reason = _classify_4xx(code)
+            if fail_fast_reason is not None:
+                from mctrader_data.nas_metrics.prometheus_exporters import (  # noqa: PLC0415
+                    nas_put_operational_alert_total,
+                )
+                nas_put_operational_alert_total.labels(
+                    tier="unknown", reason=fail_fast_reason
+                ).inc()
+                log.critical(
+                    "[nas_uploader] put_streaming upload 4xx fail-fast endpoint=%s key=%s "
+                    "code=%s reason=%s — retry_queue 흡수 금지 (ADR-027 INCIDENT-2026-05-17)",
+                    safe_endpoint, nas_key, code, fail_fast_reason,
+                )
+                raise NASOperationalAlert(
+                    code=code, reason=fail_fast_reason, tier="unknown", nas_key=nas_key
+                ) from exc
+
             log.warning(
                 "[nas_uploader] put_streaming client error endpoint=%s key=%s code=%s",
                 safe_endpoint, nas_key, code,

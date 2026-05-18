@@ -356,7 +356,26 @@ ts = _extract_min_ts(path_or_stream)
 - ADR-017 Amendment 2 (compactor source 규약, channel matrix SSOT)
 - ADR-027 Amendment 2 (silent-skip 차단 + allowlist.py fail-fast — MCT-166)
 - ADR-027 §D1 amendment box (U1-ADR / EPIC-nas-key-unification — l1/ sub-namespace 제거 cross-ref, 2026-05-17)
+- **ADR-027 §D5 INCIDENT-2026-05-17 amendment (NAS PUT 4xx fail-fast — silent fallback 차단, 2026-05-18, mctrader-hub SSOT)**
 - ADR-029 §D9 amendment box (U1-ADR / EPIC-nas-key-unification — L1 ↔ L2/L3 key namespace 균질화, 2026-05-17)
 - **ADR-034 (NAS Object Key Unification — 4-way split SSOT → single flat layout collapse, 2026-05-17, mctrader-hub SSOT)**
 - ADR-009 §D12 (forward-only invariant)
 - ADR-009 §D2.7 Amendment (MCT-163 — impl narrower, raw_json only nullable=True)
+
+## NAS PUT 4xx fail-fast (ADR-027 INCIDENT-2026-05-17 amendment, 2026-05-18)
+
+`nas_uploader.py` 의 `put()` + `put_streaming()` 가 boto3 `ClientError.code` 기준 4xx/5xx 분리 처리:
+
+- **4xx (auth/policy/quota 영구 오류)**: `NASOperationalAlert` raise + `mctrader_nas_put_operational_alert_total{tier,reason}` Counter += 1 + `retry_queue 흡수 금지`.
+  - 분류 매트릭스 SSOT: `nas_uploader._FAIL_FAST_CODE_TO_REASON`
+    - `401`/`InvalidAccessKeyId`/`SignatureDoesNotMatch` → `auth_failed`
+    - `403`/`AccessDenied` → `policy_denied`
+    - `NoSuchBucket` → `bucket_missing`
+    - `QuotaExceeded`/`StorageClassNotSupported` → `quota_exceeded`
+- **5xx + EndpointConnectionError**: 현행 동작 보존 — `retry_queue.enqueue` → `status="queued"` (raise 0, ADR-027 §D5 base 정합).
+
+**caller propagation**: `compactor/runner.py::_dispatch_dual_write` 가 `NASOperationalAlert` re-raise (silent swallow 금지). caller `_run_l2`/`_run_l3` loop 까지 abort → operator alarm 명시 surface.
+
+**검증 SSOT**: `tests/nas_storage/test_nas_uploader_4xx_fail_fast.py` (19 tests, 4xx/5xx parametrize) + `tests/compactor/test_dispatch_dual_write_4xx_fail_fast.py` (caller-level 2 tests).
+
+**Out of scope**: bucket policy/IAM 운영 복원 = ops/infra runbook (별 인계, MCT-200 EPIC carry-over).
