@@ -25,10 +25,7 @@ from unittest.mock import patch
 import pytest
 
 # moto 3.x / 4.x 호환
-try:
-    from moto import mock_s3
-except ImportError:
-    from moto import mock_aws as mock_s3
+from moto import mock_aws as mock_s3  # moto>=5.2.1 (mock_s3 removed in 5.x)
 
 import boto3
 
@@ -83,7 +80,7 @@ def _make_uploader(client, bucket="mctrader-market"):
         bucket=bucket,
     )
     # Inject mock client directly
-    uploader._NASUploader__client = client
+    uploader._NASUploader__client = client  # type: ignore[attr-defined]
     return uploader
 
 

@@ -27,11 +27,12 @@ class TestCLIArgs:
     def _build_parser(self):
         """Import _build_parser from the script."""
         sys.path.insert(0, str(Path(__file__).parents[2] / "scripts"))
-        import importlib
+        import importlib.util
         spec = importlib.util.spec_from_file_location(
             "rekey_l1_migration",
             Path(__file__).parents[2] / "scripts" / "rekey_l1_migration.py",
         )
+        assert spec is not None and spec.loader is not None  # pyright None guard
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module._build_parser()
@@ -174,6 +175,7 @@ class TestInvNUnit:
             "rekey_l1_migration",
             Path(__file__).parents[2] / "scripts" / "rekey_l1_migration.py",
         )
+        assert spec is not None and spec.loader is not None  # pyright None guard
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
 
@@ -278,6 +280,7 @@ class TestInvLUnit:
             "rekey_l1_migration",
             Path(__file__).parents[2] / "scripts" / "rekey_l1_migration.py",
         )
+        assert spec is not None and spec.loader is not None  # pyright None guard
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
 
@@ -291,6 +294,7 @@ class TestInvLUnit:
             "rekey_l1_migration",
             Path(__file__).parents[2] / "scripts" / "rekey_l1_migration.py",
         )
+        assert spec is not None and spec.loader is not None  # pyright None guard
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
 

@@ -19,10 +19,7 @@ if sys.platform != "win32":
 else:
     fcntl = None  # type: ignore[assignment]
 
-try:
-    from moto import mock_s3
-except ImportError:
-    from moto import mock_aws as mock_s3
+from moto import mock_aws as mock_s3  # moto>=5.2.1 (mock_s3 removed in 5.x)
 
 import boto3
 
@@ -54,7 +51,7 @@ def s3_bucket_versioned(mock_s3_client):
 def _make_uploader(client):
     from mctrader_data.nas_storage.nas_uploader import NASUploader
     uploader = NASUploader(endpoint="http://localhost:9000", access_key="t", secret_key="t")
-    uploader._NASUploader__client = client
+    uploader._NASUploader__client = client  # type: ignore[attr-defined]
     return uploader
 
 
