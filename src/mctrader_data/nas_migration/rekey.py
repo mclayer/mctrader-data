@@ -1027,8 +1027,9 @@ class RekeyOrchestrator:
         1. start gate: bucket versioning=Enabled (INV-E)
         2. start gate: disk_usage ≥ 1 GB (O-R2)
         3. PIT snapshot: list_objects_v2 prefix=l1/market/<channel>/ + exchange/tier filter + .compacted filter (INV-M)
-        3a. silent-zero guard (M-10): --execute + 0 candidates + no prior completion → exit 4 (SILENT_ZERO_NO_CANDIDATES)
-            INV-C carve-out: manifest has ≥1 done entry → already migrated, exit 0 (idempotent re-run)
+        3a. silent-zero guard (M-10): --execute + 0 candidates + no prior completion
+            → exit 4 (SILENT_ZERO_NO_CANDIDATES). INV-C carve-out: manifest has ≥1
+            done entry → already migrated, exit 0 (idempotent re-run)
         4. per-batch loop (batch_size partition 처리 후 break — INV-N)
 
         Exit codes:
