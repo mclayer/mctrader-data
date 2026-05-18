@@ -81,3 +81,60 @@ def test_l3_nas_get_content_derived_sort(tmp_path: Path) -> None:
         gs_mod.get_streaming = original
 
     assert result is not None, "L3 NAS GET content-sort 미적용 → quarantine"
+
+
+import hashlib as _hashlib
+
+
+def test_l3_nas_cache_byte_identical_and_run_id_stable(tmp_path, monkeypatch) -> None:
+    """MCT-203 AC-1/2/4/6: l3 _compact_day_nas size-gated cache parity."""
+    from io import BytesIO
+    from unittest.mock import MagicMock
+    from datetime import datetime, timezone
+    import mctrader_data.nas_storage.get_streaming as gs_mod
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from mctrader_data.compactor.l3 import L3Compactor
+
+    def _mk(ts_list):
+        tbl = pa.table({"ts_utc": pa.array(ts_list, type=pa.timestamp("us", tz="UTC")),
+                        "v": pa.array(list(range(len(ts_list))), type=pa.int64())})
+        buf = BytesIO()
+        pq.write_table(tbl, buf)
+        return buf.getvalue()
+
+    early = [datetime(2026, 5, 13, 1, 0, i, tzinfo=timezone.utc) for i in range(3)]
+    late = [datetime(2026, 5, 13, 5, 0, i, tzinfo=timezone.utc) for i in range(3)]
+    payloads = {
+        "market/orderbooksnapshot/schema_version=v/tier=L2/exchange=upbit/symbol=KRW-BTC/date=2026-05-13/hour=01/node=MERGED/part-zzz.parquet": _mk(early),
+        "market/orderbooksnapshot/schema_version=v/tier=L2/exchange=upbit/symbol=KRW-BTC/date=2026-05-13/hour=05/node=MERGED/part-aaa.parquet": _mk(late),
+    }
+    get_calls: list[str] = []
+
+    def fake_gs(*, nas_uploader, nas_key, byte_range=None):  # noqa: ARG001
+        get_calls.append(nas_key)
+        return BytesIO(payloads[nas_key])
+
+    monkeypatch.setattr(gs_mod, "get_streaming", fake_gs)
+    nas = MagicMock()
+    nas._list_objects.side_effect = lambda prefix: [k for k in payloads if k.startswith(prefix)]
+
+    r1 = L3Compactor(tmp_path, nas_uploader=nas)._compact_day_nas(
+        exchange="upbit", symbol="KRW-BTC", channel="orderbooksnapshot",
+        date_str="2026-05-13", schema_ver="v",
+    )
+    assert r1 is not None and r1.exists()
+    sha1 = _hashlib.sha256(r1.read_bytes()).hexdigest()
+    name1 = r1.name
+
+    tmp2 = tmp_path / "run2"
+    tmp2.mkdir()
+    get_calls.clear()
+    r2 = L3Compactor(tmp2, nas_uploader=nas)._compact_day_nas(
+        exchange="upbit", symbol="KRW-BTC", channel="orderbooksnapshot",
+        date_str="2026-05-13", schema_ver="v",
+    )
+    assert r2 is not None
+    assert r2.name == name1, "l3 run_id drift — INV-9 위반"
+    assert _hashlib.sha256(r2.read_bytes()).hexdigest() == sha1, "l3 byte-identical 위반"
+    assert len(get_calls) == 2, f"l3 AC-4/AC-6 parity 위반 — expected N=2, got {len(get_calls)}: {get_calls}"
