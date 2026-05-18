@@ -351,6 +351,46 @@ ts = _extract_min_ts(path_or_stream)
 - 117GB rewrite 불필요 (legacy 보존, forward 신규부터 new 패턴, eventually 자연 rotation 통일)
 - verify gate: `scripts/verify_l2_l3_sort_correctness.py` 에 `legacy_sha_count` + `new_ts_prefix_count` 분리 보고
 
+## NAS l1/ re-key migration (U3-MIGRATE, 2026-05-18)
+
+EPIC-nas-key-unification (#86) Phase 2 cutover step 4: `l1/<exchange>/<channel>/...` → `<exchange>/<channel>/...` 1회성 멱등 re-key.
+
+**핵심 제약**:
+- ADR-034 §결정 4: 3-step (copy → 4-HEAD verify → delete). MetadataDirective="COPY" 의무 (REPLACE 금지).
+- IAM Option B: `NAS_MINIO_REKEY_ACCESS_KEY / SECRET_KEY` — DELETE+COPY only (blast radius 최소화).
+- `--execute --i-understand-this-is-irreversible` 동시 필요 (PL 결정 #9, operator gate).
+
+```bash
+# dry-run (기본, 프로덕션 데이터 touch 0)
+docker compose --profile migration run --rm rekey-migration \
+  --root /var/lib/mctrader/data --exchange bithumb --channel orderbooksnapshot --dry-run
+
+# execute (operator gate 필수)
+docker compose --profile migration run --rm rekey-migration \
+  --root /var/lib/mctrader/data --exchange bithumb --channel orderbooksnapshot \
+  --execute --i-understand-this-is-irreversible
+```
+
+**Manifest path**: `<root>/audit/rekey-l1-manifest-<exchange>-<channel>.yaml`
+**Sentinel dir**: `<root>/audit/rekey-sentinels/<exchange>/<channel>/`
+**Pidfile**: `<root>/audit/rekey-l1-migration.pid`
+
+**INV 요약 (14종)**:
+- INV-A: dry-run delete attempt 0
+- INV-B: 4-HEAD ALL PASS → delete only (strict order, dst_conflict = abort)
+- INV-C: sentinel 기반 idempotency (2nd run skip)
+- INV-D: Manifest 4-tuple + 11-state status YAML
+- INV-E: bucket versioning=Enabled start gate (exit 2 if not)
+- INV-G: restart-resumable (SIGTERM → manifest resume)
+- INV-H: Manifest YAML atomic write (tempfile + fsync + os.replace)
+- INV-I: concurrent pidfile flock block (exit 2)
+- INV-M: .compacted sentinel gate (compacted objects only)
+- INV-N: batch_size=500 per-sweep (`MCTRADER_REKEY_BATCH_LIMIT` env)
+
+**Prometheus metrics**: `mctrader_l1_rekey_*` prefix (7종, cardinality active ≤ 50 — INV-L)
+**compose service**: `rekey-migration` (profiles: ["migration"], restart: "no")
+**cross-ref**: ADR-034 §결정 4, U5-VERIFY (post-migration l1/ 잔존 0 확인)
+
 ## 관련 ADR
 
 - ADR-017 Amendment 2 (compactor source 규약, channel matrix SSOT)
