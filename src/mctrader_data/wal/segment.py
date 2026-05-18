@@ -77,11 +77,14 @@ def _strip_segment_suffixes(name: str) -> str:
 
 
 def parse_node_id_from_segment(sealed: Path) -> str:
-    """Extract node_id from segment filename: segment-{ts}-{node_id}.ndjson.sealed"""
-    stem = sealed.name  # e.g. segment-20260509T000000Z-NODE_A.ndjson.sealed
-    base = stem.replace(".ndjson.sealed", "").replace(".ndjson", "")
-    # base = segment-20260509T000000Z-NODE_A
-    parts = base.split("-", 2)  # ["segment", "20260509T000000Z", "NODE_A"]
+    """Extract node_id from segment filename: segment-{ts}-{node_id}.ndjson[.sealed[.compacted]]
+
+    suffix-strip = _strip_segment_suffixes SSOT (longest-first). split/error 는 본 함수
+    책임 — len(parts)<3 시 "DEFAULT" lenient fallback 보존 (parse_ts_from_segment 의
+    ValueError strict contract 와 의도적 비대칭, zero-regression — spec §3.3 / Researcher U1).
+    """
+    base = _strip_segment_suffixes(sealed.name)
+    parts = base.split("-", 2)
     return parts[2] if len(parts) >= 3 else "DEFAULT"
 
 
