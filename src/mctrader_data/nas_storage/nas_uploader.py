@@ -302,10 +302,10 @@ class NASUploader:
                     code=code, reason=fail_fast_reason, tier="unknown", nas_key=key
                 ) from exc
 
-            if code in ("QuotaExceeded", "StorageClassNotSupported"):
-                reason = "quota_exceeded"
-            else:
-                reason = "unknown"
+            # 본 분기 도달 = _classify_4xx None (4xx 매트릭스 외 code).
+            # QuotaExceeded/StorageClassNotSupported 는 _FAIL_FAST_CODE_TO_REASON 에 포함되어
+            # 위에서 이미 raise — 잔여 code 는 5xx/일반 → reason="unknown" 단일.
+            reason = "unknown"
             log.warning(
                 "[nas_uploader] client error endpoint=%s key=%s code=%s",
                 safe_endpoint, key, code,

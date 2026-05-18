@@ -15,7 +15,6 @@ Retro: mctrader-data#94 §6 carry-over Action Item 1 + mctrader-hub#394 PMO audi
 from __future__ import annotations
 
 import hashlib
-import io
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
