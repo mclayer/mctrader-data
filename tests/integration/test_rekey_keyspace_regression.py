@@ -122,8 +122,8 @@ class TestDiscoveryProductionShape:
         candidates = orch._discover_l1_objects()
 
         assert len(candidates) > 0, (
-            f"§8 #1 FAIL: discovery found 0 candidates against real production keyspace. "
-            f"Expected >0 (this would have caught P0-CX-1 pre-FIX)."
+            "§8 #1 FAIL: discovery found 0 candidates against real production keyspace. "
+            "Expected >0 (this would have caught P0-CX-1 pre-FIX)."
         )
         # Verify the key has the real production shape
         assert all("l1/market/" in k for k in candidates), (
@@ -377,9 +377,8 @@ class TestGrepGateNoRekeyAllowlist:
         If someone re-introduces an inline l1/ literal in rekey.py AND silently adds
         the allowlist back, this test catches the allowlist restoration.
         """
-        SRC_ROOT = Path(__file__).resolve().parents[2] / "src" / "mctrader_data"
-        HELPER_PATH = SRC_ROOT / "nas_storage" / "nas_key.py"
-        REKEY_PATH = SRC_ROOT / "nas_migration" / "rekey.py"
+        src_root = Path(__file__).resolve().parents[2] / "src" / "mctrader_data"
+        rekey_path = src_root / "nas_migration" / "rekey.py"
 
         def _grep_pattern_in_file(pattern: re.Pattern, path: Path) -> list[tuple[int, str]]:
             """Grep pattern in a single file, skip comment/docstring lines."""
@@ -395,17 +394,17 @@ class TestGrepGateNoRekeyAllowlist:
         pattern_a = re.compile(r'"l1/"')
         pattern_b = re.compile(r'f"l[12]/')
 
-        hits_a = _grep_pattern_in_file(pattern_a, REKEY_PATH)
-        hits_b = _grep_pattern_in_file(pattern_b, REKEY_PATH)
+        hits_a = _grep_pattern_in_file(pattern_a, rekey_path)
+        hits_b = _grep_pattern_in_file(pattern_b, rekey_path)
 
         assert hits_a == [], (
-            f"§8 #7 FAIL (GR-P1): Pattern A '"
+            "§8 #7 FAIL (GR-P1): Pattern A '"
             r'"l1/"'
-            f"' found in rekey.py — literal must be 0 (routed via SSOT):\n"
+            "' found in rekey.py — literal must be 0 (routed via SSOT):\n"
             + "\n".join(f"  rekey.py:{ln}: {ls}" for ln, ls in hits_a)
         )
         assert hits_b == [], (
-            f"§8 #7 FAIL (GR-P1): Pattern B 'f\"l[12]/' found in rekey.py — literal must be 0:\n"
+            "§8 #7 FAIL (GR-P1): Pattern B 'f\"l[12]/' found in rekey.py — literal must be 0:\n"
             + "\n".join(f"  rekey.py:{ln}: {ls}" for ln, ls in hits_b)
         )
 
