@@ -43,9 +43,12 @@ def test_no_l1_literal_in_src() -> None:
 
     INV-1 위반 = 직접 l1/ prefix 문자열 조합 잔존.
     helper nas_key.py 은 allowlist에서 제외 (내부 구현 허용).
+    Allowlist exception: nas_migration/rekey.py (U3-MIGRATE migration tool —
+    l1/ source prefix 처리 의무 + docstring 언급, U5 grep gate 인지 주석 포함).
     """
     pattern = re.compile(r'"l1/"')
-    hits = _grep_pattern(pattern, exclude=LEGACY_HELPER_ALLOWLIST)
+    migration_allowlist: set[Path] = {SRC_ROOT / "nas_migration" / "rekey.py"}
+    hits = _grep_pattern(pattern, exclude=LEGACY_HELPER_ALLOWLIST | migration_allowlist)
     assert hits == [], (
         f"INV-1 위반 (패턴 A): {len(hits)} hits — 직접 l1/ literal 잔존.\n"
         + "\n".join(f"  {p}:{ln}: {ls}" for p, ln, ls in hits)
@@ -57,9 +60,12 @@ def test_no_l1_or_l2_fstring_in_src() -> None:
 
     INV-1 위반 = l2.py:158 (SSOT-4) or l3.py:153 (SSOT-6) f-string 잔존.
     helper nasKey.py 은 allowlist에서 제외.
+    Allowlist exception: nas_migration/rekey.py (U3-MIGRATE migration tool —
+    prefix = f"l1/{exchange}/{channel}/" discovery query, 1회성 마이그레이션 전용).
     """
     pattern = re.compile(r'f"l[12]/')
-    hits = _grep_pattern(pattern, exclude=LEGACY_HELPER_ALLOWLIST)
+    migration_allowlist: set[Path] = {SRC_ROOT / "nas_migration" / "rekey.py"}
+    hits = _grep_pattern(pattern, exclude=LEGACY_HELPER_ALLOWLIST | migration_allowlist)
     assert hits == [], (
         f"INV-1 위반 (패턴 B): {len(hits)} hits — f-string l1/l2 prefix 잔존.\n"
         + "\n".join(f"  {p}:{ln}: {ls}" for p, ln, ls in hits)

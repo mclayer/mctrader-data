@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -53,11 +54,81 @@ from botocore.exceptions import ClientError, EndpointConnectionError
 log = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class CopyResult:
+    """copy_object 반환값 (4-state enum, U3-MIGRATE PL 결정 #2 / Refactor §c-1 verbatim).
+
+    status 4종 (P2-doc: 4-state 명시 — Change Plan §11.6:1007 sha256 mismatch overwrite 차단):
+    - "copied": S3 server-side copy 성공 (신규 dst object)
+    - "already_exists_idempotent": dst HEAD 200 + sha256 Metadata source match → skip (idempotent)
+    - "source_not_found": src HEAD 404 (멱등 재실행 시 src 이미 delete = 정상 분기.
+      caller 의무: dst HEAD check → both_head_404 guard 필수 — P0-1 fix 정합)
+    - "dst_conflict": dst HEAD 200 + sha256 Metadata mismatch → abort copy (INV-B 안전 gate,
+      overwrite 차단 — Change Plan §11.6:1007 mandate)
+
+    ADR-034 §결정 4 Step A carrier.
+    """
+
+    status: Literal["copied", "already_exists_idempotent", "source_not_found", "dst_conflict"]
+    src_etag: str = ""
+    dst_etag: str = ""
+    src_version_id: str | None = None
+    dst_version_id: str | None = None
+    latency_ms: float = 0.0
+
+
 class ConditionalWriteConflict(Exception):
     """HEAD 200 + sha256 mismatch — silent overwrite 금지, caller 결정 의무.
 
     §6.2.1 박제: forward-only invariant (ADR-009 §D12.2) 보장.
     """
+
+
+class NASOperationalAlert(Exception):
+    """NAS PUT 4xx (auth/policy/quota 영구 오류) — silent fallback 차단, 운영자 개입 의무.
+
+    ADR-027 INCIDENT-2026-05-17 amendment (§D5 amend) 박제:
+    - 4xx ClientError 발견 시 retry_queue 흡수 금지 + 본 exception raise + Counter +=1.
+    - 운영자 개입 의무 (key rotation / IAM policy / bucket 재생성). retry_queue 흡수 시 자동
+      해소 0 / 무한 backlog 누적만 발생. silent skip pathology 와 동형 (ADR-027 Amendment 1/2 sibling).
+
+    Attributes:
+        code: boto3 ClientError 의 `Error.Code` 원본 (e.g., '403', 'AccessDenied').
+        reason: bounded low cardinality 분류 (auth_failed / policy_denied / quota_exceeded / bucket_missing).
+        tier: NAS object tier label (L1/L2/L3/unknown — caller side 명시 set, default unknown).
+        nas_key: NAS object key (debugging trail).
+    """
+
+    def __init__(self, code: str, reason: str, tier: str, nas_key: str, msg: str = "") -> None:
+        self.code = code
+        self.reason = reason
+        self.tier = tier
+        self.nas_key = nas_key
+        detail = msg or f"code={code} reason={reason} tier={tier} key={nas_key}"
+        super().__init__(f"NAS PUT operational alert: {detail}")
+
+
+# INCIDENT-2026-05-17 amendment: 4xx code → reason matrix (bounded low cardinality)
+# 본 매트릭스 = ADR-027 INCIDENT-2026-05-17 amendment §Decision 1 의 박제 SSOT.
+_FAIL_FAST_CODE_TO_REASON: dict[str, str] = {
+    # auth 영역 (보통 자동 해소 0, key rotation 의무)
+    "401": "auth_failed",
+    "InvalidAccessKeyId": "auth_failed",
+    "SignatureDoesNotMatch": "auth_failed",
+    # policy 영역 (IAM/Bucket policy denial)
+    "403": "policy_denied",
+    "AccessDenied": "policy_denied",
+    # bucket 부재 (운영자 bucket 재생성 의무)
+    "NoSuchBucket": "bucket_missing",
+    # quota / storage class (capacity/plan 변경 의무)
+    "QuotaExceeded": "quota_exceeded",
+    "StorageClassNotSupported": "quota_exceeded",
+}
+
+
+def _classify_4xx(code: str) -> str | None:
+    """4xx fail-fast 분류 lookup. None 반환 = 4xx 비대상 (5xx/일반 → 기존 queued 분기)."""
+    return _FAIL_FAST_CODE_TO_REASON.get(code)
 
 
 @dataclass(frozen=True)
@@ -98,17 +169,40 @@ class NASUploader:
 
     def __init__(
         self,
-        endpoint: str,
-        access_key: str,
-        secret_key: str,
+        endpoint: str | None = None,
+        access_key: str | None = None,
+        secret_key: str | None = None,
         bucket: str = "mctrader-market",  # ADR-027 D1 정합
         retry_queue=None,  # RetryQueue | None (순환 import 방지)
         metrics=None,  # PrometheusExporter | None
+        *,
+        nas_role: Literal["default", "rekey"] = "default",
     ) -> None:
-        self._endpoint = endpoint
+        """NASUploader 초기화.
+
+        U3-MIGRATE IAM Option B carrier (PL 결정 #5 / ADR-034 §결정 4):
+        - nas_role="default": NAS_MINIO_ACCESS_KEY / NAS_MINIO_SECRET_KEY 사용 (기존 동작)
+        - nas_role="rekey": NAS_MINIO_REKEY_ACCESS_KEY / NAS_MINIO_REKEY_SECRET_KEY 사용
+          (DELETE + COPY 권한 only — blast radius 최소화)
+
+        기존 positional signature (endpoint, access_key, secret_key) 보존 — backward compat.
+        nas_role="rekey" 시 endpoint/access_key/secret_key = None 허용 → env 자동 로드.
+        """
+        self._nas_role = nas_role
+        if nas_role == "rekey":
+            # IAM Option B: 별 REKEY IAM key (DELETE + COPY 권한 only)
+            _endpoint = endpoint if endpoint is not None else os.environ["NAS_MINIO_ENDPOINT"]
+            _access_key = access_key if access_key is not None else os.environ["NAS_MINIO_REKEY_ACCESS_KEY"]
+            _secret_key = secret_key if secret_key is not None else os.environ["NAS_MINIO_REKEY_SECRET_KEY"]
+        else:
+            _endpoint = endpoint if endpoint is not None else os.environ.get("NAS_MINIO_ENDPOINT", "")
+            _access_key = access_key if access_key is not None else os.environ.get("NAS_MINIO_ACCESS_KEY", "")
+            _secret_key = secret_key if secret_key is not None else os.environ.get("NAS_MINIO_SECRET_KEY", "")
+
+        self._endpoint = _endpoint
         # credentials — NEVER logged (FIX#1 F7)
-        self._access_key = access_key
-        self._secret_key = secret_key
+        self._access_key = _access_key
+        self._secret_key = _secret_key
         self.bucket = bucket
         self._retry_queue = retry_queue
         self._metrics = metrics
@@ -230,12 +324,35 @@ class NASUploader:
         except ClientError as exc:
             code = exc.response.get("Error", {}).get("Code", "")
             safe_endpoint = _mask_endpoint(self._endpoint)
-            if code in ("401", "403", "InvalidAccessKeyId", "AccessDenied"):
-                reason = "auth_failed"
-            elif code in ("QuotaExceeded", "StorageClassNotSupported"):
-                reason = "quota_exceeded"
-            else:
-                reason = "unknown"
+
+            # INCIDENT-2026-05-17 amendment (ADR-027 §D5 amend): 4xx fail-fast
+            # auth/policy/quota 영구 오류 → retry_queue 흡수 금지 + NASOperationalAlert raise.
+            fail_fast_reason = _classify_4xx(code)
+            if fail_fast_reason is not None:
+                from mctrader_data.nas_metrics.prometheus_exporters import (  # noqa: PLC0415
+                    nas_put_operational_alert_total,
+                )
+                nas_put_operational_alert_total.labels(
+                    tier="unknown", reason=fail_fast_reason
+                ).inc()
+                if self._metrics:
+                    latency_s = time.perf_counter() - t_start
+                    self._metrics.emit_fail(
+                        bucket=self.bucket, reason=fail_fast_reason, latency_s=latency_s
+                    )
+                log.critical(
+                    "[nas_uploader] 4xx fail-fast endpoint=%s key=%s code=%s reason=%s "
+                    "— retry_queue 흡수 금지, operator 개입 의무 (ADR-027 INCIDENT-2026-05-17 amendment)",
+                    safe_endpoint, key, code, fail_fast_reason,
+                )
+                raise NASOperationalAlert(
+                    code=code, reason=fail_fast_reason, tier="unknown", nas_key=key
+                ) from exc
+
+            # 본 분기 도달 = _classify_4xx None (4xx 매트릭스 외 code).
+            # QuotaExceeded/StorageClassNotSupported 는 _FAIL_FAST_CODE_TO_REASON 에 포함되어
+            # 위에서 이미 raise — 잔여 code 는 5xx/일반 → reason="unknown" 단일.
+            reason = "unknown"
             log.warning(
                 "[nas_uploader] client error endpoint=%s key=%s code=%s",
                 safe_endpoint, key, code,
@@ -482,7 +599,27 @@ class NASUploader:
                 )
         except ClientError as exc:
             code = exc.response.get("Error", {}).get("Code", "")
-            if code != "404":
+            if code == "404":
+                pass  # HEAD 404 → object 없음 → upload 진행
+            else:
+                # INCIDENT-2026-05-17 amendment (ADR-027 §D5 amend): 4xx fail-fast (HEAD path)
+                fail_fast_reason = _classify_4xx(code)
+                if fail_fast_reason is not None:
+                    from mctrader_data.nas_metrics.prometheus_exporters import (  # noqa: PLC0415
+                        nas_put_operational_alert_total,
+                    )
+                    nas_put_operational_alert_total.labels(
+                        tier="unknown", reason=fail_fast_reason
+                    ).inc()
+                    safe_endpoint = _mask_endpoint(self._endpoint)
+                    log.critical(
+                        "[nas_uploader] put_streaming HEAD 4xx fail-fast endpoint=%s key=%s "
+                        "code=%s reason=%s — retry_queue 흡수 금지 (ADR-027 INCIDENT-2026-05-17)",
+                        safe_endpoint, nas_key, code, fail_fast_reason,
+                    )
+                    raise NASOperationalAlert(
+                        code=code, reason=fail_fast_reason, tier="unknown", nas_key=nas_key
+                    ) from exc
                 raise
 
         # Streaming upload via upload_fileobj + TransferConfig (D1=B)
@@ -548,6 +685,25 @@ class NASUploader:
         except ClientError as exc:
             code = exc.response.get("Error", {}).get("Code", "")
             safe_endpoint = _mask_endpoint(self._endpoint)
+
+            # INCIDENT-2026-05-17 amendment (ADR-027 §D5 amend): 4xx fail-fast (upload path)
+            fail_fast_reason = _classify_4xx(code)
+            if fail_fast_reason is not None:
+                from mctrader_data.nas_metrics.prometheus_exporters import (  # noqa: PLC0415
+                    nas_put_operational_alert_total,
+                )
+                nas_put_operational_alert_total.labels(
+                    tier="unknown", reason=fail_fast_reason
+                ).inc()
+                log.critical(
+                    "[nas_uploader] put_streaming upload 4xx fail-fast endpoint=%s key=%s "
+                    "code=%s reason=%s — retry_queue 흡수 금지 (ADR-027 INCIDENT-2026-05-17)",
+                    safe_endpoint, nas_key, code, fail_fast_reason,
+                )
+                raise NASOperationalAlert(
+                    code=code, reason=fail_fast_reason, tier="unknown", nas_key=nas_key
+                ) from exc
+
             log.warning(
                 "[nas_uploader] put_streaming client error endpoint=%s key=%s code=%s",
                 safe_endpoint, nas_key, code,
@@ -610,6 +766,210 @@ class NASUploader:
             log.warning(
                 "[nas_uploader] _download failed: bucket=%s key=%s err=%s",
                 self.bucket, key, e.response.get("Error", {}).get("Code", "unknown"),
+            )
+            raise
+
+
+    def copy_object(
+        self,
+        src_key: str,
+        dst_key: str,
+        *,
+        metadata_directive: Literal["COPY"] = "COPY",
+    ) -> CopyResult:
+        """S3 server-side copy via boto3 copy_object (ADR-034 §결정 4 Step A).
+
+        HEAD-then-COPY idempotency (U3-MIGRATE PL 결정 #2 Option X):
+        - src HEAD 404 → source_not_found (이미 완료된 재실행 감지)
+        - dst HEAD 200 + sha256 match → already_exists_idempotent (재실행 safe)
+        - dst HEAD 200 + sha256 absent / mismatch → COPY overwrite (legacy 호환)
+        - dst HEAD 404 → COPY (정상 경로)
+
+        MetadataDirective="COPY" 의무 (REPLACE 금지 — sha256 Metadata 보존, DataMigrationArch §11.2 verbatim).
+        bucket = self.bucket hard-coded (cross-bucket pivot 차단, SecurityArch B-2).
+        retry_queue 비연동 — script-level Manifest stateful retry (DR-4 박스).
+        credential masking: _mask_endpoint 既 helper 재사용 (FIX#1 F7 정합).
+
+        Args:
+            src_key: source NAS object key (l1/<exchange>/... prefix 포함)
+            dst_key: destination NAS object key (평면 market/... layout)
+            metadata_directive: "COPY" only (REPLACE 금지)
+
+        Returns:
+            CopyResult with 3-state status
+        """
+        t_start = time.perf_counter()
+        client = self._get_client()
+        safe_endpoint = _mask_endpoint(self._endpoint)
+
+        # Step A-0: src HEAD 확인 (source_not_found 분기)
+        try:
+            src_head = client.head_object(Bucket=self.bucket, Key=src_key)
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code == "404":
+                log.info(
+                    "[nas_uploader] copy_object src not found (already deleted?) src_key=%s",
+                    src_key,
+                )
+                return CopyResult(
+                    status="source_not_found",
+                    latency_ms=(time.perf_counter() - t_start) * 1000,
+                )
+            log.warning(
+                "[nas_uploader] copy_object src HEAD error endpoint=%s src_key=%s code=%s",
+                safe_endpoint, src_key, code,
+            )
+            raise
+
+        src_metadata = src_head.get("Metadata", {}) or {}
+        src_sha256 = src_metadata.get("sha256")
+        src_etag = src_head.get("ETag", "").strip('"')
+        src_version_id = src_head.get("VersionId")
+
+        # Step A-1: dst HEAD 확인 (idempotency check)
+        try:
+            dst_head = client.head_object(Bucket=self.bucket, Key=dst_key)
+            dst_metadata = dst_head.get("Metadata", {}) or {}
+            dst_sha256 = dst_metadata.get("sha256")
+            dst_etag = dst_head.get("ETag", "").strip('"')
+            dst_version_id = dst_head.get("VersionId")
+
+            if src_sha256 is not None and dst_sha256 is not None and src_sha256 == dst_sha256:
+                # dst exists + sha256 match → idempotent skip
+                log.info(
+                    "[nas_uploader] copy_object idempotent skip dst_key=%s sha256=%s…",
+                    dst_key, src_sha256[:8],
+                )
+                return CopyResult(
+                    status="already_exists_idempotent",
+                    src_etag=src_etag,
+                    dst_etag=dst_etag,
+                    src_version_id=src_version_id,
+                    dst_version_id=dst_version_id,
+                    latency_ms=(time.perf_counter() - t_start) * 1000,
+                )
+            # dst exists but sha256 mismatch → INV-B safety: abort copy (dst_conflict)
+            # Rationale: dst has different content; overwriting may cause data loss.
+            # Caller (_process_partition) treats dst_conflict as failure → delete NOT called.
+            if src_sha256 is not None and dst_sha256 is not None and src_sha256 != dst_sha256:
+                log.error(
+                    "[nas_uploader] copy_object dst_conflict — sha256 mismatch, aborting copy "
+                    "src_key=%s dst_key=%s src_sha256=%s… dst_sha256=%s…",
+                    src_key, dst_key,
+                    src_sha256[:8], dst_sha256[:8],
+                )
+                return CopyResult(
+                    status="dst_conflict",
+                    src_etag=src_etag,
+                    dst_etag=dst_etag,
+                    src_version_id=src_version_id,
+                    dst_version_id=dst_version_id,
+                    latency_ms=(time.perf_counter() - t_start) * 1000,
+                )
+            # dst exists but sha256 absent (one or both sides) → log + proceed with COPY
+            log.warning(
+                "[nas_uploader] copy_object dst exists sha256 absent — overwrite "
+                "src_key=%s dst_key=%s src_sha256=%s dst_sha256=%s",
+                src_key, dst_key,
+                src_sha256[:8] if src_sha256 else "None",
+                dst_sha256[:8] if dst_sha256 else "None",
+            )
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code != "404":
+                log.warning(
+                    "[nas_uploader] copy_object dst HEAD error endpoint=%s dst_key=%s code=%s",
+                    safe_endpoint, dst_key, code,
+                )
+                raise
+            # dst HEAD 404 → proceed with COPY (정상 경로)
+            dst_etag = ""
+            dst_version_id = None
+
+        # Step A-2: boto3 copy_object (server-side, MetadataDirective="COPY")
+        copy_response = client.copy_object(
+            CopySource={"Bucket": self.bucket, "Key": src_key},
+            Bucket=self.bucket,
+            Key=dst_key,
+            MetadataDirective=metadata_directive,  # "COPY" 의무 (sha256 Metadata 보존)
+        )
+        dst_etag = (
+            copy_response.get("CopyObjectResult", {})
+            .get("ETag", "")
+            .strip('"')
+        )
+        dst_version_id = copy_response.get("VersionId")
+        latency_ms = (time.perf_counter() - t_start) * 1000
+
+        log.info(
+            "[nas_uploader] copy_object copied src_key=%s dst_key=%s src_etag=%s… dst_etag=%s… latency_ms=%.1f",
+            src_key, dst_key,
+            src_etag[:8] if src_etag else "-",
+            dst_etag[:8] if dst_etag else "-",
+            latency_ms,
+        )
+        return CopyResult(
+            status="copied",
+            src_etag=src_etag,
+            dst_etag=dst_etag,
+            src_version_id=src_version_id,
+            dst_version_id=dst_version_id,
+            latency_ms=latency_ms,
+        )
+
+    def delete_object(self, key: str) -> None:
+        """S3 delete via boto3 delete_object (ADR-034 §결정 4 Step C).
+
+        Pre-condition (caller 의무): 4-HEAD verify ALL PASS 후 호출
+        (NASUploader 강제 0 — RekeyOrchestrator flow control).
+        404 delete = idempotent (S3 contract — DataMigrationArch §11.6 carrier).
+        credential masking 적용 (FIX#1 F7 정합 — _mask_endpoint 재사용).
+
+        Args:
+            key: NAS object key to delete
+
+        Raises:
+            ClientError: non-404 S3 error (caller propagate 의무)
+            EndpointConnectionError: NAS unreachable (caller propagate 의무)
+        """
+        client = self._get_client()
+        safe_endpoint = _mask_endpoint(self._endpoint)
+
+        try:
+            client.delete_object(Bucket=self.bucket, Key=key)
+            log.info("[nas_uploader] delete_object deleted key=%s", key)
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code == "404":
+                # 404 = idempotent (S3 contract — already deleted, 멱등)
+                log.info("[nas_uploader] delete_object 404 idempotent key=%s", key)
+                return
+            log.warning(
+                "[nas_uploader] delete_object error endpoint=%s key=%s code=%s",
+                safe_endpoint, key, code,
+            )
+            raise
+
+    def get_bucket_versioning(self) -> str:
+        """S3 bucket versioning status 조회 (INV-E start gate carrier, U3-MIGRATE).
+
+        Returns:
+            "Enabled" | "Suspended" | "" (empty = versioning 미설정)
+
+        Raises:
+            ClientError: S3 error
+        """
+        client = self._get_client()
+        try:
+            response = client.get_bucket_versioning(Bucket=self.bucket)
+            return response.get("Status", "")
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            safe_endpoint = _mask_endpoint(self._endpoint)
+            log.warning(
+                "[nas_uploader] get_bucket_versioning error endpoint=%s bucket=%s code=%s",
+                safe_endpoint, self.bucket, code,
             )
             raise
 
