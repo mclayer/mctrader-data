@@ -42,7 +42,9 @@ class CompactorRunner:
         self,
         root: Path,
         *,
-        dual_writer: DualWriter | None = None,  # MCT-156: renamed from minio_uploader (legacy upload path removed; module deleted U5 R4)
+        # MCT-156: renamed from minio_uploader
+        # (legacy upload path removed; module deleted U5 R4)
+        dual_writer: DualWriter | None = None,
     ) -> None:
         self._root = root
         # MCT-168 (ADR-029 D1=B): dual_writer → L1Compactor pass-through
