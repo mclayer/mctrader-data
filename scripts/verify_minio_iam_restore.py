@@ -103,7 +103,7 @@ class IamVerifyReport:
     pass_count: int = 0
     fail_count: int = 0
     deny_verified: bool = False
-    all_pass: bool = False  # True if pass_count == 4 AND deny_verified
+    all_pass: bool = False  # True if pass_count == 5 AND deny_verified (FIX Iter 2: +SENTINEL_PUT action 0)
     fix_trigger: bool = False  # True if any fail
 
 
@@ -579,7 +579,7 @@ def main() -> int:
     log.info("=" * 60)
     log.info(f"Bucket: {report.bucket}")
     log.info(f"Endpoint: {report.endpoint}")
-    log.info(f"Pass Count: {report.pass_count}/4 (PUT, LIST, HEAD, GET)")
+    log.info(f"Pass Count: {report.pass_count}/5 (SENTINEL_PUT, PUT, LIST, HEAD, GET)")
     log.info(f"Fail Count: {report.fail_count}")
     log.info(f"DENY Verified: {report.deny_verified}")
     log.info(f"All Pass: {report.all_pass}")
