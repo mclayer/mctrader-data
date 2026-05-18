@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -386,7 +386,10 @@ class TestPutL1AlreadyPromotedNormalize:
         local_root.mkdir()
 
         # put_l1 에서는 path 가 local_root 하위에 있어야 함
-        parquet_path = local_root / "market" / "ch" / "sv=v1" / "tier=L1" / "ex=X" / "sym=S" / "date=D" / "part-abc.parquet"
+        parquet_path = (
+            local_root / "market" / "ch" / "sv=v1" / "tier=L1"
+            / "ex=X" / "sym=S" / "date=D" / "part-abc.parquet"
+        )
         parquet_path.parent.mkdir(parents=True, exist_ok=True)
         parquet_path.write_bytes(content)
 
@@ -583,12 +586,9 @@ class TestCommittedUnlinkFailedCounter:
         ap_val = compactor_local_self_delete_total.labels(
             tier="L2", outcome="already_promoted"
         )._value.get()
-        cuf_val = compactor_local_self_delete_total.labels(
-            tier="L2", outcome="committed_unlink_failed"
-        )._value.get()
         assert ap_val >= 1, "FileNotFoundError → already_promoted Counter emit (MRO 정상)"
         # committed_unlink_failed 는 PermissionError 경로 전용 — FNF에서는 emit 안 됨
-        # (단, 이전 테스트에서 emit됐을 수 있어 값 비교 불가 — 여기선 ap >= 1 만 확인)
+        # (이전 테스트에서 emit됐을 수 있어 값 비교 불가 — ap >= 1 만 확인으로 MRO 검증 충분)
 
 
 class TestLocalOnlyRetainedCounter:
