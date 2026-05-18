@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mctrader_data.metrics import compactor_tier_pending_segments
+from mctrader_data.nas_storage.nas_uploader import NASOperationalAlert
 from mctrader_data.wal.segment import scan_sealed
 from .l1 import L1Compactor
 from .l2 import L2Compactor
@@ -283,6 +284,15 @@ class CompactorRunner:
                 data=parquet_path,   # MCT-160 D6: Path streaming (DualWriter reads internally)
                 sha256=sha256,
             )
+        except NASOperationalAlert:
+            # INCIDENT-2026-05-17 amendment (ADR-027 §D5 amend): 4xx fail-fast propagate
+            # silent skip 금지 — nas_uploader 에서 이미 Counter emit + log.critical.
+            # compactor loop 까지 re-raise = caller (run_l2/run_l3) abort → operator alarm 명시.
+            log.critical(
+                "[compactor] NASOperationalAlert propagate tier=%s key=%s — operator 개입 의무",
+                tier, nas_key,
+            )
+            raise
         except Exception:
             log.exception("[compactor] DualWriter.write raised tier=%s key=%s", tier, nas_key)
             return

@@ -93,6 +93,16 @@ nas_key_helper_call_total = Counter(
     labelnames=("caller", "tier"),
 )
 
+# INCIDENT-2026-05-17 amendment (ADR-027 §D5 amend): NAS PUT 4xx operational alert
+# 4xx (auth/policy/quota 영구 오류) silent fallback 차단 surface — retry_queue 흡수 금지 의무.
+# tier ∈ {L1, L2, L3, unknown} (unknown = nas_uploader 직접 호출 경로의 default sentinel)
+# reason ∈ {auth_failed, policy_denied, quota_exceeded, bucket_missing} bounded low cardinality
+nas_put_operational_alert_total = Counter(
+    "mctrader_nas_put_operational_alert_total",
+    "NAS PUT 4xx operational alert (ADR-027 INCIDENT-2026-05-17 amendment, silent fallback 차단)",
+    labelnames=("tier", "reason"),
+)
+
 if TYPE_CHECKING:
     pass
 
