@@ -396,16 +396,70 @@ docker compose --profile migration run --rm rekey-migration \
 **compose service**: `rekey-migration` (profiles: ["migration"], restart: "no")
 **cross-ref**: ADR-034 §결정 4, U5-VERIFY (post-migration l1/ 잔존 0 확인)
 
+## MCT-202 cascade 완결 — 3-tier grace-0 eager cleanup (2026-05-18 LAND)
+
+EPIC-tier-promotion-single-source 의 마지막 child Story. MCT-189 (WAL→L1 grace-0 wiring 1/3) → MCT-202 (L1→L2 + L2→L3 + historical 3/3) cascade 완결. **사용자 가치 함수**: 컨테이너 disk-full 빈발 차단 (production /d/market 117GB 누적 해소).
+
+### root cause + fix (D-1 옵션 B)
+
+`runner.py:284 data=parquet_path` 동일 객체 전달 → `dual_writer.py:249 data != local_path` guard False → MCT-189 LAND callee `_promote_after_nas_put` 미진입 → L1/L2 source parquet 영구 잔존. **fix**: `DualWriter.write()` 에 `source_to_delete: Path | None = None` keyword-only 파라미터 추가 (callee guard 제거 회피, output self-unlink catastrophic regression 차단). caller 가 cascade intent 명시 전달.
+
+### caller wiring (3-tier production caller grep ≥1 의무, ADR-032 evidence triad)
+
+```python
+# _dispatch_dual_write (forward L2/L3 path) — runner.py:281-286
+result = self._dual_writer.write(
+    local_path=parquet_path, nas_key=nas_key, data=parquet_path,
+    sha256=sha256, source_to_delete=parquet_path,  # MCT-202 cascade
+)
+
+# _historical_dual_write (WS-A historical promotion) — runner.py:447-487
+result = dual_writer.write(
+    local_path=parquet_path, nas_key=nas_key, data=parquet_path,
+    sha256=sha256, source_to_delete=parquet_path,  # MCT-202 D-3 동형
+)
+```
+
+### Counter emit (19 series ≤ 50, ADR-027 §D6 cardinality 정합)
+
+| Counter | series | source line | 용도 |
+|---|---|---|---|
+| `compactor_local_self_delete_total{tier, outcome}` | 15 (3 tier × 5 outcome) | `dual_writer.py:372/386/396/411` | 5 outcome: `committed_unlinked` / `committed_unlink_failed` / `local_only_retained` / `hard_floor_retained` / `already_promoted` |
+| `mctrader_retry_orphan_total{tier}` | 3 | `dual_writer.py:385` | D-5 enqueue_retry Race-C orphan |
+| `mctrader_legacy_cleanup_race_noop_total` | 1 | `compactor/runner.py:404` | scan_and_cleanup_legacy race noop (§3.9 INV-SEC-5) |
+
+### P0 alarm 임계 (ADR-027 §D5 INCIDENT amendment 정합)
+
+`compactor_local_self_delete_total{outcome="committed_unlink_failed"}` rate < 0.1% 의무 — `except OSError` 분기 (`dual_writer.py:411`). silent unlink 실패 차단. rate 초과 시 P0 alarm 발동.
+
+### WAL 24h grace 폐기 (D-4)
+
+`.sealed` segment 도 `.compacted` sentinel + NAS commit 후 즉시 unlink. disaster recovery = bucket versioning=Enabled (MCT-161) + retry_queue (MCT-156) + MCT-173 backfill 3종 흡수.
+
+### Epic CLOSED prereq prod-6 신규 (cascade 14d production evidence gate)
+
+post-LAND 14d (2026-05-18 ~ **2026-06-01**) production evidence quad 4 series 동시 충족 + WAL 30G 실측 의무. Epic CLOSED 박제 자체는 3-layer 14d gate (§D8 cutoff 2026-09-01 + prod-5 2026-05-31 + prod-6 2026-06-01) 동시 충족 후 별 PR — 가장 늦은 §D8 기준 (≥ 2026-09-15).
+
+### cross-ref
+
+- RETRO: `c:/workspace/mclayer/mctrader-hub/docs/retros/RETRO-MCT-202.md` (165 lines, PMOAgent self-write, hub#404 박제)
+- EPIC-RESULTS partial amendment: `EPIC-RESULTS-EPIC-tier-promotion-single-source.md` §Amendment (hub#408 OPEN, `<TBD D+14 fill>` marker)
+- CO-3 closure: hub#407 OPEN (Codex env 복구 + P1-1 dual-peer PASS × 3)
+- domain knowledge: `mctrader-hub/docs/domain-knowledge/domain/tier-promotion/grace-0-local-delete.md` (3-tier cascade amendment LAND)
+
 ## 관련 ADR
 
+- ADR-009 §D12 (forward-only invariant) + §D12.2 (MCT-202 — historical sequential 순서 보존)
+- ADR-009 §D2.7 Amendment (MCT-163 — impl narrower, raw_json only nullable=True)
 - ADR-017 Amendment 2 (compactor source 규약, channel matrix SSOT)
+- ADR-017 §Amendment 4 (MCT-202 — cascade caller wiring)
 - ADR-027 Amendment 2 (silent-skip 차단 + allowlist.py fail-fast — MCT-166)
 - ADR-027 §D1 amendment box (U1-ADR / EPIC-nas-key-unification — l1/ sub-namespace 제거 cross-ref, 2026-05-17)
-- **ADR-027 §D5 INCIDENT-2026-05-17 amendment (NAS PUT 4xx fail-fast — silent fallback 차단, 2026-05-18, mctrader-hub SSOT)**
+- **ADR-027 §D5 INCIDENT-2026-05-17 amendment (NAS PUT 4xx fail-fast — silent fallback 차단, 2026-05-18, mctrader-hub SSOT)** + §D7 (MCT-202 — committed_unlink_failed P0 임계)
+- ADR-029 §D3+§D11 (MCT-202 — 3-tier cascade dimension 일반화)
 - ADR-029 §D9 amendment box (U1-ADR / EPIC-nas-key-unification — L1 ↔ L2/L3 key namespace 균질화, 2026-05-17)
+- ADR-032 §Amendment (MCT-202 / CFP-992 cross-repo sibling — review lane integration-dir 실행 evidence 강화, hub#405)
 - **ADR-034 (NAS Object Key Unification — 4-way split SSOT → single flat layout collapse, 2026-05-17, mctrader-hub SSOT)**
-- ADR-009 §D12 (forward-only invariant)
-- ADR-009 §D2.7 Amendment (MCT-163 — impl narrower, raw_json only nullable=True)
 
 ## NAS PUT 4xx fail-fast (ADR-027 INCIDENT-2026-05-17 amendment, 2026-05-18)
 
