@@ -228,9 +228,15 @@ class NASUploader:
                         aws_access_key_id=self._access_key,
                         aws_secret_access_key=self._secret_key,
                         config=Config(
-                            retries={"max_attempts": 1, "mode": "standard"},
-                            connect_timeout=10,
-                            read_timeout=120,
+                            # MCT-204 Layer 2 (P0 #2): boto3 timeout 박제.
+                            # MCT-204 실제 delta = max_attempts 1→3 + connect_timeout 10→30s.
+                            # read_timeout=120s 는 pre-MCT-204 기존 적용값 (delta 아님).
+                            # stall mitigation 핵심 = dedicated executor per step + asyncio.wait_for
+                            # (read_timeout 은 기존이므로 stall 재발 경로 = connect hang 에 한정).
+                            # ADR-027 §D5 INCIDENT-2026-05-19 amendment "silent stall 차단" base layer.
+                            retries={"max_attempts": 3, "mode": "standard"},  # MCT-204: 1→3
+                            connect_timeout=30,   # MCT-204: 10→30s (NAS LAN 환경 안전 margin)
+                            read_timeout=120,     # pre-MCT-204 기존 (delta 아님)
                         ),
                     )
         return self.__client
@@ -723,6 +729,34 @@ class NASUploader:
                 status="queued",
                 latency_ms=(time.perf_counter() - t_start) * 1000,
             )
+
+    def list_prefix_count(self, prefix: str, max_keys: int = 1) -> int:
+        """List objects under prefix and return KeyCount (head-of-list count).
+
+        Public helper for callers that need existence check via KeyCount > 0 without
+        touching the private boto3 client directly.  Replaces the pattern:
+            `nas_uploader._s3.list_objects_v2(...)` (attribute error in production).
+
+        Uses `list_objects_v2` with MaxKeys=max_keys (default 1) — cheap existence probe.
+
+        Args:
+            prefix: S3 key prefix to query (e.g. "market/orderbooksnapshot/schema_version=.../")
+            max_keys: MaxKeys parameter for list_objects_v2 (default 1, existence check only)
+
+        Returns:
+            int: KeyCount from S3 response (0 = no objects, ≥1 = at least one object exists)
+
+        Raises:
+            botocore.exceptions.ClientError: S3 error (caller decides to propagate or wrap)
+            botocore.exceptions.EndpointConnectionError: NAS unreachable
+        """
+        client = self._get_client()
+        resp = client.list_objects_v2(
+            Bucket=self.bucket,
+            Prefix=prefix,
+            MaxKeys=max_keys,
+        )
+        return int(resp.get("KeyCount", 0))
 
     def _list_objects(self, prefix: str) -> list[str]:
         """List object keys in bucket with given prefix.
