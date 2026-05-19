@@ -110,6 +110,63 @@ for channel in _CHANNELS_FOR_L2:  # ("transaction", "orderbooksnapshot", "orderb
 
 **chief 결정 (TestContractArch + OpRiskArch 통합)**: full asyncio 분리 = task lifecycle 복잡도 증가 + cycle_count drift 위험. **간소 형태 채택** — `_tick` 내 sequential 보존 + 각 step `asyncio.wait_for(timeout=MCTRADER_COMPACTOR_STEP_TIMEOUT_SECONDS)` wrap. timeout 시 `TimeoutError` catch → log warning + 다음 step 진행 (drop, 다음 tick 자연 재시도). cleanup 도 cycle_count gate 보존하되 timeout 적용.
 
+**(FIX 1/3, P0 #2) ThreadPoolExecutor slot 고갈 완화 — 3중 lock 박제**:
+
+기존 chief 결정 = `asyncio.wait_for` timeout drop **만** (main thread unblock). 그러나 DesignReviewPL P0 #2 = worker thread 가 ThreadPoolExecutor 안 stall 시 thread cancel 불가 (Python 제약) → 다음 cycle 마다 새 worker spawn + stall → default ThreadPoolExecutor `min(32, cpu+4)` slot 영구 점유 + 다른 step starvation.
+
+**완화 3중 lock (derived default, chief 통합)**:
+
+1. **boto3 `read_timeout=120s` + `connect_timeout=30s` (root cause fix)** — `NASUploader._s3` client config 박제. NAS GET stall 의 진정 원인 = boto3 default timeout = ∞. 120s timeout 적용 시 worker thread 자연 release. ADR-027 §D5 INCIDENT-2026-05-19 amendment 의 "silent stall 차단" 의 base layer.
+
+```python
+# src/mctrader_data/nas_storage/nas_uploader.py (Phase 2 modify)
+from botocore.config import Config
+
+_boto_config = Config(
+    read_timeout=120,        # NAS GET hang 차단 (default = ∞)
+    connect_timeout=30,
+    retries={"max_attempts": 3, "mode": "standard"},
+)
+self._s3 = boto3.client("s3", endpoint_url=endpoint, config=_boto_config, ...)
+```
+
+2. **dedicated `ThreadPoolExecutor` per step (slot 격리)** — L2/L3/cleanup/historical 4 step 각 별 instance, max_workers=2 each, 총 8 thread cap. default executor 와 분리 → 한 step stall slot exhaustion 이 다른 step 으로 propagate 0.
+
+```python
+# src/mctrader_data/compactor/runner.py (Phase 2 modify, Layer 2 확장)
+from concurrent.futures import ThreadPoolExecutor
+
+class CompactorRunner:
+    def __init__(self, ...):
+        self._executors = {
+            "l2": ThreadPoolExecutor(max_workers=2, thread_name_prefix="compactor-l2"),
+            "l3": ThreadPoolExecutor(max_workers=2, thread_name_prefix="compactor-l3"),
+            "cleanup": ThreadPoolExecutor(max_workers=2, thread_name_prefix="compactor-cleanup"),
+            "historical": ThreadPoolExecutor(max_workers=2, thread_name_prefix="compactor-hist"),
+        }
+
+    async def _run_step_with_timeout(self, name: str, fn) -> None:
+        ...
+        await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(self._executors[name], fn),
+            timeout=self._step_timeout,
+        )
+        ...
+
+    async def stop(self) -> None:
+        for ex in self._executors.values():
+            ex.shutdown(wait=False, cancel_futures=True)
+```
+
+3. **asyncio.wait_for=600s outer (main thread unblock)** — 기존 layer. 두 root layer (boto3 + dedicated executor) 가 진정 mitigation, 본 layer 는 worker stall 의 last-resort safety net.
+
+**3중 lock 진정 mitigation 효과**:
+- worker thread stall 시 boto3 timeout=120s → worker 자연 release (다음 cycle 새 worker spawn 안 필요)
+- 만일 boto3 timeout 미작동 (예: TCP keepalive 이슈) → dedicated executor 의 max_workers=2 가 본 step 만 영향 (다른 3 step 계속 작동)
+- 두 layer 모두 fail → asyncio.wait_for=600s 가 main thread unblock + log warning
+
+**Phase 2 후속 carry-over (P2 #1)**: full asyncio task 분리 (별 long-lived task per step + 별 cadence) = 별 Story KEY (TBD, MCT-204 RETRO 단계에서 PMOAgent 가 KEY 발행).
+
 **근거 (Refactor 옹호 → chief 반박 일부 채택)**:
 - spec §3 Layer 2 가 "asyncio.create_task 별 cadence" 제안. 그러나 task lifecycle (cancel / restart / exception propagation) 가 새 invariant 추가 → 단일 Story scope 폭증.
 - 핵심 invariant = "한 step stall 이 다른 step 진입 차단 안 함" (AC-1). `asyncio.wait_for` timeout drop 이 본 invariant 충족 + 변경 최소.
@@ -169,7 +226,7 @@ cleanup 도 동일 `_run_step_with_timeout("cleanup", ...)` 처리.
 3. sentinel `.l1-promoted` zero-byte marker write (재실행 skip)
 4. metric emit (`mctrader_historical_l1_reclaim_total{outcome}`)
 
-**API**:
+**API** (FIX 1/3, P0 #3 + P1 #8 outcome enum 6 enum 정합):
 ```python
 def reclaim_partition_l1_local(
     *,
@@ -179,31 +236,61 @@ def reclaim_partition_l1_local(
     symbol: str,
     channel: str,
     date_utc: date,
+    now_snapshot: date,  # caller monotonic snapshot (FIX 1/3 P0 #3)
 ) -> ReclaimOutcome:
     """L2 NAS HEAD verify → L1 unlink → sentinel write. 멱등 (sentinel 존재 시 skip)."""
 
 @dataclass
 class ReclaimOutcome:
-    outcome: Literal["ok", "skip_sentinel", "skip_today_window", "skip_nas_missing", "fail_verify"]
+    outcome: Literal[
+        "ok",
+        "skip_sentinel",
+        "skip_today_window",
+        "skip_forward_in_flight",   # FIX 1/3 P0 #3 (`.forward-processing` 존재)
+        "skip_nas_missing",
+        "fail_verify",
+    ]
     files_unlinked: int
     bytes_freed: int
 ```
 
-**caller**: `run_historical_promotion` ([runner.py:524-623](../../src/mctrader_data/compactor/runner.py#L524-L623)) 의 partition loop 종료 시점 (각 `(ex, sym, d)` partition 의 24-hour L2 NAS PUT + 1 L3 NAS PUT 완결 후, 다음 partition 진입 직전).
+**caller** (FIX 1/3, P1 #4 insertion point 명시 — **per-partition** 위치, all-partitions 종료 시점 아님):
+
+`run_historical_promotion` ([runner.py:524-623](../../src/mctrader_data/compactor/runner.py#L524-L623)) 의 partition loop 안 **각 `(ex, sym, d)` partition 별로**:
+
+1. partition 의 24-hour L2 dual-write 완료 (`_historical_dual_write tier=L2` × 24 hour) +
+2. partition 의 1 L3 dual-write 완료 (`_historical_dual_write tier=L3` × 1 day) **모두 commit 완료** 후,
+3. 다음 partition `(ex2, sym2, d2)` 진입 **직전** (즉 partition loop body 마지막 statement) 에 reclaim 호출.
+
+all-partitions 종료 후 일괄 reclaim **아님** (memory + race 회피).
 
 ```python
-# After existing L3 dual-write logic
-from mctrader_data.compactor.historical_reclaim import reclaim_partition_l1_local
-reclaim_outcome = reclaim_partition_l1_local(
-    root=root,
-    nas_uploader=dual_writer._uploader,
-    exchange=ex,
-    symbol=sym,
-    channel=channel,
-    date_utc=d,
-)
-counts[f"l1_reclaim_{reclaim_outcome.outcome}"] = counts.get(f"l1_reclaim_{reclaim_outcome.outcome}", 0) + 1
-counts["l1_reclaim_bytes_freed"] = counts.get("l1_reclaim_bytes_freed", 0) + reclaim_outcome.bytes_freed
+# src/mctrader_data/compactor/runner.py::run_historical_promotion partition loop body
+# (per-partition, AFTER 24-hour L2 + 1 L3 dual_write commit, BEFORE next partition entry)
+now_snapshot = ...  # caller cycle-entry snapshot (FIX 1/3 P0 #3)
+for (ex, sym, d) in partitions:
+    # ... existing 24-hour L2 dual_write loop
+    # ... existing 1 L3 dual_write
+    # === FIX 1/3 P1 #4 insertion point (per-partition) ===
+    from mctrader_data.compactor.historical_reclaim import reclaim_partition_l1_local
+    reclaim_outcome = reclaim_partition_l1_local(
+        root=root,
+        nas_uploader=dual_writer._uploader,
+        exchange=ex,
+        symbol=sym,
+        channel=channel,
+        date_utc=d,
+        now_snapshot=now_snapshot,
+    )
+    counts[f"l1_reclaim_{reclaim_outcome.outcome}"] = counts.get(f"l1_reclaim_{reclaim_outcome.outcome}", 0) + 1
+    counts["l1_reclaim_bytes_freed"] = counts.get("l1_reclaim_bytes_freed", 0) + reclaim_outcome.bytes_freed
+    # === / FIX 1/3 P1 #4 insertion point ===
+
+    # (FIX 1/3, P1 #10 Codex 3) partial completion abort/log policy:
+    # _historical_dual_write 가 NASOperationalAlert re-raise 시 partition loop abort.
+    # partition-level atomic 보장 (24-hour L2 partial PUT 케이스 reclaim 진입 0).
+    # log message format: "[historical] partition abort exchange=%s symbol=%s channel=%s date=%s
+    # error=%s reclaim_skipped=true" — operator 가 surface 인지.
 ```
 
 **4-HEAD verify pattern (incremental_l1_reclaim.py GATE-2 차용 + ADR-029 §D5 정합)**:
@@ -230,23 +317,108 @@ os.replace(tmp, sentinel)  # POSIX atomic
 **race 격리 invariant (INV-B 박제)**:
 
 ```python
-today_utc = datetime.now(timezone.utc).date()
-if date_utc >= today_utc - timedelta(days=1):
-    return ReclaimOutcome(outcome="skip_today_window", ...)
+# (FIX 1/3, P0 #3) monotonic snapshot — caller 가 cycle 진입 시점 single date snapshot 박제 후 helper 에 전달
+def reclaim_partition_l1_local(
+    *,
+    root: Path,
+    nas_uploader: NASUploader,
+    exchange: str,
+    symbol: str,
+    channel: str,
+    date_utc: date,
+    now_snapshot: date,  # caller monotonic snapshot (FIX 1/3 boundary race mitigation)
+) -> ReclaimOutcome:
+    # sentinel pre-check
+    sentinel = date_dir / ".l1-promoted"
+    if sentinel.exists():
+        return ReclaimOutcome(outcome="skip_sentinel", ...)
+
+    # forward window boundary check (monotonic snapshot 기반, sliding window race 차단)
+    if date_utc >= now_snapshot - timedelta(days=1):
+        return ReclaimOutcome(outcome="skip_today_window", ...)
+
+    # (FIX 1/3, P0 #3) forward in-flight sentinel check — forward _run_l2_for_parquet 가
+    # partition 진입 시 write, 완료 후 unlink. cross-cycle race 멱등 차단.
+    forward_sentinel = date_dir / ".forward-processing"
+    if forward_sentinel.exists():
+        return ReclaimOutcome(outcome="skip_forward_in_flight", ...)
+
+    # ... L2 NAS HEAD verify + L1 unlink + sentinel write
 ```
 
-forward path = `[today-1, today]` only (Layer 1), historical reclaim = `date < today-1` only — partition tuple intersection = ∅.
+**(FIX 1/3, P0 #3) day boundary race mitigation — 2 layer 통합**:
+
+기존 chief 결정 = `if date_utc >= today_utc - timedelta(days=1)` early-return 만. 그러나 DesignReviewPL P0 #3 = UTC 00:00:00 시점 sliding window boundary race — forward `_run_l2_for_parquet` in-flight 시 (now=N+1 직전 / window=[N-1, N]) historical reclaim 진입 (now=N+1 직후 / 이전 partition = date N-1 이 boundary 밖 진입 가능) = partition tuple `(ex, sym, channel, N-1)` 동시 access race.
+
+**완화 2 layer (derived default, chief 통합)**:
+
+1. **monotonic snapshot per cycle** — `_tick` / `run_historical_promotion` 진입 시점에 `now_snapshot = datetime.now(timezone.utc).date()` 단일 박제 후 caller chain 전체 전달. cycle 안 모든 boundary 비교가 single snapshot 기준 (sliding window 내부 race 차단).
+
+```python
+# src/mctrader_data/compactor/runner.py::_tick
+async def _tick(self) -> None:
+    self._cycle_count += 1
+    now_snapshot = datetime.now(timezone.utc).date()  # monotonic per cycle (FIX 1/3 P0 #3)
+
+    # forward _run_l2 / _run_l3 caller 가 now_snapshot 전달 (Layer 1 helper signature)
+    await self._run_step_with_timeout("l2", lambda: self._run_l2(now_snapshot=now_snapshot))
+    await self._run_step_with_timeout("l3", lambda: self._run_l3(now_snapshot=now_snapshot))
+    ...
+
+# src/mctrader_data/compactor/runner.py::run_historical_promotion
+def run_historical_promotion(*, root, exchange, channel, start_date, end_date, ...) -> dict:
+    now_snapshot = datetime.now(timezone.utc).date()  # monotonic per CLI invocation (FIX 1/3 P0 #3)
+    if end_date >= now_snapshot - timedelta(days=1):
+        raise ValueError(f"promote-historical end_date={end_date} must be < {now_snapshot - timedelta(days=1)} (today-1)")
+    # ... partition loop 가 now_snapshot 전달
+```
+
+2. **partition-level `.forward-processing` sentinel** — forward `_run_l2_for_parquet` 가 partition 진입 시 `<date_dir>/.forward-processing` write, 완료 후 unlink (try/finally 박제). historical `reclaim_partition_l1_local` 가 sentinel 존재 시 `skip_forward_in_flight` outcome return → 다음 cycle 자연 재시도. 멱등 (sentinel race = 동시 진입 시 historical skip + 다음 cycle 정상).
+
+```python
+# src/mctrader_data/compactor/runner.py::_run_l2_for_parquet
+def _run_l2_for_parquet(*, exchange, symbol, channel, date_utc, hour_utc, ...) -> None:
+    date_dir = root / "market" / channel / f"schema_version={schema}" / f"tier=L1" / \
+               f"exchange={exchange}" / f"symbol={symbol}" / f"date={date_utc.isoformat()}"
+    forward_sentinel = date_dir / ".forward-processing"
+    forward_sentinel.touch()  # signal forward in-flight
+    try:
+        # ... existing L2 compact + dual_write
+    finally:
+        forward_sentinel.unlink(missing_ok=True)  # release signal
+```
+
+**효과**:
+- monotonic snapshot per cycle → cycle 내부 boundary 비교 sliding 차단
+- `.forward-processing` sentinel → cycle 사이 race 멱등 차단 (historical 가 skip + 다음 cycle 정상)
+- INV-H wording 약화 (strict claim 폐기): "partition tuple ∅ overlap **best-effort (single cycle snapshot 기준), `.forward-processing` sentinel 가 cross-cycle race 멱등 차단**"
+
+forward path = `[now_snapshot-1, now_snapshot]` only (Layer 1), historical reclaim = `date < now_snapshot - timedelta(days=1)` only — partition tuple intersection = **best-effort ∅ (monotonic snapshot 기준) + `.forward-processing` sentinel 멱등 보강** (FIX 1/3 박제).
 
 ### §3.4 신규 metric (Prometheus)
 
 | metric | 종류 | label | source line |
 |---|---|---|---|
 | `mctrader_compactor_cleanup_cycle_delay_seconds` | Gauge | (none) | `runner.py::_tick` 진입 시점 |
-| `mctrader_compactor_step_stall_seconds` | Gauge | step (l2/l3/cleanup) | `runner.py::_run_step_with_timeout` timeout catch |
-| `mctrader_historical_l1_reclaim_total` | Counter | exchange/channel/outcome | `historical_reclaim.py::reclaim_partition_l1_local` |
+| `mctrader_compactor_step_stall_seconds` | Gauge | step (l2/l3/cleanup/historical) | `runner.py::_run_step_with_timeout` timeout catch |
+| `mctrader_historical_l1_reclaim_total` | Counter | exchange/channel/outcome (6 enum, FIX 1/3) | `historical_reclaim.py::reclaim_partition_l1_local` |
 | `mctrader_l3_pending_partitions` | Gauge | exchange/channel | `runner.py::_run_l3` 진입 시점 (discovered partition 수) |
 
 **emit module 결정 (CodebaseMapper 일치)**: `src/mctrader_data/metrics.py` (compactor_tier_pending_segments 정합). `nas_metrics/prometheus_exporters.py` = NAS-specific path (제외).
+
+### §3.5 empirical-source annotation (FIX 1/3, P1 #9 — ADR-068 I-5)
+
+본 Story 의 3 parameter empirical-source 명시 박제:
+
+| parameter | 값 | empirical source |
+|---|---|---|
+| `MCTRADER_COMPACTOR_STEP_TIMEOUT_SECONDS` | default 600s | (1) **production NAS GET measurement**: py-spy Thread 133 stall 박제 (idle 2h+) — Story §2.2 `runner.py:158` 6 sec/dispatch × 19,200 dispatch ≈ 32h/cycle. 600s = single dispatch worst-case (95p) × 50 = single step 의 sub-batch 진행 후 next step 진입 가능한 cap. (2) **systemd-style default**: 10 min = OS-level "long" timeout convention (서비스 health check 표준). (3) **boto3 read_timeout 정합**: boto3 client `read_timeout=120s` × `max_attempts=3` ≈ 360s upper bound + 240s margin. |
+| `cleanup_cycle_delay ≤ 300s` (AC-1 target) | 300s | **(1) `SCAN_INTERVAL_SECONDS=30s` × `LEGACY_CLEANUP_EVERY_N_CYCLES=12` = 360s base cadence**. (2) **container restart edge case** (P1 #11 Codex 4 결정): restart 직후 첫 cleanup 도달 시점 = 360s > 300s → AC-1 target wording 갱신 = "**steady state ≤ 300s, container restart 직후 첫 1 cycle 면제 (≤ 360s)**". 두 임계 명시 박제. (3) **operator perception**: 5분 = "사용자가 dashboard 새로고침 빈도" — 호소 #1 재발 차단 visibility target. |
+| pidfile `flock` grace | 60s | (1) **`flock(LOCK_EX|LOCK_NB)` retry interval default** (Linux util-linux flock(1) man page, `-w 60`). (2) **MCT-173 BackfillManifest 패턴 답습** (production verified). (3) **operator manual recovery window**: 60s = "operator 가 SIGTERM 후 cleanup 확인 + 재실행 결정" minimum. |
+| boto3 `read_timeout` | 120s | (1) **NAS GET 50MB worst-case latency** (MCT-148 PoC verified): p99 = 2870.65ms × 10 burst margin = 28.7s. 120s = 4x safety margin. (2) **MinIO server default `idle_timeout` = 90s** — client < server timeout 권고 (TCP keepalive 정합). (3) **botocore default `read_timeout = 60s`** 2x — production 측정 안전 margin. |
+| dedicated executor `max_workers=2` per step | 2 | (1) **production single-symbol partition concurrency**: per-step 동시 진행 partition = 1 (sequential), max_workers=2 = current + queued single buffer slot. (2) **memory budget**: per-thread NAS GET 50MB peak (MCT-203 size-gated cache verified) × 4 step × 2 worker = 400MB cap — production container 2GB memory limit 안전. (3) **CPU bound 0**: NAS GET = network bound, max_workers > 2 = CPU/memory waste. |
+
+**FIX 1/3 P1 #11 (Codex 4) AC-1 wording 정합 갱신 — Story §6 동시 갱신 의무 (별 commit)**.
 
 ## §4 영향 분석 + 회귀 방지 (Continuity)
 
@@ -282,10 +454,56 @@ Story §4.3 Continuity 표 cross-ref. 핵심 회귀 invariant:
 | 위험 | 발생 시나리오 | 완화 |
 |---|---|---|
 | Layer 2 `asyncio.wait_for` timeout 이 cycle_count drift 유발 | timeout 으로 cleanup step skip → cycle_count 증가 못함 → 다음 12-cycle gate 미트리거 | cycle_count 가 `_tick` 진입 시점 (timeout 무관) 증가하도록 보장 — `runner.py:131` 위치 보존. cleanup 자체는 cycle_count % 12 == 0 시점에 시도, timeout 시 drop, 다음 12-cycle = 다음 6-min 자연 재시도 |
-| L2 NAS HEAD verify 단순화 (KeyCount > 0) 가 L2 partial PUT 케이스 unlink 유발 | NAS L2 partition 가 일부 hour 만 PUT 완료 + L1 unlink → 데이터 손실 | MCT-202 D-3 sequential local-only flow + `_historical_dual_write` re-raise (4xx fail-fast) 가 partition-level atomic 보장 — partition 의 24-hour L2 모두 PUT committed 후 L1 reclaim 진입. INV-C 안전망 보조 (KeyCount=0 시 unlink 0). 추가 layer: chief 옵션 — partition-level L2 file count match (local L2 hour file 수 == NAS L2 KeyCount) 검증 (Phase 2 결정) |
-| promote-historical 동시 실행 (operator 실수 2회 시작) | 동시 unlink + sentinel race | INV-G pidfile flock (MCT-173 BackfillManifest 패턴 동형) — second 인스턴스 exit 2 |
+| L2 NAS HEAD verify 단순화 (KeyCount > 0) 가 L2 partial PUT 케이스 unlink 유발 | NAS L2 partition 가 일부 hour 만 PUT 완료 + L1 unlink → 데이터 손실 | **(FIX 1/3 P1 #1)** MCT-202 D-3 sequential local-only flow + `_historical_dual_write` re-raise (4xx fail-fast, ADR-027 §D5 INCIDENT-2026-05-17 정합) 가 partition-level atomic 보장 — partition 의 24-hour L2 모두 PUT committed 후 L1 reclaim 진입. partial completion 시 partition loop abort + reclaim 진입 0 (P1 #10 Codex 3 결정). INV-C 안전망 보조 (KeyCount=0 시 unlink 0). 추가 layer **본 Story scope 안 박제** (Phase 2 결정 모호 표현 제거): partition-level L2 file count match (local L2 hour file 수 == NAS L2 KeyCount) 검증 = GATE-2 단순 KeyCount > 0 + local L2 root 존재 합치 (full per-file HEAD 는 비용 폭증 회피, ADR-029 D3 amendment box 정합) |
+| promote-historical 동시 실행 (operator 실수 2회 시작) | 동시 unlink + sentinel race | INV-G pidfile flock (MCT-173 BackfillManifest 패턴 동형) — second 인스턴스 exit 2. **(FIX 1/3 P2 #6 wording)** pidfile grace 60s = `flock(LOCK_EX|LOCK_NB)` release 의존 (PID content 의존 X) — atexit handler + SIGTERM trap 이 flock release 직접 호출, 60s = stale lock detection timeout (`flock` retry interval) |
 | forward eager cascade 회귀 (MCT-202 AC 위반) | Layer 1+2 변경이 `_dispatch_dual_write source_to_delete` 의도 위반 | runner.py:288 (forward `_dispatch_dual_write source_to_delete=parquet_path`) + runner.py:494 (historical `_historical_dual_write source_to_delete=source_to_delete` caller-controlled) 양쪽 line touch 0 — grep gate `tests/integration/test_eager_cascade_regression.py` (MCT-202 회귀 박제) re-use |
 | ADR amendment sibling sync 충돌 (mctrader-data Phase 1 PR ↔ mctrader-hub PR) | 두 PR merge order 가 ADR amendment 의 Proposed → Accepted 전환 시점에 영향 | derived default: mctrader-data Phase 1 = "Proposed" status 박제 + mctrader-hub sibling PR 가 같은 phase. mctrader-data Phase 2 (impl) merge 후 mctrader-hub PR merge → Proposed → Accepted 전환. ADR-020 Amendment 1 §결정 9 (joint-phase narrow form) 정합 |
+| **(FIX 1/3, P0 #2)** Layer 2 `asyncio.wait_for` timeout drop 이 main thread 만 unblock — worker thread ThreadPoolExecutor slot 영구 점유 + 다른 step starvation | NAS GET stall 시 worker thread cancel 불가 (Python 제약) → 다음 cycle 마다 새 worker spawn + stall → default ThreadPoolExecutor `min(32, cpu+4)` slot 영구 점유 + 다른 step (cleanup, l3) starvation | **3중 lock 박제** (Layer 2 본문 cross-ref): (1) boto3 `read_timeout=120s` + `connect_timeout=30s` (root cause fix, ADR-027 §D5 INCIDENT-2026-05-19 amendment "silent stall 차단" base layer); (2) dedicated `ThreadPoolExecutor` per step (L2/L3/cleanup/historical 4 instance × max_workers=2, 총 8 thread cap, default executor 격리); (3) `asyncio.wait_for=600s` outer (main thread unblock last-resort). Phase 2 후속 full asyncio task 분리 별 Story carry-over (P2 #1) |
+| **(FIX 1/3, P0 #3)** day boundary race — UTC 00:00:00 sliding window 시점 partition tuple race | forward `_run_l2_for_parquet` in-flight (now=N+1 직전, window=[N-1, N]) + historical reclaim 진입 (now=N+1 직후, 이전 partition date=N-1 boundary 밖) → `(ex, sym, channel, N-1)` partition tuple 동시 access race. INV-H "0 overlap strict" claim 위반 가능 | **2 layer mitigation 박제** (Layer 3 본문 cross-ref): (1) monotonic `now_snapshot per cycle` — `_tick` / `run_historical_promotion` 진입 시점 single date 박제 후 caller chain 전체 전달; (2) partition-level `.forward-processing` sentinel — forward `_run_l2_for_parquet` 진입 시 write/완료 unlink, historical reclaim 가 sentinel 존재 시 `skip_forward_in_flight` outcome return. INV-H wording 약화: "best-effort ∅ overlap (single cycle snapshot 기준) + `.forward-processing` sentinel 멱등 cross-cycle race 차단" |
+
+## §7A 보안 설계 (FIX 1/3 P0 #1 — SecurityArch + OperationalRiskArch deputy 통합)
+
+Story §7A verbatim mirror. 본 § = Change Plan 측 박제 (DesignReviewPL P0 #1 lane checklist "§7 보안 설계 누락 → P0" 차단 해소).
+
+### §7A.1 trust boundary
+
+- **내부 compactor 경로 only** — forward `_tick` / `_run_l2` / `_run_l3` / `historical_reclaim.py` / `cli.py::promote-historical` 모두 mctrader-data 컨테이너 내부
+- **외부 input 0** — CLI arg = `--start/--end YYYY-MM-DD` + `--exchange/--channel` enum (`allowlist.py::validate_channel_exchange` 재사용)
+- **NAS endpoint** = 기존 DualWriter creds (ADR-027 §D5 NAS PUT 4xx fail-fast wired) 재사용
+
+### §7A.2 threat model
+
+- **N/A — 외부 attack surface 0**. compactor = internal background worker
+- 사유 (10자+): "내부 compactor 경로, 외부 input 0, 신규 attack surface 0"
+
+### §7A.3 auth/authz
+
+- **N/A — 기존 DualWriter creds 재사용**. `historical_reclaim.py` 가 `nas_uploader._s3` 동일 boto3 client 사용. IAM 권한 변경 = 0
+- 사유 (10자+): "기존 NAS DualWriter IAM 재사용, 신규 권한 0"
+
+### §7A.4 운영 리스크 5 sub-items (OperationalRiskArch deputy 본 §)
+
+| sub-item | 상태 | 박제 |
+|---|---|---|
+| **DR (disconnect recovery)** | 본문 | NAS endpoint disconnect 시 `boto3 EndpointConnectionError` raise → `ReclaimOutcome(outcome="fail_verify")` early-return + L1 unlink 0. 다음 6-min cycle 자연 재시도 |
+| **disconnect handling** | 본문 | NAS GET stall = 본 Story 진정 mitigation. Layer 2 3중 lock (boto3 read_timeout=120s + dedicated executor + asyncio.wait_for=600s) |
+| **clock drift / boundary** | 본문 | P0 #3 mitigation — monotonic snapshot per cycle + `.forward-processing` sentinel 멱등 |
+| **rate-limit** | N/A | partition tuple 별 1 LIST + 1 HEAD, production 4,608 partition × 2 / 6-min = 25.6 req/sec — well below MinIO default |
+| **env-isolation** | 본문 | `MCTRADER_COMPACTOR_STEP_TIMEOUT_SECONDS` + boto3 client config production-scope only |
+
+### §7A.5 민감 데이터
+
+- **N/A — 로그 메시지 = enum + 수치 only**. PII / API key / wallet address 0
+- 사유 (10자+): "log 메시지 enum + 수치 only, PII/secret 0"
+
+### §7A.6 위협↔완화 매트릭스
+
+- **N/A — 외부 위협 0**. 내부 race+stall = §7A.4 박제
+- 사유 (10자+): "외부 위협 0, 내부 race+stall = §7A.4 박제"
+
+### §7A.7 검증 의무
+
+- §7A.1 본문 ✅ / §7A.2 N/A 30자 ✅ / §7A.3 N/A 26자 ✅ / §7A.4 5 sub-items 박제 ✅ / §7A.5 N/A 30자 ✅ / §7A.6 N/A 27자 ✅
 
 ## §7 의존성 (Story §7 cross-ref)
 
@@ -316,18 +534,32 @@ Story §4.3 Continuity 표 cross-ref. 핵심 회귀 invariant:
 | `tests/integration/test_promote_historical_pidfile_lock.py` | 동시 실행 시 second 인스턴스 exit 2 | INV-G | +40 |
 | `tests/integration/test_l3_dispatch_normal.py` | L2 task 완료 무관 L3 진행 (cadence-only) | AC-4 | +60 |
 
-### §8.3 Performance baseline
+### §8.3 Performance baseline — FIX 1/3 P1 #5 protocol 박제
+
+**measurement environment**: Phase 2 integration test fixture (`tests/integration/test_compactor_forward_rglob_scope.py`) + production parity dev container (`docker compose --profile dev`).
+
+**fixture 생성 절차**:
+1. **synthetic historical L1 fixture** — `tmp_path / "market" / "orderbooksnapshot" / "schema_version=v1" / "tier=L1"` 안 5 date × 5 symbol × 24 hour = 600 part-*.parquet 파일 (각 1KB stub) 생성. date range = `[today - 7, today - 2]` (forward window 밖).
+2. **synthetic forward L1 fixture** — `tier=L1` 안 today + yesterday × 5 symbol × 24 hour = 240 part-*.parquet (forward window).
+3. **monitoring**: `pyfakefs` 또는 `unittest.mock.patch` 로 `Path.rglob` 호출 capture. file open count = `len(list(_run_l2(...)))` 측정.
+
+**measurement protocol**:
+- **iteration**: 30 reps per AC (MCT-148 NFR-2 협약 답습). mean / p95 / p99 보고.
+- **mean 10% 회귀 baseline**: PR-time 측정 vs main branch baseline mean — 10% deviation = `pytest --rolling-baseline` (MCT-148 baseline rolling pattern 답습) flag warning.
+- **CI signal**: `tests/integration/test_compactor_*` 통합 PR-time 실행 (≤ 5 min, MCT-148 dev container 정합).
 
 **AC-2 측정**:
-- Before (현재): `_run_l2` 1 invocation file open count = 16,918 (production 5/13~17 fixture)
-- After (목표): forward partition file count × 1.2 — production fixture 기준 forward partition file count ≈ 50 (today=0 + yesterday minimal) → 목표 ≤ 60
+- Before (현재 production): `_run_l2` 1 invocation file open count = 16,918 (production 5/13~17 실측 박제, py-spy 확인)
+- After (목표): forward partition file count × 1.2 — production fixture 기준 forward partition file count ≈ 50 (today=0 + yesterday minimal) → 목표 ≤ 60. fixture (24h × 5 sym × 2 day) = 240 base → 목표 ≤ 288.
+- **assertion (Phase 2 integration test)**: `assert _run_l2_file_open_count <= forward_partition_file_count * 1.2`
 
 **AC-1 측정**:
 - Before: cleanup_cycle_delay_seconds = ∞ (영원히 미진입)
-- After: ≤ 300s (5분 = SCAN_INTERVAL_SECONDS 30s × 10 cycle margin)
+- After (**FIX 1/3 P1 #11 Codex 4**): **steady state ≤ 300s** (5분 = `SCAN_INTERVAL_SECONDS 30s × 10 cycle margin`) **+ container restart 직후 첫 1 cycle 면제 (≤ 360s, restart edge case)**. Prometheus alert rule = `(cleanup_cycle_delay > 300) and (up{job="compactor"} == 1 for 1m)` (restart 직후 1분 면제).
 
 **AC-3 측정**:
-- production 5/13~17 fixture: ok+skip 합계 ≈ 20,754 (Story §6 AC-3 예상치). fail = 0 박제
+- production 5/13~17 fixture: ok+skip 합계 ≈ 20,754 (Story §6 AC-3 예상치). fail = 0 박제.
+- **assertion (Phase 2 integration test)**: `assert reclaim_outcome_counter[("ok", "skip_sentinel", "skip_nas_missing", "skip_forward_in_flight")].total > 0 and reclaim_outcome_counter[("fail_verify",)].total == 0`
 
 ### §8.4 §8.5 Stateful / restart invariant (TestContractArch — PL 결정 §8.5_active=true)
 
@@ -402,18 +634,49 @@ Story §4.3 Continuity 표 cross-ref. 핵심 회귀 invariant:
 - INV-D: sentinel 멱등 (re-entry 안전)
 - INV-F: sentinel write atomic (tempfile + os.replace, partial sentinel 차단)
 
-### §11.5 forward / historical race 격리 (DataMigration + OpRiskArch 통합)
+### §11.5 forward / historical race 격리 (DataMigration + OpRiskArch 통합) — FIX 1/3 갱신
 
-- partition tuple `(exchange, symbol, channel, date)` 격리: forward = `[today-1, today]` only, historical = `date < today-1` only
-- intersection = ∅ — race 가능성 = ZERO (INV-B + INV-A 합집합)
+- partition tuple `(exchange, symbol, channel, date)` 격리 (**FIX 1/3 P0 #3 wording 약화**):
+  - forward = `[now_snapshot - 1, now_snapshot]` only (**monotonic snapshot per cycle 기반**, sliding window race 차단)
+  - historical = `date < now_snapshot - timedelta(days=1)` only (caller monotonic snapshot 전달)
+- intersection = **best-effort ∅ (single cycle snapshot 기준)** — strict claim 폐기
+- cross-cycle race 멱등 차단 (FIX 1/3 P0 #3 2 layer mitigation):
+  1. **monotonic `now_snapshot` per cycle** — `_tick` / `run_historical_promotion` 진입 시점 단일 박제, caller chain 전체 전달
+  2. **`.forward-processing` sentinel** — forward `_run_l2_for_parquet` 진입 시 write, finally unlink. historical `reclaim_partition_l1_local` 가 sentinel 존재 시 `skip_forward_in_flight` outcome return → 다음 cycle 자연 재시도 (멱등)
 - 추가 안전망 (INV-G): pidfile flock — promote-historical 동시 실행 시 second exit 2
 
-### §11.6 Idempotency (DataMigration primary + OperationalRiskArch consult)
+### §11.5.1 Backfill (FIX 1/3, P1 #6 sub-section 신설)
 
-- sentinel-based: partition `date_dir / ".l1-promoted"` existence check (POSIX atomic)
-- restart safety: container restart 후 sentinel 존재 partition = skip
-- pidfile cleanup: SIGTERM trap + atexit handler (stale pidfile auto-cleanup with 60s grace)
+production 5/13~17 historical L1 130 GB 회수 = **operator one-shot CLI invocation** (`promote-historical`) per (exchange, channel, date range). batch size / throttle 정책:
+
+- **batch_size**: 1 partition `(exchange, symbol, channel, date)` 가 base unit. CLI invocation 당 partition 수 = `len(symbols) × len(date_range)`. 5/13~17 upbit orderbooksnapshot ≈ 192 symbol × 5 day = 960 partition.
+- **throttle**: per-partition sequential (parallelism = 1). 각 partition reclaim = 24-hour L2 dual_write + 1 L3 dual_write + 1 reclaim hook 호출 → 약 30s/partition × 960 = 8h 1회 invocation. operator 가 야간 invocation 권고 (peak hour 회피).
+- **interruption 안전**: SIGTERM trap → flock release + 현재 partition 의 forward_sentinel cleanup. 재실행 시 sentinel 존재 partition skip (멱등 보장).
+- **rollback**: sentinel `.l1-promoted` rm → 다음 invocation 가 4-HEAD verify 재실행 + L1 unlink 0 (이미 unlink 됨, idempotent).
+
+### §11.5.2 §4 API 분류 (FIX 1/3, P1 #7)
+
+본 Story 의 외부-facing 변경:
+
+| 변경 | 분류 | 영향 |
+|---|---|---|
+| CLI `promote-historical --start <today>` abort guard 추가 | **breaking** (operator) — 기존 `--start <today>` 입력 시 정상 작동 → 본 Story 후 abort + exit 2 + log error | operator runbook 갱신 의무 (CLAUDE.md Phase 2 박제). 영향 = operator manual invocation only (production 자동 호출 0). |
+| CLI `promote-historical --channel <ch>` enum 검증 (allowlist.py 재사용) | additive | 기존 정합, 신규 영향 0 |
+| `_discover_partitions_in_range(tier="L1")` default parameter 추가 | additive (internal) | 기존 caller (`run_historical_promotion`) 동작 동일 (default 값 보존) |
+| `ReclaimOutcome` 신규 dataclass | additive (internal) | 신규 module, 기존 caller 0 |
+| `DualWriter._uploader` 노출 (historical_reclaim caller 가 boto3 client 접근) | **internal-only** | mctrader-data 패키지 내부 사용, public API 변경 0 |
+| 4 신규 Prometheus metric | additive | Grafana dashboard 신규 패널 추가 (별 작업) |
+
+본 Story 의 외부 API breaking 변경 = **1건** (CLI abort guard). production 자동 호출 무관 (operator manual 영역). dev/staging operator 가 새 invariant 인지 의무 (Phase 2 LAND 시 commit message + CLAUDE.md 박제).
+
+### §11.6 Idempotency (DataMigration primary + OperationalRiskArch consult) — FIX 1/3 갱신
+
+- sentinel-based: partition `date_dir / ".l1-promoted"` existence check (POSIX atomic, `os.replace(tmp, sentinel)`)
+- **forward in-flight sentinel (FIX 1/3 P0 #3 신설)**: `date_dir / ".forward-processing"` — forward `_run_l2_for_parquet` 진입 시 `touch()`, finally `unlink(missing_ok=True)`. cross-cycle race 멱등 차단 (historical reclaim 가 sentinel 존재 시 `skip_forward_in_flight` outcome return → 다음 cycle 자연 재시도)
+- restart safety: container restart 후 sentinel 존재 partition = skip (`.l1-promoted` 박제 partition). `.forward-processing` 가 restart 시 잔존 시 (process kill 도중) → 다음 cycle forward `_run_l2_for_parquet` 진입 시 새 `touch()` 가 idempotent 덮어쓰기, finally unlink 정상 진행. historical reclaim 가 sentinel 존재 시 skip → forward 가 finally unlink 후 다음 reclaim cycle 정상 진행
+- pidfile cleanup: SIGTERM trap + atexit handler — flock release **직접 호출** (PID content 의존 X). 60s = `flock(LOCK_EX|LOCK_NB)` retry interval (second 인스턴스 가 stale lock 감지하는 timeout), stale pidfile auto-cleanup 의 의미
 - forward path 무관: forward `_dispatch_dual_write` 의 `source_to_delete` MCT-202 D-1 cascade 가 별도 idempotency 보장 (HEAD-then-PUT sha256 + atomic unlink)
+- monotonic snapshot: `_tick` / `run_historical_promotion` 진입 시점 single date 박제 → 동일 cycle 내 모든 boundary 비교 single snapshot 기준. restart 후 새 cycle = 새 snapshot (정상 idempotent)
 
 ### §11.7 Cross-repo isolation (ADR-034 §결정 5 정합)
 
