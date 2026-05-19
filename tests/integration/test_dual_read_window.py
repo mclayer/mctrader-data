@@ -13,7 +13,7 @@ call against the flat prefix only.  No l1/ legacy prefix is touched.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 from mctrader_data.nas_storage.nas_key import build_l1_prefix
 

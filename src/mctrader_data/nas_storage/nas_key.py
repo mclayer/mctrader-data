@@ -8,12 +8,12 @@ Public API:
     build_nas_key(parquet_path, root, *, tier=None) -> str        # 전 tier 평면 SSOT
     build_l1_prefix(*, channel, schema_ver, exchange, symbol, date_str) -> str   # SSOT-4 흡수
     build_nas_prefix(*, tier, channel, schema_ver, exchange, symbol, date_str) -> str  # SSOT-6 일반화 (l3.py 흡수)
-    build_legacy_nas_key(parquet_path, root) -> str               # [Deprecated — U3 도구 sole-caller / Epic close 후 maintenance 회수]
-    build_legacy_l1_discovery_prefix(*, channel) -> str           # [Deprecated — U3 도구 sole-caller / Epic close 후 maintenance 회수]
+    build_legacy_nas_key(parquet_path, root) -> str               # [Deprecated — U3 sole-caller]
+    build_legacy_l1_discovery_prefix(*, channel) -> str           # [Deprecated — U3 sole-caller]
 
 Private:
     _extract_tier(parquet_path, root) -> str | None
-    _legacy_key_to_canonical(key) -> str                          # [Deprecated — U3 도구 sole-caller / Epic close 후 maintenance 회수]
+    _legacy_key_to_canonical(key) -> str                          # [Deprecated — U3 sole-caller]
 
 ADR-034 §결정 2 verbatim (chief author amendment box draft — see .adr-amendment-drafts/).
 """
@@ -165,7 +165,7 @@ def build_nas_prefix(
 
 
 def build_legacy_nas_key(parquet_path: Path, root: Path) -> str:
-    """[Deprecated — U3 도구 sole-caller / Epic close 후 maintenance 회수] Phase 1 WS-B tier-aware NAS key 산출 (ADR-034 §결정 2).
+    """[Deprecated — U3 sole-caller] Phase 1 WS-B tier-aware NAS key 산출 (ADR-034 §결정 2).
 
     rekey.py (U3-MIGRATE forward-only artifact) 의 sole caller.
     scan_and_cleanup_legacy() 는 U5 에서 build_nas_key() 로 교체 완료.
@@ -223,7 +223,7 @@ def build_legacy_l1_discovery_prefix(*, channel: str) -> str:
 
 
 def _legacy_key_to_canonical(key: str) -> str:
-    """[Deprecated — U3 도구 sole-caller / Epic close 후 maintenance 회수] alias-overlap canonical key: legacy l1/ prefix → flat canonical.
+    """[Deprecated — U3 sole-caller] alias-overlap canonical key: legacy l1/ prefix → flat canonical.
 
     rekey.py (U3-MIGRATE forward-only artifact) 의 sole caller.
     "l1/market/..." → "market/..."  (legacy L1 prefix strip)

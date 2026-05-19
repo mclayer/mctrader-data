@@ -17,7 +17,7 @@ from pathlib import Path
 import contextlib
 from unittest.mock import MagicMock, patch
 
-from mctrader_data.nas_storage.nas_key import build_nas_key, build_legacy_nas_key
+from mctrader_data.nas_storage.nas_key import build_nas_key
 
 
 # ─── PUT caller unit-level tests (tier 1: monkeypatched Counter) ─────────────

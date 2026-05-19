@@ -160,11 +160,11 @@ def test_inv2_preserved_helpers_only_in_allowlist() -> None:
     (test_rekey*, test_nas_key*) to exact-filename set — closes drift vector where a
     future test file could be deliberately named to bypass the gate.
     """
-    NAS_KEY_PY = SRC_ROOT / "nas_storage" / "nas_key.py"
-    REKEY_PY = SRC_ROOT / "nas_migration" / "rekey.py"
+    nas_key_py = SRC_ROOT / "nas_storage" / "nas_key.py"
+    rekey_py = SRC_ROOT / "nas_migration" / "rekey.py"
 
     # Allowlist: (src) nas_key.py + rekey.py; (tests) exact-filename set
-    src_allowlist: set[Path] = {NAS_KEY_PY, REKEY_PY}
+    src_allowlist: set[Path] = {nas_key_py, rekey_py}
 
     # SEC-NIT-1: exact-filename test allowlist (drift-resistant — no prefix patterns).
     # Adding a new test that legitimately needs these helpers requires explicit
@@ -212,7 +212,7 @@ def test_inv2_preserved_helpers_only_in_allowlist() -> None:
     assert src_violations == [], (
         f"P2-1 drift violation: preserved deprecated helpers imported/called outside allowlist "
         f"({len(src_violations)} hit(s) in src/).\n"
-        f"Allowlist: {NAS_KEY_PY.name}, {REKEY_PY.name}.\n"
+        f"Allowlist: {nas_key_py.name}, {rekey_py.name}.\n"
         f"If a new file legitimately needs these helpers, add it to the P2-1 allowlist in this test.\n"
         + "\n".join(f"  {p}:{ln}: {ls}" for p, ln, ls in src_violations)
     )
