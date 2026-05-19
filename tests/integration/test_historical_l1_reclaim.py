@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
-from botocore.exceptions import ClientError, EndpointConnectionError
+from botocore.exceptions import ClientError, ConnectTimeoutError, EndpointConnectionError, ReadTimeoutError
 
 from mctrader_data.compactor.historical_reclaim import reclaim_partition_l1_local
 
@@ -240,3 +240,46 @@ class TestHistoricalL1Reclaim:
         assert result.outcome == "fail_verify"
         for f in l1_files:
             assert f.exists()
+
+    def test_connect_timeout_returns_fail_verify(self, tmp_path):
+        """P1 FIX 2/3 gate: ConnectTimeoutError → fail_verify, L1 preserved.
+
+        ConnectTimeoutError is a BotoCoreError subclass (not ClientError / EndpointConnectionError).
+        MCT-204 sets connect_timeout=30s → NAS connect hang = dominant failure mode.
+        Regression gate: historical_reclaim.py:169 except must cover BotoCoreError tree.
+        """
+        l1_files = _make_l1_files(tmp_path, HISTORICAL, count=2)
+        uploader = _make_nas_uploader()
+        uploader.list_prefix_count.side_effect = ConnectTimeoutError(endpoint_url="http://nas.local:9000")
+
+        result = reclaim_partition_l1_local(
+            root=tmp_path, nas_uploader=uploader, exchange=EXCHANGE,
+            symbol=SYMBOL, channel=CHANNEL, date_utc=HISTORICAL, now_snapshot=TODAY,
+        )
+
+        assert result.outcome == "fail_verify", (
+            "ConnectTimeoutError must be caught as fail_verify (not propagate to caller generic handler)"
+        )
+        for f in l1_files:
+            assert f.exists(), f"{f} must be preserved when NAS connect timeout occurs"
+
+    def test_read_timeout_returns_fail_verify(self, tmp_path):
+        """P1 FIX 2/3 gate: ReadTimeoutError → fail_verify, L1 preserved.
+
+        ReadTimeoutError is a BotoCoreError subclass (not ClientError / EndpointConnectionError).
+        Regression gate: historical_reclaim.py:169 except must cover BotoCoreError tree.
+        """
+        l1_files = _make_l1_files(tmp_path, HISTORICAL, count=2)
+        uploader = _make_nas_uploader()
+        uploader.list_prefix_count.side_effect = ReadTimeoutError(endpoint_url="http://nas.local:9000")
+
+        result = reclaim_partition_l1_local(
+            root=tmp_path, nas_uploader=uploader, exchange=EXCHANGE,
+            symbol=SYMBOL, channel=CHANNEL, date_utc=HISTORICAL, now_snapshot=TODAY,
+        )
+
+        assert result.outcome == "fail_verify", (
+            "ReadTimeoutError must be caught as fail_verify (not propagate to caller generic handler)"
+        )
+        for f in l1_files:
+            assert f.exists(), f"{f} must be preserved when NAS read timeout occurs"

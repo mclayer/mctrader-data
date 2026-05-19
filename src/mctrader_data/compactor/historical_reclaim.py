@@ -23,7 +23,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from botocore.exceptions import ClientError, EndpointConnectionError
+from botocore.exceptions import BotoCoreError, ClientError, EndpointConnectionError
 
 if TYPE_CHECKING:
     from mctrader_data.nas_storage.nas_uploader import NASUploader
@@ -166,8 +166,12 @@ def reclaim_partition_l1_local(
     )
     try:
         key_count = nas_uploader.list_prefix_count(l2_prefix, max_keys=1)
-    except (ClientError, EndpointConnectionError):
+    except (ClientError, BotoCoreError):
         # Network / auth / S3 errors — fail safe: preserve L1, let next cycle retry.
+        # BotoCoreError covers: EndpointConnectionError, ConnectTimeoutError, ReadTimeoutError
+        # and all other botocore network-layer exceptions (MRO-verified, P1 FIX 2/3).
+        # ClientError (S3 API error) is NOT a BotoCoreError subclass — kept explicit.
+        # AttributeError / TypeError (programming errors) are not in either tree → propagate (P0 intent preserved).
         log.exception(
             "[reclaim] NAS list_prefix_count failed exchange=%s symbol=%s channel=%s date=%s",
             exchange, symbol, channel, date_utc,
