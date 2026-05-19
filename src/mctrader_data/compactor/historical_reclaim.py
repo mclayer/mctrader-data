@@ -23,7 +23,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from botocore.exceptions import BotoCoreError, ClientError, EndpointConnectionError
+from botocore.exceptions import BotoCoreError, ClientError
 
 if TYPE_CHECKING:
     from mctrader_data.nas_storage.nas_uploader import NASUploader
@@ -69,7 +69,7 @@ class ReclaimOutcome:
 def reclaim_partition_l1_local(
     *,
     root: Path,
-    nas_uploader: "NASUploader",
+    nas_uploader: NASUploader,
     exchange: str,
     symbol: str,
     channel: str,

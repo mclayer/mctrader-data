@@ -14,7 +14,6 @@ from __future__ import annotations
 from datetime import date, timedelta
 from pathlib import Path
 
-import pytest
 
 from mctrader_data.compactor.runner import _discover_partitions_in_range
 
@@ -127,7 +126,9 @@ class TestDiscoverPartitionsInRange:
 
     def test_tier_l2_discovery(self, tmp_path):
         """tier=L2 parameter — discovers L2 partitions (not L1)."""
-        _make_l1_parquet(tmp_path, channel="orderbooksnapshot", exchange="upbit", symbol="KRW-BTC", date_utc=TODAY, tier="L2")
+        _make_l1_parquet(
+            tmp_path, channel="orderbooksnapshot", exchange="upbit", symbol="KRW-BTC", date_utc=TODAY, tier="L2"
+        )
 
         result = _discover_partitions_in_range(
             tmp_path, channel="orderbooksnapshot", start_date=YESTERDAY, end_date=TODAY, tier="L2"
@@ -137,7 +138,9 @@ class TestDiscoverPartitionsInRange:
 
     def test_tier_l1_default_does_not_find_l2(self, tmp_path):
         """Default tier=L1 does not return L2 partitions."""
-        _make_l1_parquet(tmp_path, channel="orderbooksnapshot", exchange="upbit", symbol="KRW-BTC", date_utc=TODAY, tier="L2")
+        _make_l1_parquet(
+            tmp_path, channel="orderbooksnapshot", exchange="upbit", symbol="KRW-BTC", date_utc=TODAY, tier="L2"
+        )
 
         result = _discover_partitions_in_range(
             tmp_path, channel="orderbooksnapshot", start_date=YESTERDAY, end_date=TODAY

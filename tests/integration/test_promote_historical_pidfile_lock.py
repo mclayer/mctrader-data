@@ -8,13 +8,10 @@ Tests:
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
-import threading
-import time
-from datetime import date, timedelta, datetime, timezone
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from datetime import timedelta, datetime, timezone
 
 import pytest
 
@@ -55,10 +52,8 @@ class TestPromoteHistoricalPidfileLock:
             blocked = True
         finally:
             if second_fd is not None:
-                try:
+                with contextlib.suppress(Exception):
                     fcntl.flock(second_fd, fcntl.LOCK_UN)
-                except Exception:
-                    pass
                 os.close(second_fd)
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)

@@ -995,10 +995,8 @@ def promote_historical_cmd(
                 os.close(_pidfile_fd)
             except Exception:
                 pass
-        try:
+        with contextlib.suppress(Exception):
             _pidfile.unlink(missing_ok=True)
-        except Exception:
-            pass
 
     try:
         import fcntl

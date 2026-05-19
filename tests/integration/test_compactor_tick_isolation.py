@@ -10,18 +10,15 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import date, timedelta
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
-import pytest
 
 from mctrader_data.compactor.runner import CompactorRunner, LEGACY_CLEANUP_EVERY_N_CYCLES
 
 
 def _make_runner(tmp_path: Path, step_timeout: float = 0.1) -> CompactorRunner:
     """Runner with short timeout for stall simulation."""
-    import os
     with patch.dict("os.environ", {"MCTRADER_COMPACTOR_STEP_TIMEOUT_SECONDS": str(step_timeout)}):
         return CompactorRunner(root=tmp_path)
 

@@ -12,14 +12,12 @@ import asyncio
 import time
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from mctrader_data.compactor.runner import CompactorRunner
 
 
 def _make_runner(tmp_path, step_timeout: float = 5.0) -> CompactorRunner:
     """Create a CompactorRunner with given step_timeout."""
-    import os
     with patch.dict("os.environ", {"MCTRADER_COMPACTOR_STEP_TIMEOUT_SECONDS": str(step_timeout)}):
         runner = CompactorRunner(root=tmp_path)
     return runner
@@ -92,11 +90,10 @@ class TestRunStepWithTimeout:
     def test_stop_shuts_down_executors(self, tmp_path):
         """stop() shuts down all executors."""
         runner = _make_runner(tmp_path, step_timeout=5.0)
-        # Record executors before shutdown
+        # Record executors before shutdown — used to verify _shutdown state after stop()
         exs = list(runner._executors.values())
 
         asyncio.run(runner.stop())
 
-        # After shutdown, executor should reject new tasks (but not raise on check)
-        # We just verify stop() returns without error
-        assert True  # if we get here, stop() didn't raise
+        # All executors must be shut down after stop() (INV-E: no dangling threads)
+        assert all(ex._shutdown for ex in exs), "All executors should be shut down after stop()"

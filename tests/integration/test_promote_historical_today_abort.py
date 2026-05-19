@@ -8,8 +8,7 @@ Tests:
 """
 from __future__ import annotations
 
-from datetime import date, timedelta, datetime, timezone
-from pathlib import Path
+from datetime import timedelta, datetime, timezone
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -88,16 +87,13 @@ class TestPromoteHistoricalTodayAbort:
         mock_dw = MagicMock()
         mock_dw._uploader = MagicMock()
 
-        try:
+        with pytest.raises(ValueError):
             run_historical_promotion(
                 tmp_path,
                 start_date=TODAY,
                 end_date=TODAY,
                 dual_writer=mock_dw,
             )
-            assert False, "Should have raised ValueError"
-        except ValueError:
-            pass  # Expected — no reclaim happened
 
 
 class TestRunHistoricalPromotionNowSnapshot:
@@ -110,8 +106,6 @@ class TestRunHistoricalPromotionNowSnapshot:
         captured_snapshots = []
 
         from mctrader_data.compactor import historical_reclaim
-
-        original_reclaim = historical_reclaim.reclaim_partition_l1_local
 
         def capturing_reclaim(**kwargs):
             captured_snapshots.append(kwargs.get("now_snapshot"))

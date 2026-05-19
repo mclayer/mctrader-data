@@ -135,7 +135,7 @@ class CompactorRunner:
                 loop.run_in_executor(self._executors[name], fn),
                 timeout=self._step_timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             elapsed = time.time() - start
             log.warning(
                 "[compactor] step timeout name=%s elapsed=%.1fs limit=%.1fs "
@@ -288,11 +288,8 @@ class CompactorRunner:
                 f"/exchange={exchange}/symbol={symbol}/date={date_utc.isoformat()}"
             )
         )
-        if _schema_dirs:
-            _date_dir = _schema_dirs[0]
-        else:
-            # Dir may not exist yet (L1 not compacted). Skip sentinel — no race possible.
-            _date_dir = None
+        # Dir may not exist yet (L1 not compacted). Skip sentinel — no race possible.
+        _date_dir = _schema_dirs[0] if _schema_dirs else None
 
         if _date_dir is not None:
             _forward_sentinel = _date_dir / ".forward-processing"

@@ -11,7 +11,6 @@ Tests all 6 outcome branches:
 """
 from __future__ import annotations
 
-import os
 from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch

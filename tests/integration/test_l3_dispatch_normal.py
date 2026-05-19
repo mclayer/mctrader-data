@@ -9,14 +9,12 @@ Tests:
 from __future__ import annotations
 
 import asyncio
-import time
 from datetime import date, timedelta
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
-import pytest
 
-from mctrader_data.compactor.runner import CompactorRunner, L3_INTERVAL_SECONDS
+from mctrader_data.compactor.runner import CompactorRunner
 
 
 TODAY = date(2026, 5, 19)

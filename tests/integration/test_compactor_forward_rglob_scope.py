@@ -10,9 +10,8 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import pytest
 
 from mctrader_data.compactor.runner import CompactorRunner, _CHANNELS_FOR_L2
 
