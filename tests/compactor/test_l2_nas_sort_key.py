@@ -118,7 +118,7 @@ def test_l2_nas_cache_byte_identical_and_run_id_stable(tmp_path, monkeypatch) ->
     early = [datetime(2026, 5, 13, 1, 0, i, tzinfo=timezone.utc) for i in range(3)]
     late = [datetime(2026, 5, 13, 2, 0, i, tzinfo=timezone.utc) for i in range(3)]
     _l1_prefix = (
-        "l1/market/orderbooksnapshot/schema_version=v/tier=L1/"
+        "market/orderbooksnapshot/schema_version=v/tier=L1/"
         "exchange=upbit/symbol=KRW-BTC/date=2026-05-13/node=N"
     )
     payloads = {

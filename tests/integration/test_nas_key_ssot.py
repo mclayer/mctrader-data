@@ -75,9 +75,9 @@ def test_no_relative_to_root_direct_call() -> None:
 
     Allowlist (nas_key 산출 외 path-traversal 가드 / wal segment / migration tool):
     - quarantine.py / orderbook_replay.py / l1.py (wal_root) / cli.py (wal_root) /
-      cutover_verifier.py (local_l2_root, migration audit) /
-      minio_uploader.py (U5 dead-code 회수 carrier, Finding 8 결정)
+      cutover_verifier.py (local_l2_root, migration audit)
     - dual_writer.py (pre-check guard, test compat "not under local_root" message)
+    Note: minio_uploader.py removed (U5-VERIFY R4 dead-code 회수).
     """
     pattern = re.compile(r'\.relative_to\((self\._)?(root|local_root)\)')
     additional_allowlist: set[Path] = {
@@ -86,7 +86,6 @@ def test_no_relative_to_root_direct_call() -> None:
         SRC_ROOT / "compactor" / "l1.py",
         SRC_ROOT / "cli.py",
         SRC_ROOT / "nas_migration" / "cutover_verifier.py",
-        SRC_ROOT / "compactor" / "minio_uploader.py",  # U5-VERIFY dead-code 회수 carrier (Finding 8)
         SRC_ROOT / "nas_storage" / "dual_writer.py",  # pre-check guard (test compat — "not under local_root")
     }
     exclude = LEGACY_HELPER_ALLOWLIST | additional_allowlist

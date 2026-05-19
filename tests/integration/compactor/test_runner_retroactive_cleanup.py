@@ -129,7 +129,7 @@ class TestScanAndCleanupLegacy:
         rel = "exchange=upbit/symbol=BTC/tier=L1/date=2024-01-01/part-001.parquet"
         local = _make_legacy_parquet(tmp_path, rel, content)
 
-        nas_key = f"l1/market/{rel}"
+        nas_key = f"market/{rel}"
         _put_object(minio_client, nas_key, content)
 
         result = scan_and_cleanup_legacy(tmp_path, nas_uploader)
@@ -170,7 +170,7 @@ class TestScanAndCleanupLegacy:
         rel = "exchange=upbit/symbol=XRP/tier=L1/date=2024-01-03/part-001.parquet"
         local = _make_legacy_parquet(tmp_path, rel, local_content)
 
-        nas_key = f"l1/market/{rel}"
+        nas_key = f"market/{rel}"
         _put_object(minio_client, nas_key, nas_content)
 
         result = scan_and_cleanup_legacy(tmp_path, nas_uploader)
@@ -191,7 +191,7 @@ class TestScanAndCleanupLegacy:
         content_ok = b"ok parquet content for count test abc"
         rel_ok = "exchange=bithumb/symbol=BTC/tier=L1/date=2024-02-01/part-001.parquet"
         local_ok = _make_legacy_parquet(tmp_path, rel_ok, content_ok)
-        nas_key_ok = f"l1/market/{rel_ok}"
+        nas_key_ok = f"market/{rel_ok}"
         _put_object(minio_client, nas_key_ok, content_ok)
 
         # 파일 2: NAS 부재 (→ preserved)
@@ -226,7 +226,7 @@ class TestScanAndCleanupLegacy:
             content = f"batch cap test content file {i} padding".encode()
             rel = f"exchange=upbit/symbol=BATCH{i}/tier=L1/date=2024-03-01/part-001.parquet"
             local = _make_legacy_parquet(tmp_path, rel, content)
-            nas_key = f"l1/market/{rel}"
+            nas_key = f"market/{rel}"
             _put_object(minio_client, nas_key, content)
             files.append(local)
 

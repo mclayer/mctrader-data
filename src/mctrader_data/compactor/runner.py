@@ -369,14 +369,15 @@ def scan_and_cleanup_legacy(
         # tier_label: parquet path parts 에서 tier= 컴포넌트 추출 (INV-1 Pattern C: relative_to 0)
         # parquet 는 root.glob("market/**/*.parquet") 결과 → parquet.parts 에 root prefix 포함.
         # tier= 컴포넌트 추출 = parquet.parts 에서 직접 (relative_to 호출 0 — Pattern C 준수).
-        from mctrader_data.nas_storage.nas_key import build_legacy_nas_key
+        from mctrader_data.nas_storage.nas_key import build_nas_key
         from mctrader_data.nas_metrics.prometheus_exporters import nas_key_helper_call_total
 
         tier_label = next(
             (p.split("=", 1)[1] for p in parquet.parts if p.startswith("tier=")),
             "unknown",  # F-codex-3: malformed-path safety sentinel (production fixture 0 hit 박제)
         )
-        nas_key = build_legacy_nas_key(parquet, root)
+        # U5-VERIFY: post-cutover forward-only canonical key (l1/ re-key complete).
+        nas_key = build_nas_key(parquet, root)
         nas_key_helper_call_total.labels(caller="runner_cleanup", tier=tier_label).inc()
         # segment_id = nas_key 자체 (상대 경로 표현 — relative_to 호출 0, Pattern C 준수)
         segment_id = f"legacy-{nas_key}"
