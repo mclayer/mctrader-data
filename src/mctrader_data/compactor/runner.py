@@ -42,7 +42,9 @@ class CompactorRunner:
         self,
         root: Path,
         *,
-        dual_writer: DualWriter | None = None,  # MCT-156: was minio_uploader (legacy MinioUploader removed)
+        # MCT-156: renamed from minio_uploader
+        # (legacy upload path removed; module deleted U5 R4)
+        dual_writer: DualWriter | None = None,
     ) -> None:
         self._root = root
         # MCT-168 (ADR-029 D1=B): dual_writer → L1Compactor pass-through
@@ -235,7 +237,7 @@ class CompactorRunner:
         """MCT-156/MCT-160: L3 compaction 후 DualWriter 로 NAS dual-write.
 
         MCT-160 D1+D2: date_utc caller 명시 전달.
-        legacy MinioUploader.upload() 호출 제거 (ADR-027 D4 amendment 박제).
+        legacy upload path 호출 제거 (ADR-027 D4 amendment, MCT-156; module deleted U5 R4).
         DualWriter inject 0 시 NAS upload 0 (degraded mode — test/local dev 호환).
         """
         out = self._l3.compact_day(
@@ -283,6 +285,7 @@ class CompactorRunner:
                 nas_key=nas_key,
                 data=parquet_path,   # MCT-160 D6: Path streaming (DualWriter reads internally)
                 sha256=sha256,
+                source_to_delete=parquet_path,   # MCT-202 D-1: eager cascade (output-local 자연 종결, D-2)
             )
         except NASOperationalAlert:
             # INCIDENT-2026-05-17 amendment (ADR-027 §D5 amend): 4xx fail-fast propagate
@@ -392,6 +395,16 @@ def scan_and_cleanup_legacy(
         except PromotionVerifyError:
             preserved += 1
             log.info("[runner] legacy preserved (HEAD verify fail) nas_key=%s", nas_key)
+        except FileNotFoundError:
+            # MCT-202 §3.9 sweep race window — eager cascade 가 이미 unlink. graceful no-op.
+            # errors 오염 차단 (§3.9 race_noop): race_noop = cleaned 도 errors 도 아닌 별도 카운터
+            log.debug(
+                "[runner] sweep race noop (eager cascade already unlinked) nas_key=%s", nas_key
+            )
+            from mctrader_data.nas_metrics.prometheus_exporters import (  # noqa: PLC0415
+                mctrader_legacy_cleanup_race_noop_total,
+            )
+            mctrader_legacy_cleanup_race_noop_total.inc()
         except (OSError, RuntimeError):
             errors += 1
             log.exception("[runner] legacy cleanup error nas_key=%s", nas_key)
@@ -446,12 +459,21 @@ def _discover_partitions_in_range(
 
 
 def _historical_dual_write(
-    parquet_path: Path, *, root: Path, tier: str, dual_writer: DualWriter
+    parquet_path: Path,
+    *,
+    root: Path,
+    tier: str,
+    dual_writer: DualWriter,
+    source_to_delete: Path | None = None,
 ) -> str:
     """L2/L3 parquet → DualWriter NAS PUT. CompactorRunner._dispatch_dual_write 동형.
 
     nas_key 산출 = single SSOT helper (ADR-034 §결정 2, U2-HELPER SSOT-5).
     Returns DualWriteResult.status (committed | local_only | hard_floor_blocked).
+
+    source_to_delete: caller 명시 optional — run_historical_promotion 은 L2 tier 에서
+    None (L3 compact_day 가 local L2 를 입력으로 읽어야 하므로 조기 unlink 금지).
+    MCT-202 D-3: cascade 의도 보존, sequential local-only flow 충돌 해소.
     """
     import hashlib
     from mctrader_data.nas_storage.nas_key import build_nas_key
@@ -464,9 +486,21 @@ def _historical_dual_write(
         for chunk in iter(lambda: f.read(8192), b""):
             sha.update(chunk)
     sha256 = sha.hexdigest()
-    result = dual_writer.write(
-        local_path=parquet_path, nas_key=nas_key, data=parquet_path, sha256=sha256,
-    )
+    try:
+        result = dual_writer.write(
+            local_path=parquet_path,
+            nas_key=nas_key,
+            data=parquet_path,
+            sha256=sha256,
+            source_to_delete=source_to_delete,
+        )
+    except NASOperationalAlert:
+        # MCT-202 D-3 + T-5: _historical_dual_write 도 4xx fail-fast re-raise (drift 차단)
+        log.critical(
+            "[historical] NASOperationalAlert propagate tier=%s key=%s — operator 개입 의무",
+            tier, nas_key,
+        )
+        raise
     # Status-aware logging (mirror _dispatch_dual_write level dispatch).
     if result.status == "committed":
         log.info("[historical] dual-write OK tier=%s key=%s", tier, nas_key)

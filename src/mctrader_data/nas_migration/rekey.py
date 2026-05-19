@@ -1098,6 +1098,12 @@ class RekeyOrchestrator:
                             done_count,
                         )
                         result.skipped_already_migrated += done_count
+                        # P2-NIT-1 (U3-FIX CodeReview carry): emit Prometheus counter
+                        # symmetric to :1128 / :1140 — M-10 carve-out observability
+                        # fidelity (avoids metric under-report by done_count per fire).
+                        self._m_skipped.labels(
+                            exchange=self._exchange, channel=self._channel
+                        ).inc(done_count)
                         return result
                 log.error(
                     "[rekey] ABORT: SILENT_ZERO_NO_CANDIDATES — _discover_l1_objects returned "

@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 
 import pyarrow.parquet as pq
 
+from mctrader_data.compactor._nas_stream_cache import _SizeGatedStreamCache
 from mctrader_data.compactor.l1 import _schema_version
 from mctrader_data.compactor.sort_key import _extract_min_ts
 from mctrader_data.metrics import compactor_writer_open_count
@@ -172,7 +173,6 @@ class L2Compactor:
         ADR-017 Amendment 3 (PR #96): content-derived sort (get_streaming → _extract_min_ts)
         적용 — 파일명 untrusted.
         """
-        from mctrader_data.nas_storage.get_streaming import get_streaming
         from mctrader_data.nas_storage.nas_key import build_l1_prefix
         from mctrader_data.nas_metrics.prometheus_exporters import nas_key_helper_call_total
 
@@ -201,9 +201,12 @@ class L2Compactor:
 
         # ADR-017 Amendment 3 (PR #96): content-derived sort on dedup'd keys.
         # get_streaming → pq.read_metadata stats.min (Primary) / iter_batches[:1] (Fallback).
+        # MCT-203: single _SizeGatedStreamCache per call — sort-phase fetch cached for
+        # schema + write phases (2N+1 → N actual GET, cache hit on schema+write).
+        _stream_cache = _SizeGatedStreamCache()
         keyed: list[tuple[str, datetime]] = []
         for k in candidate_keys:
-            stream = get_streaming(nas_uploader=self._nas_uploader, nas_key=k)  # type: ignore[arg-type]
+            stream = _stream_cache.get_or_fetch(self._nas_uploader, k)  # type: ignore[arg-type]
             ts = _extract_min_ts(stream)
             if ts is None:
                 _log.warning("[L2Compactor] skip 0-row NAS L1 key: %s", k)
@@ -214,9 +217,8 @@ class L2Compactor:
         if not nas_keys:
             return None
 
-        # Pre-read first object for schema
-        first_stream = get_streaming(nas_uploader=self._nas_uploader, nas_key=nas_keys[0])  # type: ignore[arg-type]
-        first_pf = pq.ParquetFile(first_stream)
+        # Pre-read first object for schema (cache hit if within threshold)
+        first_pf = pq.ParquetFile(_stream_cache.get_or_fetch(self._nas_uploader, nas_keys[0]))  # type: ignore[arg-type]
         schema = first_pf.schema_arrow
 
         # U5-VERIFY: post-cutover, all nas_keys are already flat canonical keys.
@@ -241,10 +243,8 @@ class L2Compactor:
             compactor_writer_open_count.labels(tier="L2").inc()
             try:
                 with pq.ParquetWriter(str(tmp), schema, compression="snappy") as writer:
-                    # Re-read first key (already consumed for schema)
                     for nas_key in nas_keys:
-                        stream = get_streaming(nas_uploader=self._nas_uploader, nas_key=nas_key)  # type: ignore[arg-type]
-                        pf = pq.ParquetFile(stream)
+                        pf = pq.ParquetFile(_stream_cache.get_or_fetch(self._nas_uploader, nas_key))  # type: ignore[arg-type]
                         for batch in pf.iter_batches(batch_size=1024):
                             ts_col = batch.column("ts_utc")
                             for i in range(len(ts_col)):

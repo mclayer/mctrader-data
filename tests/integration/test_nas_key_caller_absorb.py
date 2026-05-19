@@ -83,7 +83,7 @@ def test_runner_dispatch_dual_write_helper_routing(tmp_path: Path) -> None:
     mock_write_result = MagicMock()
     mock_write_result.status = "committed"
     mock_dual_writer = MagicMock()
-    mock_dual_writer.write.side_effect = lambda *, local_path, nas_key, data, sha256: (
+    mock_dual_writer.write.side_effect = lambda *, local_path, nas_key, data, sha256, source_to_delete=None: (
         received_keys.append(nas_key) or mock_write_result
     )
     mock_dual_writer.write.return_value = mock_write_result
@@ -161,7 +161,7 @@ def test_runner_historical_dual_write_helper_routing(tmp_path: Path) -> None:
     mock_write_result = MagicMock()
     mock_write_result.status = "committed"
     mock_dual_writer = MagicMock()
-    mock_dual_writer.write.side_effect = lambda *, local_path, nas_key, data, sha256: (
+    mock_dual_writer.write.side_effect = lambda *, local_path, nas_key, data, sha256, source_to_delete=None: (
         received_keys.append(nas_key) or mock_write_result
     )
     mock_dual_writer.write.return_value = mock_write_result
