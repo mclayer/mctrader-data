@@ -8,11 +8,17 @@ import gc  # stdlib — Python heap GC; named collision with .gc (filesystem GC)
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from mctrader_data.metrics import compactor_tier_pending_segments
+from mctrader_data.metrics import (
+    compactor_tier_pending_segments,
+    compactor_cleanup_cycle_delay_seconds,
+    compactor_step_stall_seconds,
+    compactor_l3_pending_partitions,
+)
 from mctrader_data.nas_storage.nas_uploader import NASOperationalAlert
 from mctrader_data.wal.segment import scan_sealed
 from .l1 import L1Compactor
@@ -35,6 +41,10 @@ DEFAULT_GC_INTERVAL_SECONDS = 300  # MCT-133 A1 Task 6c — stdlib gc.collect ca
 # MCT-189 D-3 C: legacy retroactive cleanup cadence.
 # 12 ticks × 30s = 360s ≈ every 6 minutes (ample cadence; 130 GB cleanup is best-effort).
 LEGACY_CLEANUP_EVERY_N_CYCLES: int = 12
+
+# MCT-204 Layer 2: channel list for L2 forward discovery (Layer 1 rglob replacement).
+# Matches L1Compactor _CHANNEL_SCHEMA_VERSION keys (all supported channels).
+_CHANNELS_FOR_L2: tuple[str, ...] = ("transaction", "orderbooksnapshot", "orderbookdepth")
 
 
 class CompactorRunner:
@@ -59,6 +69,7 @@ class CompactorRunner:
         self._last_l2 = 0.0
         self._last_l3 = 0.0
         self._last_gc = 0.0
+        self._last_cleanup_complete: float = 0.0  # MCT-204: cleanup completion timestamp (AC-1)
         # MCT-189 D-3 C: legacy cleanup cycle counter
         self._cycle_count: int = 0
         # MCT-133 A1 Task 6c: interval-driven stdlib gc.collect() to release
@@ -69,6 +80,22 @@ class CompactorRunner:
                 "MCTRADER_COMPACTOR_GC_INTERVAL_SECONDS",
                 str(DEFAULT_GC_INTERVAL_SECONDS),
             )
+        )
+        # MCT-204 Layer 2 (P0 #2): dedicated ThreadPoolExecutor per step (slot 격리).
+        # 한 step stall 이 다른 step starvation 으로 propagate 차단.
+        # max_workers=2 per step: current + queued single buffer. 총 8 thread cap.
+        # ADR-027 §D5 INCIDENT-2026-05-19 amendment "silent stall 차단" mitigation layer 2.
+        self._executors: dict[str, ThreadPoolExecutor] = {
+            "l2": ThreadPoolExecutor(max_workers=2, thread_name_prefix="compactor-l2"),
+            "l3": ThreadPoolExecutor(max_workers=2, thread_name_prefix="compactor-l3"),
+            "cleanup": ThreadPoolExecutor(max_workers=2, thread_name_prefix="compactor-cleanup"),
+            "historical": ThreadPoolExecutor(max_workers=2, thread_name_prefix="compactor-hist"),
+        }
+        # MCT-204 Layer 2: asyncio.wait_for timeout (last-resort main thread unblock).
+        # env MCTRADER_COMPACTOR_STEP_TIMEOUT_SECONDS (default 600s).
+        # Empirical source: ADR-027 §D5 INCIDENT-2026-05-19 §3.5 박제.
+        self._step_timeout = float(
+            os.environ.get("MCTRADER_COMPACTOR_STEP_TIMEOUT_SECONDS", "600")
         )
 
     async def run(self) -> None:
@@ -83,8 +110,45 @@ class CompactorRunner:
                 log.exception("[compactor] tick error")
             await asyncio.sleep(SCAN_INTERVAL_SECONDS)
 
+    async def stop(self) -> None:
+        """MCT-204 Layer 2: shutdown dedicated ThreadPoolExecutors on graceful stop."""
+        for name, ex in self._executors.items():
+            try:
+                ex.shutdown(wait=False, cancel_futures=True)
+                log.debug("[compactor] executor shutdown name=%s", name)
+            except Exception:
+                log.exception("[compactor] executor shutdown error name=%s", name)
+
+    async def _run_step_with_timeout(self, name: str, fn) -> None:
+        """MCT-204 Layer 2: run fn in dedicated executor with asyncio.wait_for timeout.
+
+        timeout = MCTRADER_COMPACTOR_STEP_TIMEOUT_SECONDS (default 600s).
+        On TimeoutError: log warning + emit compactor_step_stall_seconds Gauge + return
+        (다음 step 진입 — starvation 차단 INV-E).
+        Worker thread stall 시 boto3 read_timeout=120s 가 먼저 worker release (root cause fix).
+        asyncio.wait_for = last-resort main thread unblock safety net.
+        """
+        start = time.time()
+        try:
+            loop = asyncio.get_running_loop()
+            await asyncio.wait_for(
+                loop.run_in_executor(self._executors[name], fn),
+                timeout=self._step_timeout,
+            )
+        except asyncio.TimeoutError:
+            elapsed = time.time() - start
+            log.warning(
+                "[compactor] step timeout name=%s elapsed=%.1fs limit=%.1fs "
+                "— dropping step, next tick will retry",
+                name, elapsed, self._step_timeout,
+            )
+            compactor_step_stall_seconds.labels(step=name).set(elapsed)
+
     async def _tick(self) -> None:
         now = time.time()
+        # MCT-204 (FIX 1/3 P0 #3): monotonic now_snapshot — single date박제 per cycle.
+        # 전체 _tick 안 boundary 비교가 단일 snapshot 기준 (sliding window race 차단).
+        now_snapshot = datetime.now(timezone.utc).date()
 
         # MCT-134 A2 Task 7: snapshot sealed-segment list once per tick so we can
         # both publish the L1 pending-segments gauge AND drive L1 compaction
@@ -104,6 +168,12 @@ class CompactorRunner:
         )
         compactor_tier_pending_segments.labels(tier="L3").set(pending_l3)
 
+        # MCT-204 AC-1: cleanup cycle delay Gauge — set on each tick entry.
+        # _last_cleanup_complete=0.0 = "never run yet", skip emit to avoid misleading metric.
+        if self._last_cleanup_complete > 0:
+            delay = now - self._last_cleanup_complete
+            compactor_cleanup_cycle_delay_seconds.set(delay)
+
         for sealed in sealed_list:
             try:
                 p = self._l1.compact_segment(sealed)
@@ -111,13 +181,18 @@ class CompactorRunner:
             except Exception:
                 log.exception("[compactor] L1 failed %s", sealed)
 
+        # MCT-204 Layer 1+2: _run_l2 / _run_l3 with now_snapshot + dedicated executor + timeout.
         if now - self._last_l2 >= L2_INTERVAL_SECONDS:
             self._last_l2 = now
-            await asyncio.get_running_loop().run_in_executor(None, self._run_l2)
+            await self._run_step_with_timeout(
+                "l2", lambda: self._run_l2(now_snapshot=now_snapshot)
+            )
 
         if now - self._last_l3 >= L3_INTERVAL_SECONDS:
             self._last_l3 = now
-            await asyncio.get_running_loop().run_in_executor(None, self._run_l3)
+            await self._run_step_with_timeout(
+                "l3", lambda: self._run_l3(now_snapshot=now_snapshot)
+            )
 
         # MCT-133 A1 Task 6c: interval-driven stdlib gc.collect (Python heap)
         # — distinct from run_gc() below which deletes filesystem .compacted markers.
@@ -128,6 +203,7 @@ class CompactorRunner:
 
         # MCT-189 D-3 C: retroactive legacy cleanup (pre-wiring era parquet files).
         # Best-effort; errors are logged but never propagate to stop the main loop.
+        # MCT-204: cycle_count 증가 = _tick 진입 시점 (timeout 무관) — cycle_count drift 차단.
         self._cycle_count += 1
         if self._cycle_count % LEGACY_CLEANUP_EVERY_N_CYCLES == 0:
             _nas_uploader_ref = (
@@ -137,42 +213,53 @@ class CompactorRunner:
             )
             if _nas_uploader_ref is not None:
                 try:
-                    await asyncio.get_running_loop().run_in_executor(
-                        None,
-                        scan_and_cleanup_legacy,
-                        self._root,
-                        _nas_uploader_ref,
+                    await self._run_step_with_timeout(
+                        "cleanup",
+                        lambda: scan_and_cleanup_legacy(self._root, _nas_uploader_ref),
                     )
+                    self._last_cleanup_complete = time.time()  # AC-1 target tracking
                 except Exception:
                     log.exception("[compactor] legacy cleanup tick error — continuing")
 
         run_gc(self._root)
 
-    def _run_l2(self) -> None:
-        """MCT-160 D2: today + yesterday 2일치 명시 scan + hour 24-loop."""
-        now_utc = datetime.now(timezone.utc)
-        today = now_utc.date()
+    def _run_l2(self, *, now_snapshot: date | None = None) -> None:
+        """MCT-204 Layer 1: forward L2 scope축소 — _discover_partitions_in_range 재사용.
+
+        Before (MCT-160): (self._root / "market").rglob("*/tier=L1/**/part-*.parquet")
+        After: _discover_partitions_in_range(channel=*, start_date=yesterday, end_date=today)
+        → historical 16,918 file iter 제거 → INV-A: date < today-1 partition 0-read.
+
+        now_snapshot: caller monotonic date snapshot (FIX 1/3 P0 #3 boundary race mitigation).
+        """
+        if now_snapshot is None:
+            now_snapshot = datetime.now(timezone.utc).date()
+        today = now_snapshot
         yesterday = today - timedelta(days=1)
 
-        seen: set[tuple] = set()
-        for parquet in (self._root / "market").rglob("*/tier=L1/**/part-*.parquet"):
+        for channel in _CHANNELS_FOR_L2:
             try:
-                exchange = _extract_partition(parquet, "exchange")
-                symbol = _extract_partition(parquet, "symbol")
-                channel = parquet.parts[list(parquet.parts).index("market") + 1]
-
-                for date_utc in [today, yesterday]:
-                    for hour in range(24):
-                        key = (exchange, symbol, channel, date_utc, hour)
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        self._run_l2_for_parquet(
-                            exchange=exchange, symbol=symbol, channel=channel,
-                            date_utc=date_utc, hour_utc=hour,
-                        )
+                partitions = _discover_partitions_in_range(
+                    self._root,
+                    channel=channel,
+                    start_date=yesterday,
+                    end_date=today,
+                )
             except Exception:
-                log.exception("[compactor] L2 dispatch failed %s", parquet)
+                log.exception("[compactor] L2 discover failed channel=%s", channel)
+                continue
+            for ex, sym, d in partitions:
+                for hour in range(24):
+                    try:
+                        self._run_l2_for_parquet(
+                            exchange=ex, symbol=sym, channel=channel,
+                            date_utc=d, hour_utc=hour,
+                        )
+                    except Exception:
+                        log.exception(
+                            "[compactor] L2 dispatch failed channel=%s ex=%s sym=%s date=%s hour=%d",
+                            channel, ex, sym, d, hour,
+                        )
 
     def _run_l2_for_parquet(
         self,
@@ -189,42 +276,98 @@ class CompactorRunner:
         ADR-027 D4 amendment 박제 — Stage 3 wiring obligation.
         MCT-168: ADR-027 §D5 "L1 NAS upload 금지" invariant 폐기 (ADR-029 D1=B 채택).
         L1 NAS dual-write = L1Compactor.compact_segment() 내부 put_l1() 직접 호출 (D1=B).
-        """
-        out = self._l2.compact_hour(
-            exchange=exchange, symbol=symbol, channel=channel,
-            date_utc=date_utc, hour_utc=hour_utc,
-        )
-        if out is None:
-            return
-        from mctrader_data.metrics import record_l2_compaction
-        record_l2_compaction(exchange=exchange, symbol=symbol, channel=channel)
-        if self._dual_writer is not None:
-            self._dispatch_dual_write(out, tier="L2")
 
-    def _run_l3(self) -> None:
-        """MCT-160 D1+D2: L3 today + yesterday."""
-        now_utc = datetime.now(timezone.utc)
-        today = now_utc.date()
+        MCT-204 (FIX 1/3 P0 #3): .forward-processing sentinel — signal historical reclaim
+        that this partition is currently being processed (cross-cycle race mitigation INV-I).
+        """
+        # Locate the L1 date_dir for the forward-processing sentinel.
+        # Best-effort: glob the first matching schema_version dir.
+        _schema_dirs = list(
+            self._root.glob(
+                f"market/{channel}/schema_version=*/tier=L1"
+                f"/exchange={exchange}/symbol={symbol}/date={date_utc.isoformat()}"
+            )
+        )
+        if _schema_dirs:
+            _date_dir = _schema_dirs[0]
+        else:
+            # Dir may not exist yet (L1 not compacted). Skip sentinel — no race possible.
+            _date_dir = None
+
+        if _date_dir is not None:
+            _forward_sentinel = _date_dir / ".forward-processing"
+            try:
+                _date_dir.mkdir(parents=True, exist_ok=True)
+                _forward_sentinel.touch()
+            except OSError:
+                _forward_sentinel = None  # type: ignore[assignment]
+                log.debug("[compactor] forward sentinel touch failed (non-fatal)")
+        else:
+            _forward_sentinel = None  # type: ignore[assignment]
+
+        try:
+            out = self._l2.compact_hour(
+                exchange=exchange, symbol=symbol, channel=channel,
+                date_utc=date_utc, hour_utc=hour_utc,
+            )
+            if out is None:
+                return
+            from mctrader_data.metrics import record_l2_compaction
+            record_l2_compaction(exchange=exchange, symbol=symbol, channel=channel)
+            if self._dual_writer is not None:
+                self._dispatch_dual_write(out, tier="L2")
+        finally:
+            # INV-I: unlink sentinel regardless of success/failure (FIX 1/3 P0 #3)
+            if _forward_sentinel is not None:
+                try:
+                    Path(_forward_sentinel).unlink(missing_ok=True)
+                except OSError:
+                    log.debug("[compactor] forward sentinel unlink failed (non-fatal)")
+
+    def _run_l3(self, *, now_snapshot: date | None = None) -> None:
+        """MCT-204 Layer 1: forward L3 scope축소 — _discover_partitions_in_range tier=L2 재사용.
+
+        MCT-160 D1+D2: today + yesterday (ADR-017 Amendment 3 정합).
+        now_snapshot: caller monotonic date snapshot (FIX 1/3 P0 #3 boundary race mitigation).
+        INV-A: date < today-1 partition 0-read (L3 동형).
+        """
+        if now_snapshot is None:
+            now_snapshot = datetime.now(timezone.utc).date()
+        today = now_snapshot
         yesterday = today - timedelta(days=1)
 
-        seen: set[tuple] = set()
-        for parquet in (self._root / "market").rglob("*/tier=L2/**/part-*.parquet"):
+        for channel in _CHANNELS_FOR_L2:
             try:
-                exchange = _extract_partition(parquet, "exchange")
-                symbol = _extract_partition(parquet, "symbol")
-                channel = parquet.parts[list(parquet.parts).index("market") + 1]
-
-                for date_utc in [today, yesterday]:
-                    key = (exchange, symbol, channel, date_utc)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    self._run_l3_for_parquet(
-                        exchange=exchange, symbol=symbol, channel=channel,
-                        date_utc=date_utc,
-                    )
+                partitions = _discover_partitions_in_range(
+                    self._root,
+                    channel=channel,
+                    start_date=yesterday,
+                    end_date=today,
+                    tier="L2",
+                )
             except Exception:
-                log.exception("[compactor] L3 dispatch failed %s", parquet)
+                log.exception("[compactor] L3 discover failed channel=%s", channel)
+                continue
+
+            # MCT-204 AC-4: emit l3_pending_partitions Gauge per (exchange, channel).
+            # Aggregate by (exchange, channel) for cardinality control.
+            _exchange_partition_counts: dict[str, int] = {}
+            for ex, _sym, _d in partitions:
+                _exchange_partition_counts[ex] = _exchange_partition_counts.get(ex, 0) + 1
+            for ex, cnt in _exchange_partition_counts.items():
+                compactor_l3_pending_partitions.labels(exchange=ex, channel=channel).set(cnt)
+
+            for ex, sym, d in partitions:
+                try:
+                    self._run_l3_for_parquet(
+                        exchange=ex, symbol=sym, channel=channel,
+                        date_utc=d,
+                    )
+                except Exception:
+                    log.exception(
+                        "[compactor] L3 dispatch failed channel=%s ex=%s sym=%s date=%s",
+                        channel, ex, sym, d,
+                    )
 
     def _run_l3_for_parquet(
         self,
@@ -425,18 +568,27 @@ def _discover_partitions_in_range(
     start_date: date,
     end_date: date,
     exchange: str | None = None,
+    tier: str = "L1",
 ) -> list[tuple[str, str, date]]:
-    """root/market/<channel>/schema_version=*/tier=L1/exchange=*/symbol=*/date=*/ 파티션 발견.
+    """root/market/<channel>/schema_version=*/tier=<tier>/exchange=*/symbol=*/date=*/ 파티션 발견.
+
+    MCT-204 Layer 1: tier parameter 추가 (default="L1", backward-compat).
+    _run_l2 caller = tier="L1" (default). _run_l3 caller = tier="L2".
+    run_historical_promotion caller = tier="L1" (기존 동작 보존).
 
     Returns sorted list of (exchange, symbol, partition_date) within [start_date, end_date] inclusive.
     `exchange` 가 주어지면 해당 거래소만, 아니면 발견된 모든 거래소.
-    L1 파일이 1개 이상 있는 파티션만 반환 (빈 디렉터리 무시).
+    tier 파일이 1개 이상 있는 파티션만 반환 (빈 디렉터리 무시).
+
+    ADR-027 §D7 amendment (forward path partition discovery boundary):
+    forward caller 는 start_date=yesterday / end_date=today 강제 (rglob outer iter 차단).
+    historical caller 는 start_date/end_date 명시 (run_historical_promotion).
     """
     out: list[tuple[str, str, date]] = []
     channel_root = root / "market" / channel
     if not channel_root.exists():
         return out
-    for date_dir in channel_root.glob("schema_version=*/tier=L1/exchange=*/symbol=*/date=*"):
+    for date_dir in channel_root.glob(f"schema_version=*/tier={tier}/exchange=*/symbol=*/date=*"):
         try:
             ex = next(p.split("=", 1)[1] for p in date_dir.parts if p.startswith("exchange="))
             sym = next(p.split("=", 1)[1] for p in date_dir.parts if p.startswith("symbol="))
@@ -530,33 +682,51 @@ def run_historical_promotion(
     exchange: str | None = None,
     channel: str = "orderbooksnapshot",
 ) -> dict[str, int]:
-    """date-bounded one-shot historical tier promotion (WS-A).
+    """date-bounded one-shot historical tier promotion (WS-A) + L1 local reclaim (MCT-204 Layer 3).
 
     forward _run_l2/_run_l3 가 [today, yesterday] 만 처리 → 그 너머는 영구 미승급.
     이 함수는 명시 date 범위 [start_date, end_date] 의 L1 → L2 (hour=0..23) → NAS PUT
     + L3 (day) → NAS PUT 을 일회성으로 수행. forward 윈도우 코드 불변.
 
-    무손실 게이트: dual_writer.write committed 분기 (forward 와 동일). 회수 단계는 별 —
-    WS-B sweep (scan_and_cleanup_legacy in main) 이 다음 6분 cycle 에서 promote_l1
-    4중 HEAD verify 통과 시 local L1 reclaim.
-
-    재실행 안전: deterministic run_id 출력 파일명 + NAS PUT HEAD-then-PUT sha256
-    idempotency. channel 한정 + #48 회피.
+    MCT-204 Layer 3 추가:
+    - INV-B: end_date >= now_snapshot-1 → ValueError abort (forward window 진입 차단).
+    - per-partition L1 local reclaim (reclaim_partition_l1_local) — L2+L3 commit 후 hook.
+    - now_snapshot per invocation (FIX 1/3 P0 #3 monotonic snapshot).
 
     Returns:
         {
-          "partitions_processed": int,   # number of (exchange, symbol, date) partitions visited
-          "l2_compacted": int,            # L2 hour-buckets with NAS status == "committed"
-          "l3_compacted": int,            # L3 day rollups with NAS status == "committed"
-          "skipped_no_l1": int,           # hour-slots (NOT partitions) where compact_hour
-                                          # returned None (no L1 in that hour)
-          "errors": int,                  # exception raises + non-committed NAS statuses
-                                          # (local_only / hard_floor_blocked / unknown)
+          "partitions_processed": int,
+          "l2_compacted": int,
+          "l3_compacted": int,
+          "skipped_no_l1": int,
+          "errors": int,
+          "l1_reclaim_ok": int,        # MCT-204: L1 reclaim ok count
+          "l1_reclaim_skipped": int,   # MCT-204: L1 reclaim skip (sentinel/window/nas) count
+          "l1_bytes_freed": int,       # MCT-204: bytes freed from L1 local
         }
     """
+    from mctrader_data.compactor.historical_reclaim import (
+        reclaim_partition_l1_local,
+        emit_reclaim_metric,
+    )
+
+    # MCT-204 (FIX 1/3 P0 #3): monotonic snapshot per CLI invocation.
+    now_snapshot = datetime.now(timezone.utc).date()
+
+    # INV-B: abort guard — forward window partition 진입 차단.
+    # ADR-029 D1=B amendment (historical L1 reclaim verify-after pattern) 정합.
+    if end_date >= now_snapshot - timedelta(days=1):
+        raise ValueError(
+            f"[historical] end_date={end_date} must be < {now_snapshot - timedelta(days=1)} "
+            f"(today-1={now_snapshot - timedelta(days=1)}). "
+            "promote-historical only operates on historical partitions outside the forward window."
+        )
+
+    _nas_uploader = dual_writer._uploader if dual_writer is not None else None  # type: ignore[union-attr]
+
     log.info(
-        "[historical] start exchange=%s channel=%s range=[%s..%s]",
-        exchange or "*", channel, start_date, end_date,
+        "[historical] start exchange=%s channel=%s range=[%s..%s] now_snapshot=%s",
+        exchange or "*", channel, start_date, end_date, now_snapshot,
     )
     partitions = _discover_partitions_in_range(
         root, channel=channel, start_date=start_date, end_date=end_date, exchange=exchange,
@@ -566,12 +736,14 @@ def run_historical_promotion(
     l2 = L2Compactor(root=root, nas_uploader=None)
     l3 = L3Compactor(root=root, nas_uploader=None)
 
-    counts = {
+    counts: dict[str, int] = {
         "partitions_processed": 0, "l2_compacted": 0, "l3_compacted": 0,
         "skipped_no_l1": 0, "errors": 0,
+        "l1_reclaim_ok": 0, "l1_reclaim_skipped": 0, "l1_bytes_freed": 0,
     }
     for ex, sym, d in partitions:
         counts["partitions_processed"] += 1
+        partition_errors = 0
         for hour in range(24):
             try:
                 out = l2.compact_hour(
@@ -583,21 +755,35 @@ def run_historical_promotion(
                     ex, sym, d, hour,
                 )
                 counts["errors"] += 1
+                partition_errors += 1
                 continue
             if out is None:
                 counts["skipped_no_l1"] += 1
                 continue
             try:
                 status = _historical_dual_write(out, root=root, tier="L2", dual_writer=dual_writer)
+            except NASOperationalAlert:
+                # Partition-level abort on 4xx fail-fast (ADR-027 §D5, P1 #10 Codex 3).
+                log.critical(
+                    "[historical] partition abort exchange=%s symbol=%s channel=%s date=%s "
+                    "error=NASOperationalAlert reclaim_skipped=true",
+                    ex, sym, channel, d,
+                )
+                counts["errors"] += 1
+                partition_errors += 1
+                raise  # propagate to CLI caller
             except Exception:
                 log.exception("[historical] L2 dual-write failed path=%s", out)
                 counts["errors"] += 1
+                partition_errors += 1
                 continue
             if status == "committed":
                 counts["l2_compacted"] += 1
             else:
                 # local_only / hard_floor_blocked / unknown → not a clean NAS commit
                 counts["errors"] += 1
+                partition_errors += 1
+
         try:
             out = l3.compact_day(exchange=ex, symbol=sym, channel=channel, date_utc=d)
         except Exception:
@@ -605,19 +791,69 @@ def run_historical_promotion(
                 "[historical] L3 compact failed ex=%s sym=%s date=%s", ex, sym, d,
             )
             counts["errors"] += 1
-            continue
-        if out is not None:
+            partition_errors += 1
+        else:
+            if out is not None:
+                try:
+                    status = _historical_dual_write(
+                        out, root=root, tier="L3", dual_writer=dual_writer
+                    )
+                except NASOperationalAlert:
+                    log.critical(
+                        "[historical] partition abort exchange=%s symbol=%s channel=%s date=%s "
+                        "error=NASOperationalAlert reclaim_skipped=true",
+                        ex, sym, channel, d,
+                    )
+                    counts["errors"] += 1
+                    partition_errors += 1
+                    raise
+                except Exception:
+                    log.exception("[historical] L3 dual-write failed path=%s", out)
+                    counts["errors"] += 1
+                    partition_errors += 1
+                else:
+                    if status == "committed":
+                        counts["l3_compacted"] += 1
+                    else:
+                        counts["errors"] += 1
+                        partition_errors += 1
+
+        # === MCT-204 Layer 3: per-partition L1 local reclaim (FIX 1/3 P1 #4 insertion point) ===
+        # Called AFTER 24-hour L2 dual_write + 1 L3 dual_write all processed, BEFORE next partition.
+        # Reclaim only if partition had zero errors (partition-level atomic safety).
+        if partition_errors == 0 and _nas_uploader is not None:
             try:
-                status = _historical_dual_write(out, root=root, tier="L3", dual_writer=dual_writer)
+                reclaim_outcome = reclaim_partition_l1_local(
+                    root=root,
+                    nas_uploader=_nas_uploader,
+                    exchange=ex,
+                    symbol=sym,
+                    channel=channel,
+                    date_utc=d,
+                    now_snapshot=now_snapshot,
+                )
+                if reclaim_outcome.outcome == "ok":
+                    counts["l1_reclaim_ok"] += 1
+                    counts["l1_bytes_freed"] += reclaim_outcome.bytes_freed
+                else:
+                    counts["l1_reclaim_skipped"] += 1
+                    emit_reclaim_metric(
+                        exchange=ex, channel=channel, outcome=reclaim_outcome.outcome
+                    )
             except Exception:
-                log.exception("[historical] L3 dual-write failed path=%s", out)
-                counts["errors"] += 1
-                continue
-            if status == "committed":
-                counts["l3_compacted"] += 1
-            else:
-                # local_only / hard_floor_blocked / unknown → not a clean NAS commit
-                counts["errors"] += 1
+                log.exception(
+                    "[historical] L1 reclaim error exchange=%s symbol=%s channel=%s date=%s",
+                    ex, sym, channel, d,
+                )
+                # Non-fatal: reclaim failure = L1 preserved (INV-C). Continue next partition.
+        elif partition_errors > 0:
+            log.info(
+                "[historical] reclaim_skipped (partition errors=%d) "
+                "exchange=%s symbol=%s channel=%s date=%s",
+                partition_errors, ex, sym, channel, d,
+            )
+            counts["l1_reclaim_skipped"] += 1
+        # === / MCT-204 Layer 3 insertion point ===
 
     log.info("[historical] done counts=%s", counts)
     return counts

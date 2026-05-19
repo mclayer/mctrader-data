@@ -424,3 +424,78 @@ docker compose --profile migration run --rm rekey-migration \
 **검증 SSOT**: `tests/nas_storage/test_nas_uploader_4xx_fail_fast.py` (19 tests, 4xx/5xx parametrize) + `tests/compactor/test_dispatch_dual_write_4xx_fail_fast.py` (caller-level 2 tests).
 
 **Out of scope**: bucket policy/IAM 운영 복원 = ops/infra runbook (별 인계, MCT-200 EPIC carry-over).
+
+## compactor _tick stall 격리 + historical L1 회수 (MCT-204, 2026-05-19)
+
+**단일 origin**: forward `_run_l2` NAS GET stall → `_tick` 후속 step (L3/cleanup/cycle_count++) 영구 미진입. historical L1 130 GB 회수 경로 부재.
+
+### Layer 1 — forward rglob 축소 (INV-A, ADR-027 §D7 amendment)
+
+`_run_l2` / `_run_l3` = `_discover_partitions_in_range(start=today-1, end=today)` 호출 (기존 `(root/market).rglob("*/tier=L1/**/part-*.parquet")` 제거).
+
+- **INV-A**: forward 가 `date < today-1` partition 0-read (grep gate: `_run_l2`/`_run_l3` 안 `(root/market).rglob` active code 0).
+- `_CHANNELS_FOR_L2 = ("transaction", "orderbooksnapshot", "orderbookdepth")` — 채널 순회.
+- `_discover_partitions_in_range` signature 갱신: `tier: str = "L1"` parameter 추가 (default="L1", backward-compat). L3 caller = `tier="L2"`.
+
+### Layer 2 — `_tick` step 격리 3중 lock (P0 #2, ADR-027 §D5 INCIDENT-2026-05-19)
+
+1. **boto3 `read_timeout=120s` + `connect_timeout=30s`** — NASUploader `_get_client()` Config. NAS GET hang 의 root cause fix (`default=∞` → 120s).
+2. **dedicated `ThreadPoolExecutor` per step** — L2/L3/cleanup/historical 4 instance × max_workers=2. `self._executors` dict. default executor 격리 → 한 step stall 이 다른 step starvation 차단.
+3. **`asyncio.wait_for(timeout=MCTRADER_COMPACTOR_STEP_TIMEOUT_SECONDS=600s)` outer** — `_run_step_with_timeout(name, fn)` helper. TimeoutError catch → log + `compactor_step_stall_seconds{step}` Gauge emit + 다음 step 진입 (INV-E).
+
+**`_tick` 보존 불변**:
+- `cycle_count` 증가 = `_tick` 진입 시점 (timeout 무관) — drift 차단.
+- `_last_cleanup_complete` update = cleanup 완료 시 (`compactor_cleanup_cycle_delay_seconds` Gauge 박제).
+- `now_snapshot = datetime.now(timezone.utc).date()` 단일 박제 per tick (FIX 1/3 P0 #3 monotonic snapshot).
+
+### Layer 3 — historical L1 회수 (INV-B/C/D/F/G/H/I, ADR-029 D1=B amendment)
+
+**신규 모듈**: `src/mctrader_data/compactor/historical_reclaim.py`.
+
+**API**: `reclaim_partition_l1_local(*, root, nas_uploader, exchange, symbol, channel, date_utc, now_snapshot) → ReclaimOutcome`.
+
+**ReclaimOutcome.outcome 6 enum**:
+- `ok`: L2 NAS KeyCount>0 + local L2 dir exists → L1 rglob unlink + sentinel write.
+- `skip_sentinel`: `.l1-promoted` 존재 → idempotent skip (INV-D).
+- `skip_today_window`: `date_utc >= now_snapshot-1` → forward window (INV-B).
+- `skip_forward_in_flight`: `.forward-processing` 존재 → cross-cycle race skip (INV-I).
+- `skip_nas_missing`: NAS `list_objects_v2 KeyCount==0` → L2 미commit (INV-C).
+- `fail_verify`: local L2 dir missing → L1 preserved (INV-C).
+
+**insertion point**: `run_historical_promotion` partition loop body 마지막 (24-hour L2 + 1 L3 dual_write committed, partition_errors==0 시에만).
+
+**INV-B (CLI abort guard)**: `promote-historical --end >= today-1` → `ValueError` abort + exit 2. **breaking change** (operator runbook 인지 의무).
+
+**INV-G (pidfile lock)**: `<root>/audit/historical-reclaim.pid` flock exclusive. second instance → exit 2. SIGTERM trap + atexit handler flock release (Linux/macOS only, Windows skip).
+
+**day boundary race mitigation (FIX 1/3 P0 #3)**:
+1. **monotonic `now_snapshot` per cycle** — `_tick` / `run_historical_promotion` 진입 시점 single date박제.
+2. **`.forward-processing` sentinel** — `_run_l2_for_parquet` 진입 시 touch, finally unlink. historical reclaim = sentinel 존재 시 `skip_forward_in_flight`.
+
+### 신규 metric 4종 (src/mctrader_data/metrics.py)
+
+| metric | 종류 | label | source |
+|---|---|---|---|
+| `mctrader_compactor_cleanup_cycle_delay_seconds` | Gauge | — | `_tick` 진입 시점 |
+| `mctrader_compactor_step_stall_seconds` | Gauge | step | `_run_step_with_timeout` TimeoutError |
+| `mctrader_historical_l1_reclaim_total` | Counter | exchange/channel/outcome | `historical_reclaim.py` |
+| `mctrader_l3_pending_partitions` | Gauge | exchange/channel | `_run_l3` 발견 partition 수 |
+
+### promote-historical CLI 갱신 (MCT-204 operator 인지 의무)
+
+```bash
+# INV-B: --end < today-1 강제 (today-1 포함 불가 — forward window 침범 차단)
+# 기존 --end today-1 정상 작동 → 본 Story 후 exit 2 (breaking change)
+docker exec mctrader-compactor python -m mctrader_data.cli promote-historical \
+  --root /var/lib/mctrader/data \
+  --start 2026-05-13 --end 2026-05-17 \  # end < today-1 (2026-05-18)
+  --exchange upbit --channel orderbooksnapshot
+```
+
+출력 카운터 추가: `l1_reclaim_ok` / `l1_reclaim_skipped` / `l1_bytes_freed`.
+
+### ADR amendment 3종 (mctrader-hub, Proposed → Accepted 후 갱신)
+
+- `ADR-027 §D5 INCIDENT-2026-05-19` — _tick stall pattern + per-step timeout 차단.
+- `ADR-027 §D7` — forward path partition discovery boundary (`_discover_partitions_in_range` start=today-1 강제).
+- `ADR-029 D1=B amendment` — historical L1 reclaim verify-after pattern (L2 NAS HEAD + sentinel 멱등).

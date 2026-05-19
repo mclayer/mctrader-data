@@ -918,10 +918,16 @@ def promote_historical_cmd(
     exchange: str | None,
     channel: str,
 ) -> None:
-    """WS-A: date-bounded historical L1->L2->NAS+L3->NAS one-shot promotion.
+    """WS-A + MCT-204: date-bounded historical L1->L2->NAS+L3->NAS one-shot promotion + L1 reclaim.
 
     Promotes historical L1 parquets outside the forward window (today/yesterday)
-    to L2/L3 tiers. exit 1 if counts['errors'] > 0.
+    to L2/L3 tiers, then reclaims L1 local storage per partition.
+
+    MCT-204 Layer 3 guards:
+    - INV-B: --end >= today-1 → exit 2 (forward window 진입 차단, breaking change).
+    - INV-G: pidfile flock exclusive — concurrent second instance → exit 2.
+
+    exit 1 if counts['errors'] > 0. exit 2 on bad args or concurrency conflict.
 
     Example::
 
@@ -930,9 +936,11 @@ def promote_historical_cmd(
             --start 2026-05-13 --end 2026-05-15 \\
             --exchange upbit
     """
+    import atexit
     import logging
+    import signal
     import sys
-    from datetime import date as _date
+    from datetime import date as _date, datetime as _datetime, timezone as _timezone, timedelta as _timedelta
     from pathlib import Path
 
     from mctrader_data.compactor.runner import run_historical_promotion
@@ -958,6 +966,65 @@ def promote_historical_cmd(
             err=True,
         )
         sys.exit(2)
+
+    # MCT-204 INV-B: forward window guard — abort if end_date >= today-1.
+    # Breaking change (MCT-204 §11.5.2 API 분류): operator runbook 인지 의무.
+    now_utc = _datetime.now(_timezone.utc).date()
+    today_minus_1 = now_utc - _timedelta(days=1)
+    if end_date >= today_minus_1:
+        click.echo(
+            f"[ERROR] --end {end_date} must be < {today_minus_1} (today-1={today_minus_1}). "
+            "promote-historical only operates on historical partitions outside the forward window. "
+            "(MCT-204 INV-B)",
+            err=True,
+        )
+        sys.exit(2)
+
+    # MCT-204 INV-G: pidfile flock exclusive lock — concurrent instance exit 2.
+    # Pattern: MCT-173 BackfillManifest pidfile 동형 (ADR-029 §11.7 정합).
+    _audit_dir = Path(root) / "audit"
+    _audit_dir.mkdir(parents=True, exist_ok=True)
+    _pidfile = _audit_dir / "historical-reclaim.pid"
+    _pidfile_fd = None
+
+    def _release_pidfile():
+        if _pidfile_fd is not None:
+            try:
+                import fcntl
+                fcntl.flock(_pidfile_fd, fcntl.LOCK_UN)
+                os.close(_pidfile_fd)
+            except Exception:
+                pass
+        try:
+            _pidfile.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    try:
+        import fcntl
+        _pidfile_fd = os.open(str(_pidfile), os.O_WRONLY | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(_pidfile_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            click.echo(
+                f"[ERROR] Another promote-historical instance is running (pidfile={_pidfile}). "
+                "Wait for it to complete or remove the pidfile if it is stale. (MCT-204 INV-G)",
+                err=True,
+            )
+            os.close(_pidfile_fd)
+            sys.exit(2)
+        # Write PID for visibility
+        os.write(_pidfile_fd, str(os.getpid()).encode())
+        atexit.register(_release_pidfile)
+        # SIGTERM handler: release pidfile before exit
+        def _sigterm_handler(signum, frame):  # type: ignore[type-arg]
+            _release_pidfile()
+            sys.exit(0)
+        signal.signal(signal.SIGTERM, _sigterm_handler)
+    except ImportError:
+        # Windows: fcntl not available — skip pidfile (best-effort on Windows dev)
+        log.warning("[promote-historical] fcntl not available — pidfile lock skipped (Windows)")
+        _pidfile_fd = None
 
     # NAS dual-write (same env-var contract as compact_cmd)
     dual_writer = None
@@ -991,23 +1058,31 @@ def promote_historical_cmd(
         root, start_date, end_date, exchange or "*", channel,
     )
 
-    counts = run_historical_promotion(
-        Path(root),
-        start_date=start_date,
-        end_date=end_date,
-        dual_writer=dual_writer,
-        exchange=exchange,
-        channel=channel,
-    )
+    try:
+        counts = run_historical_promotion(
+            Path(root),
+            start_date=start_date,
+            end_date=end_date,
+            dual_writer=dual_writer,
+            exchange=exchange,
+            channel=channel,
+        )
+    except ValueError as exc:
+        # INV-B abort from run_historical_promotion (double guard)
+        click.echo(f"[ERROR] {exc}", err=True)
+        sys.exit(2)
 
     click.echo(f"[promote-historical] {counts}")
     log.info(
-        "[promote-historical] DONE partitions=%d l2=%d l3=%d skipped=%d errors=%d",
+        "[promote-historical] DONE partitions=%d l2=%d l3=%d skipped=%d errors=%d "
+        "l1_reclaim_ok=%d l1_bytes_freed=%d",
         counts["partitions_processed"],
         counts["l2_compacted"],
         counts["l3_compacted"],
         counts["skipped_no_l1"],
         counts["errors"],
+        counts.get("l1_reclaim_ok", 0),
+        counts.get("l1_bytes_freed", 0),
     )
 
     sys.exit(0 if counts["errors"] == 0 else 1)

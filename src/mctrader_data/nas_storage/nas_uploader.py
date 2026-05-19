@@ -228,9 +228,13 @@ class NASUploader:
                         aws_access_key_id=self._access_key,
                         aws_secret_access_key=self._secret_key,
                         config=Config(
-                            retries={"max_attempts": 1, "mode": "standard"},
-                            connect_timeout=10,
-                            read_timeout=120,
+                            # MCT-204 Layer 2 (P0 #2): boto3 timeout박제 — root cause fix.
+                            # NAS GET hang (silent stall) 의 진정 원인 = boto3 default timeout=∞.
+                            # 120s read_timeout 적용 시 worker thread 자연 release.
+                            # ADR-027 §D5 INCIDENT-2026-05-19 amendment "silent stall 차단" base layer.
+                            retries={"max_attempts": 3, "mode": "standard"},
+                            connect_timeout=30,   # MCT-204: 10→30s (NAS LAN 환경 안전 margin)
+                            read_timeout=120,     # MCT-204: NAS GET hang 차단 (default ∞ → 120s)
                         ),
                     )
         return self.__client

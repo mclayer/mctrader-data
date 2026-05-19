@@ -172,6 +172,33 @@ compactor_tier_pending_segments = Gauge(
     ["tier"],
 )
 
+# ---------------------------------------------------------------------------
+# MCT-204: compactor _tick stall isolation + historical L1 reclaim metrics
+# ---------------------------------------------------------------------------
+
+compactor_cleanup_cycle_delay_seconds = Gauge(
+    "mctrader_compactor_cleanup_cycle_delay_seconds",
+    "Seconds since last successful legacy cleanup cycle completion (AC-1 target: steady state ≤ 300s).",
+)
+
+compactor_step_stall_seconds = Gauge(
+    "mctrader_compactor_step_stall_seconds",
+    "Elapsed seconds at the moment a compactor step was dropped due to timeout (INV-E).",
+    ["step"],
+)
+
+historical_l1_reclaim_total = Counter(
+    "mctrader_historical_l1_reclaim_total",
+    "Historical L1 partition reclaim outcomes (MCT-204 AC-3).",
+    ["exchange", "channel", "outcome"],
+)
+
+compactor_l3_pending_partitions = Gauge(
+    "mctrader_l3_pending_partitions",
+    "Number of L2 partitions discovered per _run_l3 invocation (AC-4).",
+    ["exchange", "channel"],
+)
+
 compactor_writer_open_count = Gauge(
     "compactor_writer_open_count",
     "Currently open ParquetWriter instances per tier",
