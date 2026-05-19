@@ -428,8 +428,21 @@ class TestRunHistoricalPromotion:
     ) -> None:
         """Seed (upbit, KRW-XRP, snapshot, 2026-05-14); call twice.
 
-        Both runs must have errors==0.  Second run leverages NAS HEAD-then-PUT
-        sha256 idempotency: same content → skipped_idempotent → DualWriter committed.
+        MCT-204 Layer 3 idempotency contract (INV-D):
+          - 1st run: discovers the L1 partition, promotes L2+L3 to NAS, then reclaims
+            L1 local files (reclaim_partition_l1_local → outcome=ok, files unlinked,
+            .l1-promoted sentinel written).
+          - 2nd run: _discover_partitions_in_range finds no L1 parquets (all unlinked by
+            1st run's reclaim hook) → partitions_processed=0, l2/l3_compacted=0.
+            This is the correct MCT-204 idempotent behaviour: L1 already reclaimed,
+            NAS already holds L2+L3 — zero re-work, zero errors.
+
+        Previous contract (before MCT-204): 2nd run re-discovered the same L1 files and
+        re-uploaded them (DualWriter HEAD-then-PUT sha256 idempotency → committed again).
+        MCT-204 Layer 3 intentionally changes this: L1 files are removed after first
+        successful promotion, so 2nd run is a true no-op at the partition-discovery level.
+        INV-C (L2 NAS verify fail → L1 unlink 0) and INV-D (sentinel = re-entry guard)
+        guarantee that reclaim only fires after a fully committed L2+L3 dual-write.
         """
         from mctrader_data.compactor.runner import run_historical_promotion
         from mctrader_data.nas_storage.dual_writer import DualWriter
@@ -454,12 +467,21 @@ class TestRunHistoricalPromotion:
         r1 = _run()
         r2 = _run()
 
+        # 1st run: full promotion + L1 reclaim
         assert r1["errors"] == 0, f"1st run errors: {r1}"
-        assert r2["errors"] == 0, f"2nd run errors: {r2}"
         assert r1["partitions_processed"] == 1, r1
-        assert r2["partitions_processed"] == 1, r2
         assert r1["l2_compacted"] == 24, r1
-        assert r2["l2_compacted"] == 24, r2
+        assert r1["l1_reclaim_ok"] == 1, (
+            f"1st run must reclaim L1 partition (MCT-204 Layer 3 INV-D); got {r1}"
+        )
+
+        # 2nd run: L1 already reclaimed → _discover_partitions_in_range finds 0 parquets
+        # → partitions_processed=0, l2/l3_compacted=0, errors=0 (true no-op, INV-D).
+        # This IS idempotent: NAS already has L2+L3; re-running does no harm and no work.
+        assert r2["errors"] == 0, f"2nd run errors: {r2}"
+        assert r2["partitions_processed"] == 0, (
+            f"2nd run must find 0 partitions (L1 reclaimed by 1st run, INV-D); got {r2}"
+        )
 
     def test_channel_isolation_excludes_orderbookdepth(
         self, short_tmp: Path, minio_client, nas_uploader
