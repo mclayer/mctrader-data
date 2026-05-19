@@ -23,6 +23,8 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from botocore.exceptions import ClientError, EndpointConnectionError
+
 if TYPE_CHECKING:
     from mctrader_data.nas_storage.nas_uploader import NASUploader
 
@@ -155,20 +157,19 @@ def reclaim_partition_l1_local(
 
     # --- L2 NAS verify (INV-C: fail → L1 unlink 0) ---
     # Step 1: list_objects_v2 KeyCount > 0 (L2 partition exists on NAS)
+    # Use NASUploader.list_prefix_count() public helper — do NOT access private _s3 / __client.
+    # Direct _s3 access would raise AttributeError in production (boto3 client is name-mangled
+    # self.__client, accessed via self._get_client()). P0 #1 fix: use public helper.
     l2_prefix = (
         f"market/{channel}/schema_version={schema_ver}/tier=L2"
         f"/exchange={exchange}/symbol={symbol}/date={date_utc.isoformat()}/"
     )
     try:
-        resp = nas_uploader._s3.list_objects_v2(
-            Bucket=nas_uploader.bucket,
-            Prefix=l2_prefix,
-            MaxKeys=1,
-        )
-        key_count = resp.get("KeyCount", 0)
-    except Exception:
+        key_count = nas_uploader.list_prefix_count(l2_prefix, max_keys=1)
+    except (ClientError, EndpointConnectionError):
+        # Network / auth / S3 errors — fail safe: preserve L1, let next cycle retry.
         log.exception(
-            "[reclaim] NAS list_objects_v2 failed exchange=%s symbol=%s channel=%s date=%s",
+            "[reclaim] NAS list_prefix_count failed exchange=%s symbol=%s channel=%s date=%s",
             exchange, symbol, channel, date_utc,
         )
         return ReclaimOutcome(outcome="fail_verify")

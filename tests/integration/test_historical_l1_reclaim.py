@@ -17,6 +17,8 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
+from botocore.exceptions import ClientError, EndpointConnectionError
+
 from mctrader_data.compactor.historical_reclaim import reclaim_partition_l1_local
 
 
@@ -58,7 +60,7 @@ def _make_l2_dir(tmp_path: Path, date_utc: date) -> Path:
 def _make_nas_uploader(key_count: int = 1) -> MagicMock:
     uploader = MagicMock()
     uploader.bucket = "mctrader-market"
-    uploader._s3.list_objects_v2.return_value = {"KeyCount": key_count}
+    uploader.list_prefix_count.return_value = key_count
     return uploader
 
 
@@ -129,7 +131,7 @@ class TestHistoricalL1Reclaim:
         assert r2.outcome == "skip_sentinel"
         assert r2.files_unlinked == 0
         # NAS was only queried once (first run)
-        assert uploader._s3.list_objects_v2.call_count == 1
+        assert uploader.list_prefix_count.call_count == 1
 
     def test_sentinel_write_atomic(self, tmp_path):
         """INV-F: sentinel write uses os.replace (atomic, no partial sentinel)."""
@@ -180,7 +182,7 @@ class TestHistoricalL1Reclaim:
         assert result.outcome == "skip_forward_in_flight"
         for f in l1_files:
             assert f.exists()
-        uploader._s3.list_objects_v2.assert_not_called()
+        uploader.list_prefix_count.assert_not_called()
 
     def test_bytes_freed_counted(self, tmp_path):
         """AC-3: bytes_freed is accurately counted."""
@@ -198,11 +200,37 @@ class TestHistoricalL1Reclaim:
 
         assert result.bytes_freed == total_expected
 
-    def test_nas_exception_returns_fail_verify(self, tmp_path):
-        """NAS list_objects_v2 exception → fail_verify, L1 preserved."""
+    def test_nas_client_error_returns_fail_verify(self, tmp_path):
+        """NAS ClientError (S3 network/auth error) → fail_verify, L1 preserved.
+
+        Uses ClientError (not bare Exception) — historical_reclaim.py catches
+        (ClientError, EndpointConnectionError) only, per P0 #1 FIX (ADR-027 §D5 정합:
+        programming errors like AttributeError are NOT swallowed).
+        """
         l1_files = _make_l1_files(tmp_path, HISTORICAL, count=2)
         uploader = _make_nas_uploader()
-        uploader._s3.list_objects_v2.side_effect = Exception("network error")
+        # Simulate S3 network-level error (ClientError)
+        uploader.list_prefix_count.side_effect = ClientError(
+            {"Error": {"Code": "503", "Message": "Service Unavailable"}},
+            "ListObjectsV2",
+        )
+
+        result = reclaim_partition_l1_local(
+            root=tmp_path, nas_uploader=uploader, exchange=EXCHANGE,
+            symbol=SYMBOL, channel=CHANNEL, date_utc=HISTORICAL, now_snapshot=TODAY,
+        )
+
+        assert result.outcome == "fail_verify"
+        for f in l1_files:
+            assert f.exists()
+
+    def test_nas_endpoint_error_returns_fail_verify(self, tmp_path):
+        """NAS EndpointConnectionError (NAS unreachable) → fail_verify, L1 preserved."""
+        l1_files = _make_l1_files(tmp_path, HISTORICAL, count=2)
+        uploader = _make_nas_uploader()
+        uploader.list_prefix_count.side_effect = EndpointConnectionError(
+            endpoint_url="http://nas.local:9000"
+        )
 
         result = reclaim_partition_l1_local(
             root=tmp_path, nas_uploader=uploader, exchange=EXCHANGE,
